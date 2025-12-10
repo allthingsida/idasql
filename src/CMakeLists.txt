@@ -1,2 +1,5 @@
-# fix me; use xsql which brings sqlite with it.
-add_subdirectory(3rd_party)
+# src/CMakeLists.txt - idasql source directory
+# SQLite is now provided by xsql::xsql from libxsql
+
+# Add subdirectories (only lib, 3rd_party removed - sqlite comes from xsql)
+add_subdirectory(lib)

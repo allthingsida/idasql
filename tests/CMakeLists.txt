@@ -24,16 +24,22 @@ FetchContent_MakeAvailable(googletest)
 
 enable_testing()
 
-# SQLite library
-set(SQLITE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../src/3rd_party/sqlite)
-add_library(sqlite3_test STATIC ${SQLITE_DIR}/sqlite3.c)
-target_include_directories(sqlite3_test PUBLIC ${SQLITE_DIR})
-target_compile_definitions(sqlite3_test PRIVATE
-    SQLITE_ENABLE_FTS5
-    SQLITE_ENABLE_RTREE
-    SQLITE_ENABLE_JSON1
-    SQLITE_ENABLE_COLUMN_METADATA
-)
+# ============================================================================
+# xsql dependency (provides SQLite)
+# ============================================================================
+
+if(TARGET xsql::xsql)
+    # Part of monorepo - already available
+    message(STATUS "idasql_tests: Using xsql::xsql from parent project")
+else()
+    # Standalone build - add libxsql as subdirectory
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../libxsql/CMakeLists.txt")
+        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
+        message(STATUS "idasql_tests: Added libxsql from ../../libxsql")
+    else()
+        message(FATAL_ERROR "libxsql not found. Build as part of xsql monorepo or ensure ../../libxsql exists.")
+    endif()
+endif()
 
 # Test utility library
 add_library(test_utils STATIC
@@ -42,9 +48,8 @@ add_library(test_utils STATIC
 target_include_directories(test_utils PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/lib/include
-    ${SQLITE_DIR}
 )
-target_link_libraries(test_utils PUBLIC sqlite3_test)
+target_link_libraries(test_utils PUBLIC xsql::xsql)
 
 # Main test executable (idalib-based)
 ida_add_idalib(idasql_tests
@@ -61,7 +66,7 @@ ida_add_idalib(idasql_tests
 )
 target_link_libraries(idasql_tests PRIVATE
     GTest::gtest
-    sqlite3_test
+    xsql::xsql
     test_utils
 )
 target_include_directories(idasql_tests PRIVATE
