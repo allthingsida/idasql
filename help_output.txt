@@ -1,0 +1,22 @@
+IDASQL - SQL interface to IDA databases
+
+Usage: src\cli\build\Release\idasql.exe -s <database> [-q|-c <query>] [-f <file>] [-i] [--export <file>]
+
+Options:
+  -s <file>            IDA database file (.idb/.i64) [required]
+  -q <sql>             Execute single SQL query
+  -c <sql>             Execute single SQL query (alias for -q)
+  -f <file>            Execute SQL from file
+  -i                   Interactive REPL mode
+  --export <file>      Export tables to SQL file
+  --export-tables=X    Tables to export: * (all, default) or table1,table2,...
+  -h                   Show this help
+
+Examples:
+  src\cli\build\Release\idasql.exe -s test.i64 -q "SELECT name, size FROM funcs LIMIT 10"
+  src\cli\build\Release\idasql.exe -s test.i64 -f queries.sql
+  src\cli\build\Release\idasql.exe -s test.i64 -i
+  src\cli\build\Release\idasql.exe -s test.i64 --export dump.sql
+  src\cli\build\Release\idasql.exe -s test.i64 --export dump.sql --export-tables=funcs,segments,xrefs
+
+Thank you for using IDA. Have a nice day!
