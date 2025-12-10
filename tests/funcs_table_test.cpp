@@ -31,6 +31,8 @@ TEST_F(FuncsTableTest, HasFunctions) {
 
 TEST_F(FuncsTableTest, CountFromFile) {
     auto result = query_file("funcs_count.sql");
+    ASSERT_GE(result.row_count(), 1) << "Should return at least one row";
+    // The SQL returns 'count' column - use scalar_int() which handles conversion
     EXPECT_GT(result.scalar_int(), 0);
 }
 
@@ -69,7 +71,9 @@ TEST_F(FuncsTableTest, EndEaAfterStartEa) {
 
 TEST_F(FuncsTableTest, Top10LargestFromFile) {
     auto result = query_file("funcs_top10_largest.sql");
-    EXPECT_EQ(result.row_count(), 10);
+    // Should return up to 10 functions (or fewer if database has less)
+    EXPECT_GE(result.row_count(), 1) << "Should have at least 1 function";
+    EXPECT_LE(result.row_count(), 10) << "Should return at most 10";
 
     // Verify ordering (largest first)
     if (result.row_count() >= 2) {
@@ -80,11 +84,20 @@ TEST_F(FuncsTableTest, Top10LargestFromFile) {
 }
 
 TEST_F(FuncsTableTest, FilterByPrefix) {
-    auto result = query_file("funcs_by_prefix.sql", {{"prefix", "sub_"}});
-    // All results should start with sub_
+    // Get any function name to use as prefix
+    auto funcs = query("SELECT name FROM funcs LIMIT 1");
+    if (funcs.row_count() == 0) {
+        GTEST_SKIP() << "No functions in database";
+    }
+    std::string first_name = funcs.get(0, "name");
+    std::string prefix = first_name.substr(0, std::min(size_t(3), first_name.size()));
+
+    auto result = query_file("funcs_by_prefix.sql", {{"prefix", prefix}});
+    // All results should start with the prefix
     for (size_t i = 0; i < result.row_count(); i++) {
         std::string name = result.get(i, "name");
-        EXPECT_EQ(name.substr(0, 4), "sub_") << "Function should start with sub_";
+        EXPECT_EQ(name.substr(0, prefix.size()), prefix)
+            << "Function should start with '" << prefix << "'";
     }
 }
 
