@@ -18,39 +18,29 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include($ENV{IDASDK}/ida-cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
-# SQLite library (compile from source)
-set(SQLITE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../3rd_party/sqlite)
-add_library(sqlite3 STATIC ${SQLITE_DIR}/sqlite3.c)
-target_include_directories(sqlite3 PUBLIC ${SQLITE_DIR})
-target_compile_definitions(sqlite3 PRIVATE
-    SQLITE_ENABLE_FTS5
-    SQLITE_ENABLE_RTREE
-    SQLITE_ENABLE_JSON1
-    SQLITE_ENABLE_COLUMN_METADATA
-    SQLITE_THREADSAFE=1
-)
+# ============================================================================
+# xsql dependency (provides SQLite)
+# ============================================================================
 
-# Platform-specific SQLite settings
-if(UNIX AND NOT APPLE)
-    target_compile_definitions(sqlite3 PRIVATE SQLITE_HAVE_ISNAN)
-    target_link_libraries(sqlite3 PRIVATE pthread dl)
-elseif(APPLE)
-    target_compile_definitions(sqlite3 PRIVATE SQLITE_HAVE_ISNAN)
+if(TARGET xsql::xsql)
+    message(STATUS "idasql_cli: Using xsql::xsql from parent project")
+else()
+    # Standalone build - add libxsql
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql/CMakeLists.txt")
+        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
+        message(STATUS "idasql_cli: Added libxsql from ../../../libxsql")
+    else()
+        message(FATAL_ERROR "libxsql not found. Build as part of xsql monorepo.")
+    endif()
 endif()
-
-# libidasql (header-only interface library)
-add_library(idasql INTERFACE)
-target_include_directories(idasql INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include
-    ${SQLITE_DIR}
-)
 
 # idasql CLI executable
 ida_add_idalib(idasql_cli
     TYPE EXECUTABLE
     SOURCES main.cpp
 )
-target_link_libraries(idasql_cli PRIVATE idasql sqlite3)
+target_link_libraries(idasql_cli PRIVATE xsql::xsql)
+target_include_directories(idasql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include)
 target_compile_definitions(idasql_cli PRIVATE USE_IDA_SDK)
 
 # Output name: idasql (not idasql_cli)
