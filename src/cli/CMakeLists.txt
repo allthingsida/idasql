@@ -25,12 +25,18 @@ find_package(idasdk REQUIRED)
 if(TARGET xsql::xsql)
     message(STATUS "idasql_cli: Using xsql::xsql from parent project")
 else()
-    # Standalone build - add libxsql
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql/CMakeLists.txt")
+    # Standalone build - try find_package first, then fallback to sibling directory
+    find_package(xsql QUIET)
+    if(xsql_FOUND)
+        message(STATUS "idasql_cli: Using xsql::xsql via find_package")
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql/CMakeLists.txt")
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
         message(STATUS "idasql_cli: Added libxsql from ../../../libxsql")
     else()
-        message(FATAL_ERROR "libxsql not found. Build as part of xsql monorepo.")
+        message(FATAL_ERROR "libxsql not found. Either:\n"
+            "  1. Build as part of xsql monorepo\n"
+            "  2. Set xsql_DIR to the libxsql build directory\n"
+            "  3. Install libxsql and ensure it's in CMAKE_PREFIX_PATH")
     endif()
 endif()
 

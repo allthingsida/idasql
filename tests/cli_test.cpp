@@ -54,11 +54,16 @@ protected:
             idasql_path = "../../../src/cli/build/Release/idasql.exe";
         }
 
-        // Get test database path from environment
+        // Get test database path: environment variable or compile-time default
         const char* db_path = getenv("IDASQL_TEST_DB");
         if (db_path && *db_path) {
             cli_test_database_path() = db_path;
         }
+#ifdef IDASQL_TEST_DB_PATH
+        else {
+            cli_test_database_path() = IDASQL_TEST_DB_PATH;
+        }
+#endif
 
         // Get IDA SDK path for DLL loading
         const char* ida_sdk = getenv("IDASDK");

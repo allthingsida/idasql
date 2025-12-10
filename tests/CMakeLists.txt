@@ -74,6 +74,11 @@ target_include_directories(idasql_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/lib/include
 )
 
+# Define path to testdb.i64 for CLI tests
+target_compile_definitions(idasql_tests PRIVATE
+    IDASQL_TEST_DB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/testdb.i64"
+)
+
 # Register with CTest
 include(GoogleTest)
 gtest_discover_tests(idasql_tests)
