@@ -54,9 +54,15 @@ protected:
         const char* env_path = getenv("IDASQL_PATH");
         if (env_path && *env_path) {
             idasql_path = env_path;
-        } else {
-            // Search multiple configurations and relative paths
-            // Try both from tests/ dir and from tests/build/<config>/ dir
+        }
+#if defined(IDASQL_CLI_DIR) && defined(IDASQL_CLI_CONFIG)
+        // Use CMake-provided path (matches build configuration)
+        else {
+            idasql_path = std::string(IDASQL_CLI_DIR) + "/" + IDASQL_CLI_CONFIG + "/idasql.exe";
+        }
+#else
+        // Fallback: search multiple configs (when not built via CMake)
+        else {
             const char* configs[] = {"Release", "RelWithDebInfo", "Debug", "MinSizeRel"};
             const char* prefixes[] = {
                 "../src/cli/build/",           // from tests/
@@ -73,11 +79,11 @@ protected:
                 }
                 if (!idasql_path.empty()) break;
             }
-            // Fallback
             if (idasql_path.empty()) {
                 idasql_path = "../src/cli/build/RelWithDebInfo/idasql.exe";
             }
         }
+#endif
 
         // Get test database path: environment variable or compile-time default
         const char* db_path = getenv("IDASQL_TEST_DB");
