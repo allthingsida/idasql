@@ -18,8 +18,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include($ENV{IDASDK}/ida-cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
-# SQLite library (compile from source)
-set(SQLITE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../3rd_party/sqlite)
+# SQLite library (from libxsql)
+set(SQLITE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql/external/sqlite)
 add_library(sqlite3 STATIC ${SQLITE_DIR}/sqlite3.c)
 target_include_directories(sqlite3 PUBLIC ${SQLITE_DIR})
 target_compile_definitions(sqlite3 PRIVATE
