@@ -2,13 +2,7 @@
  * vtable.hpp - SQLite Virtual Table framework for IDA
  *
  * This file re-exports the xsql virtual table framework types into the idasql
- * namespace for backwards compatibility and convenience.
- *
- * Features:
- *   - Declarative column definitions using lambdas
- *   - Lazy iteration (index-based, no pre-collection)
- *   - Type-safe column accessors
- *   - Minimal boilerplate for new tables
+ * namespace for convenience.
  *
  * Example usage:
  *
@@ -44,18 +38,12 @@ using xsql::column_type_sql;
 // Column definition
 using xsql::ColumnDef;
 
-// Column factory helpers
-using xsql::make_column_int64;
-using xsql::make_column_int;
-using xsql::make_column_text;
-using xsql::make_column_double;
-
 // Virtual table definition
 using xsql::VTableDef;
 
 // SQLite virtual table implementation
-using xsql::GenericVtab;
-using xsql::GenericCursor;
+using xsql::Vtab;
+using xsql::Cursor;
 
 // Registration helpers
 using xsql::register_vtable;
@@ -65,26 +53,6 @@ using xsql::create_vtable;
 using xsql::VTableBuilder;
 using xsql::table;
 
-// ============================================================================
-// Writable virtual table support (from xsql)
-// ============================================================================
-
-// Writable column definition
-using xsql::WritableColumnDef;
-
-// Writable virtual table definition
-using xsql::WritableVTableDef;
-using xsql::WritableVtab;
-using xsql::WritableCursor;
-
-// Registration helpers for writable tables
-using xsql::register_writable_vtable;
-using xsql::create_writable_vtable;
-
-// Writable table builder (fluent API)
-using xsql::WritableVTableBuilder;
-using xsql::writable_table;
-
 } // namespace idasql
 
 // ============================================================================
@@ -92,13 +60,13 @@ using xsql::writable_table;
 // ============================================================================
 
 #define COLUMN_INT64(name, getter) \
-    idasql::make_column_int64(#name, getter)
+    .column_int64(#name, getter)
 
 #define COLUMN_INT(name, getter) \
-    idasql::make_column_int(#name, getter)
+    .column_int(#name, getter)
 
 #define COLUMN_TEXT(name, getter) \
-    idasql::make_column_text(#name, getter)
+    .column_text(#name, getter)
 
 #define COLUMN_DOUBLE(name, getter) \
-    idasql::make_column_double(#name, getter)
+    .column_double(#name, getter)
