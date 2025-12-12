@@ -44,14 +44,39 @@ protected:
     // IDA SDK bin path for DLL loading
     static std::string ida_bin_path;
 
+    static bool file_exists(const std::string& path) {
+        std::ifstream f(path);
+        return f.good();
+    }
+
     static void SetUpTestSuite() {
         // Try environment variable first
         const char* env_path = getenv("IDASQL_PATH");
         if (env_path && *env_path) {
             idasql_path = env_path;
         } else {
-            // Default to relative path from tests/build/Release directory
-            idasql_path = "../../../src/cli/build/Release/idasql.exe";
+            // Search multiple configurations and relative paths
+            // Try both from tests/ dir and from tests/build/<config>/ dir
+            const char* configs[] = {"Release", "RelWithDebInfo", "Debug", "MinSizeRel"};
+            const char* prefixes[] = {
+                "../src/cli/build/",           // from tests/
+                "../../src/cli/build/",        // from tests/build/
+                "../../../src/cli/build/"      // from tests/build/<config>/
+            };
+            for (const char* prefix : prefixes) {
+                for (const char* config : configs) {
+                    std::string path = std::string(prefix) + config + "/idasql.exe";
+                    if (file_exists(path)) {
+                        idasql_path = path;
+                        break;
+                    }
+                }
+                if (!idasql_path.empty()) break;
+            }
+            // Fallback
+            if (idasql_path.empty()) {
+                idasql_path = "../src/cli/build/RelWithDebInfo/idasql.exe";
+            }
         }
 
         // Get test database path: environment variable or compile-time default
