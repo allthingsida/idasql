@@ -65,6 +65,26 @@ using xsql::create_vtable;
 using xsql::VTableBuilder;
 using xsql::table;
 
+// ============================================================================
+// Writable virtual table support (from xsql)
+// ============================================================================
+
+// Writable column definition
+using xsql::WritableColumnDef;
+
+// Writable virtual table definition
+using xsql::WritableVTableDef;
+using xsql::WritableVtab;
+using xsql::WritableCursor;
+
+// Registration helpers for writable tables
+using xsql::register_writable_vtable;
+using xsql::create_writable_vtable;
+
+// Writable table builder (fluent API)
+using xsql::WritableVTableBuilder;
+using xsql::writable_table;
+
 } // namespace idasql
 
 // ============================================================================
