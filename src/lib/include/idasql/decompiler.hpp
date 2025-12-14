@@ -1877,6 +1877,46 @@ inline bool register_ctree_views(sqlite3* db) {
     sqlite3_exec(db, v_calls_in_ifs, nullptr, nullptr, &err);
     if (err) { sqlite3_free(err); err = nullptr; }
 
+    // ctree_v_leaf_funcs - Functions with no outgoing calls (terminal/leaf functions)
+    const char* v_leaf_funcs = R"(
+        CREATE VIEW IF NOT EXISTS ctree_v_leaf_funcs AS
+        SELECT f.address, f.name
+        FROM funcs f
+        LEFT JOIN ctree_v_calls c ON c.func_addr = f.address
+        GROUP BY f.address
+        HAVING COUNT(c.callee_addr) = 0
+    )";
+    sqlite3_exec(db, v_leaf_funcs, nullptr, nullptr, &err);
+    if (err) { sqlite3_free(err); err = nullptr; }
+
+    // ctree_v_call_chains - All call chain paths (root_func -> current_func at depth N)
+    // Enables queries like "find functions with call chains reaching depth 6"
+    const char* v_call_chains = R"(
+        CREATE VIEW IF NOT EXISTS ctree_v_call_chains AS
+        WITH RECURSIVE call_chain(root_func, current_func, depth) AS (
+            -- Base: direct calls from each function
+            SELECT func_addr, callee_addr, 1
+            FROM ctree_v_calls
+            WHERE callee_addr IS NOT NULL
+
+            UNION ALL
+
+            -- Recursive: follow callees deeper
+            SELECT cc.root_func, c.callee_addr, cc.depth + 1
+            FROM call_chain cc
+            JOIN ctree_v_calls c ON c.func_addr = cc.current_func
+            WHERE cc.depth < 10
+              AND c.callee_addr IS NOT NULL
+        )
+        SELECT
+            root_func,
+            current_func,
+            depth
+        FROM call_chain
+    )";
+    sqlite3_exec(db, v_call_chains, nullptr, nullptr, &err);
+    if (err) { sqlite3_free(err); err = nullptr; }
+
     return true;
 }
 

@@ -775,3 +775,126 @@ TEST_F(CtreeRecursiveCTETest, CallsInLoopsAndIfs) {
     // Query should execute - may or may not have results
     EXPECT_GE(result.row_count(), 0);
 }
+
+// ============================================================================
+// Leaf Functions View Tests
+// ============================================================================
+
+class CtreeLeafFuncsTest : public DecompilerTest {};
+
+TEST_F(CtreeLeafFuncsTest, ViewExists) {
+    auto result = query(
+        "SELECT name FROM sqlite_master WHERE type='view' AND name='ctree_v_leaf_funcs'"
+    );
+    EXPECT_EQ(result.row_count(), 1);
+}
+
+TEST_F(CtreeLeafFuncsTest, ViewHasRequiredColumns) {
+    auto result = query("SELECT address, name FROM ctree_v_leaf_funcs LIMIT 1");
+    EXPECT_EQ(result.col_count(), 2);
+}
+
+TEST_F(CtreeLeafFuncsTest, LeafFuncsHaveNoCalls) {
+    // Verify that functions in leaf_funcs actually have no calls
+    auto result = query(
+        "SELECT COUNT(*) as cnt FROM ctree_v_leaf_funcs lf "
+        "JOIN ctree_v_calls c ON c.func_addr = lf.address "
+        "WHERE c.callee_addr IS NOT NULL"
+    );
+    // Should be 0 - leaf functions shouldn't have any calls
+    EXPECT_EQ(result.scalar_int(), 0);
+}
+
+TEST_F(CtreeLeafFuncsTest, HasSomeLeafFuncs) {
+    // There should be at least some leaf functions in a typical binary
+    auto result = query("SELECT COUNT(*) as cnt FROM ctree_v_leaf_funcs");
+    EXPECT_GT(result.scalar_int(), 0);
+}
+
+TEST_F(CtreeLeafFuncsTest, LeafFuncsAreValidFunctions) {
+    // All leaf funcs should be in the funcs table
+    auto result = query(
+        "SELECT COUNT(*) as cnt FROM ctree_v_leaf_funcs lf "
+        "LEFT JOIN funcs f ON f.address = lf.address "
+        "WHERE f.address IS NULL"
+    );
+    EXPECT_EQ(result.scalar_int(), 0);
+}
+
+// ============================================================================
+// Call Chains View Tests
+// ============================================================================
+
+class CtreeCallChainsTest : public DecompilerTest {};
+
+TEST_F(CtreeCallChainsTest, ViewExists) {
+    auto result = query(
+        "SELECT name FROM sqlite_master WHERE type='view' AND name='ctree_v_call_chains'"
+    );
+    EXPECT_EQ(result.row_count(), 1);
+}
+
+TEST_F(CtreeCallChainsTest, ViewHasRequiredColumns) {
+    auto result = query("SELECT root_func, current_func, depth FROM ctree_v_call_chains LIMIT 1");
+    EXPECT_EQ(result.col_count(), 3);
+}
+
+TEST_F(CtreeCallChainsTest, DepthStartsAtOne) {
+    // Minimum depth should be 1 (direct call)
+    auto result = query("SELECT MIN(depth) as min_d FROM ctree_v_call_chains");
+    if (result.row_count() > 0 && result.get(0, "min_d") != "") {
+        EXPECT_EQ(result.scalar_int(), 1);
+    }
+}
+
+TEST_F(CtreeCallChainsTest, MaxDepthIsReasonable) {
+    // Max depth should be <= 10 (our safety limit)
+    auto result = query("SELECT MAX(depth) as max_d FROM ctree_v_call_chains");
+    if (result.row_count() > 0 && result.get(0, "max_d") != "") {
+        EXPECT_LE(result.scalar_int(), 10);
+    }
+}
+
+TEST_F(CtreeCallChainsTest, DepthDistribution) {
+    // Should have chains at various depths
+    auto result = query(
+        "SELECT depth, COUNT(*) as cnt FROM ctree_v_call_chains "
+        "GROUP BY depth ORDER BY depth"
+    );
+    EXPECT_GT(result.row_count(), 0);
+}
+
+TEST_F(CtreeCallChainsTest, RootFuncsAreValid) {
+    // All root_funcs should be in funcs table
+    auto result = query(
+        "SELECT COUNT(*) as cnt FROM ctree_v_call_chains cc "
+        "LEFT JOIN funcs f ON f.address = cc.root_func "
+        "WHERE f.address IS NULL"
+    );
+    EXPECT_EQ(result.scalar_int(), 0);
+}
+
+TEST_F(CtreeCallChainsTest, TargetQueryWithLeafFuncs) {
+    // The key use case: find functions with chains reaching leaf at specific depth
+    auto result = query(
+        "SELECT COUNT(DISTINCT cc.root_func) as cnt "
+        "FROM ctree_v_call_chains cc "
+        "JOIN ctree_v_leaf_funcs lf ON lf.address = cc.current_func "
+        "WHERE cc.depth >= 2"
+    );
+    // Query should work - may or may not have results
+    EXPECT_GE(result.row_count(), 1);
+}
+
+TEST_F(CtreeCallChainsTest, FunctionsWithDeepChains) {
+    // Find functions that have call chains of depth 3+
+    auto result = query(
+        "SELECT DISTINCT f.name "
+        "FROM ctree_v_call_chains cc "
+        "JOIN funcs f ON f.address = cc.root_func "
+        "WHERE cc.depth >= 3 "
+        "LIMIT 10"
+    );
+    // Query should execute successfully
+    EXPECT_GE(result.row_count(), 0);
+}
