@@ -32,13 +32,11 @@
 namespace idasql {
 namespace live {
 
-using namespace v2;
-
 // ============================================================================
 // NAMES_LIVE Table - Named locations with UPDATE support
 // ============================================================================
 
-inline LiveVTableDef define_names_live() {
+inline VTableDef define_names_live() {
     return live_table("names_live")
         .count([]() {
             return get_nlist_size();
@@ -100,7 +98,7 @@ struct CommentIterator {
     }
 };
 
-inline LiveVTableDef define_comments_live() {
+inline VTableDef define_comments_live() {
     return live_table("comments_live")
         .count([]() {
             CommentIterator::rebuild();
@@ -156,7 +154,7 @@ inline LiveVTableDef define_comments_live() {
 // FUNCS_LIVE Table - Functions with UPDATE support
 // ============================================================================
 
-inline LiveVTableDef define_funcs_live() {
+inline VTableDef define_funcs_live() {
     return live_table("funcs_live")
         .count([]() {
             return get_func_qty();
@@ -247,7 +245,7 @@ struct BookmarkIterator {
     }
 };
 
-inline LiveVTableDef define_bookmarks() {
+inline VTableDef define_bookmarks() {
     return live_table("bookmarks")
         .count([]() {
             BookmarkIterator::rebuild();
@@ -325,7 +323,7 @@ inline const char* get_item_type_str(ea_t ea) {
     return "other";
 }
 
-inline LiveVTableDef define_heads() {
+inline VTableDef define_heads() {
     return live_table("heads")
         .count([]() {
             HeadsIterator::rebuild();
@@ -669,11 +667,11 @@ inline bool register_instructions_table(sqlite3* db) {
 // ============================================================================
 
 struct LiveRegistry {
-    LiveVTableDef names_live;
-    LiveVTableDef comments_live;
-    LiveVTableDef funcs_live;
-    LiveVTableDef bookmarks;
-    LiveVTableDef heads;
+    VTableDef names_live;
+    VTableDef comments_live;
+    VTableDef funcs_live;
+    VTableDef bookmarks;
+    VTableDef heads;
     // Note: instructions uses specialized implementation with constraint support
 
     LiveRegistry()
@@ -685,20 +683,20 @@ struct LiveRegistry {
     {}
 
     void register_all(sqlite3* db) {
-        register_live_vtable(db, "ida_names_live", &names_live);
-        create_live_vtable(db, "names_live", "ida_names_live");
+        register_vtable(db, "ida_names_live", &names_live);
+        create_vtable(db, "names_live", "ida_names_live");
 
-        register_live_vtable(db, "ida_comments_live", &comments_live);
-        create_live_vtable(db, "comments_live", "ida_comments_live");
+        register_vtable(db, "ida_comments_live", &comments_live);
+        create_vtable(db, "comments_live", "ida_comments_live");
 
-        register_live_vtable(db, "ida_funcs_live", &funcs_live);
-        create_live_vtable(db, "funcs_live", "ida_funcs_live");
+        register_vtable(db, "ida_funcs_live", &funcs_live);
+        create_vtable(db, "funcs_live", "ida_funcs_live");
 
-        register_live_vtable(db, "ida_bookmarks", &bookmarks);
-        create_live_vtable(db, "bookmarks", "ida_bookmarks");
+        register_vtable(db, "ida_bookmarks", &bookmarks);
+        create_vtable(db, "bookmarks", "ida_bookmarks");
 
-        register_live_vtable(db, "ida_heads", &heads);
-        create_live_vtable(db, "heads", "ida_heads");
+        register_vtable(db, "ida_heads", &heads);
+        create_vtable(db, "heads", "ida_heads");
 
         // Optimized instructions table with func_addr constraint support
         register_instructions_table(db);

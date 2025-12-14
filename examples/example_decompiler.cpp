@@ -3,7 +3,7 @@
  *
  * Demonstrates:
  *   - Querying pseudocode table (line-by-line access)
- *   - Querying lvars table (local variables)
+ *   - Querying ctree_lvars table (local variables)
  *   - Using decompile() SQL function (full text)
  *   - Finding patterns in decompiled code
  *
@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
         "  COUNT(*) as total_vars, "
         "  SUM(CASE WHEN is_arg = 1 THEN 1 ELSE 0 END) as args, "
         "  SUM(CASE WHEN is_arg = 0 THEN 1 ELSE 0 END) as locals "
-        "FROM lvars "
+        "FROM ctree_lvars "
         "GROUP BY func_addr "
         "ORDER BY total_vars DESC "
         "LIMIT 10"
@@ -100,7 +100,7 @@ int main(int argc, char* argv[]) {
 
     auto var_types = session.query(
         "SELECT type, COUNT(*) as count "
-        "FROM lvars "
+        "FROM ctree_lvars "
         "WHERE type != '' "
         "GROUP BY type "
         "ORDER BY count DESC "
@@ -139,7 +139,7 @@ int main(int argc, char* argv[]) {
     std::string vars_sql =
         "SELECT name, type, size, "
         "       CASE WHEN is_arg = 1 THEN 'arg' ELSE 'local' END as kind "
-        "FROM lvars "
+        "FROM ctree_lvars "
         "WHERE func_addr = " + largest + " "
         "ORDER BY is_arg DESC, idx";
     auto vars = session.query(vars_sql.c_str());

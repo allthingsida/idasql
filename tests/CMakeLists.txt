@@ -63,6 +63,7 @@ ida_add_idalib(idasql_tests
         xrefs_table_test.cpp
         complex_queries_test.cpp
         cli_test.cpp
+        ctree_table_test.cpp
 )
 target_link_libraries(idasql_tests PRIVATE
     GTest::gtest
