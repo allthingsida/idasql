@@ -360,306 +360,196 @@ inline VTableDef define_heads() {
 }
 
 // ============================================================================
-// INSTRUCTIONS Table - Optimized with func_addr constraint support
+// INSTRUCTIONS Table - Using filter_eq framework for constraint pushdown
 // ============================================================================
 //
-// This table supports constraint pushdown for func_addr:
+// Supports constraint pushdown for func_addr:
 //   SELECT * FROM instructions WHERE func_addr = 0x401000
 //
-// When func_addr constraint is detected, only iterates that function's range
-// using func_item_iterator_t instead of scanning the entire database.
+// When func_addr constraint is detected, uses InstructionsInFuncIterator
+// with func_item_iterator_t instead of scanning the entire database.
 // ============================================================================
 
-#include <ua.hpp>  // For insn_t, decode_insn
+// Iterator for instructions within a single function (constraint pushdown)
+class InstructionsInFuncIterator : public xsql::RowIterator {
+    ea_t func_addr_;
+    func_t* pfn_ = nullptr;
+    func_item_iterator_t fii_;
+    bool started_ = false;
+    bool valid_ = false;
+    ea_t current_ea_ = BADADDR;
 
-// Column indices for instructions table
-enum InsnCol {
-    INSN_COL_ADDRESS = 0,
-    INSN_COL_ITYPE,
-    INSN_COL_MNEMONIC,
-    INSN_COL_SIZE,
-    INSN_COL_OPERAND0,
-    INSN_COL_OPERAND1,
-    INSN_COL_OPERAND2,
-    INSN_COL_DISASM,
-    INSN_COL_FUNC_ADDR
-};
+public:
+    explicit InstructionsInFuncIterator(ea_t func_addr)
+        : func_addr_(func_addr)
+    {
+        pfn_ = get_func(func_addr_);
+    }
 
-// Schema for instructions table
-static const char* INSN_SCHEMA =
-    "CREATE TABLE instructions("
-    "address INTEGER, "
-    "itype INTEGER, "
-    "mnemonic TEXT, "
-    "size INTEGER, "
-    "operand0 TEXT, "
-    "operand1 TEXT, "
-    "operand2 TEXT, "
-    "disasm TEXT, "
-    "func_addr INTEGER)";
+    bool next() override {
+        if (!pfn_) return false;
 
-// Virtual table structure
-struct InsnVtab {
-    sqlite3_vtab base;
-};
-
-// Cursor with filter state
-struct InsnCursor {
-    sqlite3_vtab_cursor base;
-
-    // Iteration state
-    std::vector<ea_t> addrs;   // Cached addresses to iterate
-    size_t idx;                // Current index
-
-    // Filter state
-    ea_t filter_func_addr;     // If non-zero, filter by this function
-    bool use_func_filter;
-};
-
-// Helper: Iterate all code in database
-static void collect_all_code(std::vector<ea_t>& addrs) {
-    addrs.clear();
-    ea_t ea = inf_get_min_ea();
-    ea_t max_ea = inf_get_max_ea();
-
-    while (ea < max_ea && ea != BADADDR) {
-        flags64_t f = get_flags(ea);
-        if (is_code(f)) {
-            addrs.push_back(ea);
+        if (!started_) {
+            started_ = true;
+            valid_ = fii_.set(pfn_);
+            if (valid_) current_ea_ = fii_.current();
+        } else if (valid_) {
+            valid_ = fii_.next_code();
+            if (valid_) current_ea_ = fii_.current();
         }
-        ea = next_head(ea, max_ea);
+        return valid_;
     }
-}
 
-// Helper: Iterate code within a function (OPTIMIZED)
-static void collect_func_code(std::vector<ea_t>& addrs, ea_t func_addr) {
-    addrs.clear();
-    func_t* f = get_func(func_addr);
-    if (!f) return;
-
-    // Use func_item_iterator_t for efficient function traversal
-    func_item_iterator_t fii;
-    for (bool ok = fii.set(f); ok; ok = fii.next_code()) {
-        addrs.push_back(fii.current());
+    bool eof() const override {
+        return started_ && !valid_;
     }
-}
 
-// xConnect
-static int insn_connect(sqlite3* db, void*, int, const char* const*,
-                        sqlite3_vtab** ppVtab, char**) {
-    int rc = sqlite3_declare_vtab(db, INSN_SCHEMA);
-    if (rc != SQLITE_OK) return rc;
-
-    auto* vtab = new InsnVtab();
-    memset(&vtab->base, 0, sizeof(vtab->base));
-    *ppVtab = &vtab->base;
-    return SQLITE_OK;
-}
-
-// xDisconnect
-static int insn_disconnect(sqlite3_vtab* pVtab) {
-    delete reinterpret_cast<InsnVtab*>(pVtab);
-    return SQLITE_OK;
-}
-
-// xOpen
-static int insn_open(sqlite3_vtab*, sqlite3_vtab_cursor** ppCursor) {
-    auto* cursor = new InsnCursor();
-    memset(&cursor->base, 0, sizeof(cursor->base));
-    cursor->idx = 0;
-    cursor->filter_func_addr = 0;
-    cursor->use_func_filter = false;
-    *ppCursor = &cursor->base;
-    return SQLITE_OK;
-}
-
-// xClose
-static int insn_close(sqlite3_vtab_cursor* pCursor) {
-    delete reinterpret_cast<InsnCursor*>(pCursor);
-    return SQLITE_OK;
-}
-
-// xBestIndex - detect func_addr constraint
-static int insn_best_index(sqlite3_vtab*, sqlite3_index_info* pInfo) {
-    int func_addr_idx = -1;
-
-    // Look for func_addr = ? constraint
-    for (int i = 0; i < pInfo->nConstraint; i++) {
-        const auto& c = pInfo->aConstraint[i];
-        if (c.usable && c.iColumn == INSN_COL_FUNC_ADDR && c.op == SQLITE_INDEX_CONSTRAINT_EQ) {
-            func_addr_idx = i;
-            break;
+    void column(sqlite3_context* ctx, int col) override {
+        switch (col) {
+            case 0: // address
+                sqlite3_result_int64(ctx, current_ea_);
+                break;
+            case 1: { // itype
+                insn_t insn;
+                if (decode_insn(&insn, current_ea_) > 0) {
+                    sqlite3_result_int(ctx, insn.itype);
+                } else {
+                    sqlite3_result_int(ctx, 0);
+                }
+                break;
+            }
+            case 2: { // mnemonic
+                qstring mnem;
+                print_insn_mnem(&mnem, current_ea_);
+                sqlite3_result_text(ctx, mnem.c_str(), -1, SQLITE_TRANSIENT);
+                break;
+            }
+            case 3: // size
+                sqlite3_result_int(ctx, get_item_size(current_ea_));
+                break;
+            case 4: // operand0
+            case 5: // operand1
+            case 6: { // operand2
+                qstring op;
+                print_operand(&op, current_ea_, col - 4);
+                tag_remove(&op);
+                sqlite3_result_text(ctx, op.c_str(), -1, SQLITE_TRANSIENT);
+                break;
+            }
+            case 7: { // disasm
+                qstring line;
+                generate_disasm_line(&line, current_ea_, 0);
+                tag_remove(&line);
+                sqlite3_result_text(ctx, line.c_str(), -1, SQLITE_TRANSIENT);
+                break;
+            }
+            case 8: // func_addr
+                sqlite3_result_int64(ctx, func_addr_);
+                break;
         }
     }
 
-    if (func_addr_idx >= 0) {
-        // Tell SQLite to pass func_addr value to xFilter
-        pInfo->aConstraintUsage[func_addr_idx].argvIndex = 1;
-        pInfo->aConstraintUsage[func_addr_idx].omit = 1;  // We handle this constraint
-        pInfo->idxNum = 1;  // Signal: use func_addr filter
-        pInfo->estimatedCost = 100.0;  // Low cost - function is small
-        pInfo->estimatedRows = 100;
-    } else {
-        pInfo->idxNum = 0;  // Signal: full scan
-        pInfo->estimatedCost = 100000.0;  // High cost - full database
-        pInfo->estimatedRows = 10000;
+    int64_t rowid() const override {
+        return static_cast<int64_t>(current_ea_);
+    }
+};
+
+// Cache for full instruction scan
+struct InstructionsCache {
+    static std::vector<ea_t>& get() {
+        static std::vector<ea_t> cache;
+        return cache;
     }
 
-    return SQLITE_OK;
-}
+    static void rebuild() {
+        auto& cache = get();
+        cache.clear();
 
-// xFilter - setup iteration based on constraints
-static int insn_filter(sqlite3_vtab_cursor* pCursor, int idxNum, const char*,
-                       int argc, sqlite3_value** argv) {
-    auto* cursor = reinterpret_cast<InsnCursor*>(pCursor);
-    cursor->idx = 0;
+        ea_t ea = inf_get_min_ea();
+        ea_t max_ea = inf_get_max_ea();
 
-    if (idxNum == 1 && argc >= 1) {
-        // OPTIMIZED: Filter by func_addr
-        cursor->filter_func_addr = sqlite3_value_int64(argv[0]);
-        cursor->use_func_filter = true;
-        collect_func_code(cursor->addrs, cursor->filter_func_addr);
-    } else {
-        // FULL SCAN: Iterate all code
-        cursor->use_func_filter = false;
-        cursor->filter_func_addr = 0;
-        collect_all_code(cursor->addrs);
+        while (ea < max_ea && ea != BADADDR) {
+            flags64_t f = get_flags(ea);
+            if (is_code(f)) {
+                cache.push_back(ea);
+            }
+            ea = next_head(ea, max_ea);
+        }
     }
+};
 
-    return SQLITE_OK;
-}
-
-// xNext
-static int insn_next(sqlite3_vtab_cursor* pCursor) {
-    auto* cursor = reinterpret_cast<InsnCursor*>(pCursor);
-    cursor->idx++;
-    return SQLITE_OK;
-}
-
-// xEof
-static int insn_eof(sqlite3_vtab_cursor* pCursor) {
-    auto* cursor = reinterpret_cast<InsnCursor*>(pCursor);
-    return cursor->idx >= cursor->addrs.size();
-}
-
-// xRowid
-static int insn_rowid(sqlite3_vtab_cursor* pCursor, sqlite3_int64* pRowid) {
-    auto* cursor = reinterpret_cast<InsnCursor*>(pCursor);
-    *pRowid = cursor->idx;
-    return SQLITE_OK;
-}
-
-// xColumn - fetch data on demand
-static int insn_column(sqlite3_vtab_cursor* pCursor, sqlite3_context* ctx, int col) {
-    auto* cursor = reinterpret_cast<InsnCursor*>(pCursor);
-
-    if (cursor->idx >= cursor->addrs.size()) {
-        sqlite3_result_null(ctx);
-        return SQLITE_OK;
-    }
-
-    ea_t ea = cursor->addrs[cursor->idx];
-
-    switch (col) {
-        case INSN_COL_ADDRESS:
-            sqlite3_result_int64(ctx, ea);
-            break;
-
-        case INSN_COL_ITYPE: {
+inline VTableDef define_instructions() {
+    return live_table("instructions")
+        .count([]() {
+            InstructionsCache::rebuild();
+            return InstructionsCache::get().size();
+        })
+        .column_int64("address", [](size_t i) -> int64_t {
+            auto& cache = InstructionsCache::get();
+            return i < cache.size() ? cache[i] : 0;
+        })
+        .column_int("itype", [](size_t i) -> int {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return 0;
             insn_t insn;
-            if (decode_insn(&insn, ea) > 0) {
-                sqlite3_result_int(ctx, insn.itype);
-            } else {
-                sqlite3_result_int(ctx, 0);
-            }
-            break;
-        }
-
-        case INSN_COL_MNEMONIC: {
+            if (decode_insn(&insn, cache[i]) > 0) return insn.itype;
+            return 0;
+        })
+        .column_text("mnemonic", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
             qstring mnem;
-            print_insn_mnem(&mnem, ea);
-            sqlite3_result_text(ctx, mnem.c_str(), -1, SQLITE_TRANSIENT);
-            break;
-        }
-
-        case INSN_COL_SIZE:
-            sqlite3_result_int(ctx, get_item_size(ea));
-            break;
-
-        case INSN_COL_OPERAND0:
-        case INSN_COL_OPERAND1:
-        case INSN_COL_OPERAND2: {
+            print_insn_mnem(&mnem, cache[i]);
+            return mnem.c_str();
+        })
+        .column_int("size", [](size_t i) -> int {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return 0;
+            return get_item_size(cache[i]);
+        })
+        .column_text("operand0", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
             qstring op;
-            print_operand(&op, ea, col - INSN_COL_OPERAND0);
+            print_operand(&op, cache[i], 0);
             tag_remove(&op);
-            sqlite3_result_text(ctx, op.c_str(), -1, SQLITE_TRANSIENT);
-            break;
-        }
-
-        case INSN_COL_DISASM: {
+            return op.c_str();
+        })
+        .column_text("operand1", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
+            qstring op;
+            print_operand(&op, cache[i], 1);
+            tag_remove(&op);
+            return op.c_str();
+        })
+        .column_text("operand2", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
+            qstring op;
+            print_operand(&op, cache[i], 2);
+            tag_remove(&op);
+            return op.c_str();
+        })
+        .column_text("disasm", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
             qstring line;
-            generate_disasm_line(&line, ea, 0);
+            generate_disasm_line(&line, cache[i], 0);
             tag_remove(&line);
-            sqlite3_result_text(ctx, line.c_str(), -1, SQLITE_TRANSIENT);
-            break;
-        }
-
-        case INSN_COL_FUNC_ADDR: {
-            // If filtered by func_addr, return the filter value (optimization)
-            if (cursor->use_func_filter) {
-                sqlite3_result_int64(ctx, cursor->filter_func_addr);
-            } else {
-                func_t* f = get_func(ea);
-                sqlite3_result_int64(ctx, f ? f->start_ea : 0);
-            }
-            break;
-        }
-
-        default:
-            sqlite3_result_null(ctx);
-    }
-
-    return SQLITE_OK;
-}
-
-// SQLite module for instructions table
-static sqlite3_module insn_module = {
-    0,                    // iVersion
-    insn_connect,         // xCreate
-    insn_connect,         // xConnect
-    insn_best_index,      // xBestIndex
-    insn_disconnect,      // xDisconnect
-    insn_disconnect,      // xDestroy
-    insn_open,            // xOpen
-    insn_close,           // xClose
-    insn_filter,          // xFilter
-    insn_next,            // xNext
-    insn_eof,             // xEof
-    insn_column,          // xColumn
-    insn_rowid,           // xRowid
-    nullptr,              // xUpdate
-    nullptr,              // xBegin
-    nullptr,              // xSync
-    nullptr,              // xCommit
-    nullptr,              // xRollback
-    nullptr,              // xFindFunction
-    nullptr,              // xRename
-    nullptr,              // xSavepoint
-    nullptr,              // xRelease
-    nullptr,              // xRollbackTo
-    nullptr               // xShadowName
-};
-
-// Register the optimized instructions table
-inline bool register_instructions_table(sqlite3* db) {
-    int rc = sqlite3_create_module(db, "ida_instructions", &insn_module, nullptr);
-    if (rc != SQLITE_OK) return false;
-
-    char* err = nullptr;
-    rc = sqlite3_exec(db, "CREATE VIRTUAL TABLE instructions USING ida_instructions;",
-                      nullptr, nullptr, &err);
-    if (err) sqlite3_free(err);
-    return rc == SQLITE_OK;
+            return line.c_str();
+        })
+        .column_int64("func_addr", [](size_t i) -> int64_t {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return 0;
+            func_t* f = get_func(cache[i]);
+            return f ? f->start_ea : 0;
+        })
+        // Constraint pushdown: func_addr = X uses optimized iterator
+        .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<InstructionsInFuncIterator>(static_cast<ea_t>(func_addr));
+        }, 100.0)
+        .build();
 }
 
 // ============================================================================
@@ -672,7 +562,7 @@ struct LiveRegistry {
     VTableDef funcs_live;
     VTableDef bookmarks;
     VTableDef heads;
-    // Note: instructions uses specialized implementation with constraint support
+    VTableDef instructions;
 
     LiveRegistry()
         : names_live(define_names_live())
@@ -680,6 +570,7 @@ struct LiveRegistry {
         , funcs_live(define_funcs_live())
         , bookmarks(define_bookmarks())
         , heads(define_heads())
+        , instructions(define_instructions())
     {}
 
     void register_all(sqlite3* db) {
@@ -698,8 +589,8 @@ struct LiveRegistry {
         register_vtable(db, "ida_heads", &heads);
         create_vtable(db, "heads", "ida_heads");
 
-        // Optimized instructions table with func_addr constraint support
-        register_instructions_table(db);
+        register_vtable(db, "ida_instructions", &instructions);
+        create_vtable(db, "instructions", "ida_instructions");
     }
 };
 

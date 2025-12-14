@@ -89,6 +89,113 @@ inline void rebuild_disasm_calls_cache() {
     }
 }
 
+// ============================================================================
+// DisasmCallsInFuncIterator - Constraint pushdown for func_addr = X
+// Iterates calls in a single function without building the full cache
+// ============================================================================
+
+class DisasmCallsInFuncIterator : public xsql::RowIterator {
+    ea_t func_addr_;
+    func_t* pfn_ = nullptr;
+    func_item_iterator_t fii_;
+    bool started_ = false;
+    bool valid_ = false;
+
+    // Current call info
+    ea_t current_ea_ = BADADDR;
+    ea_t callee_addr_ = BADADDR;
+    std::string callee_name_;
+
+    bool find_next_call() {
+        while (fii_.next_code()) {
+            ea_t ea = fii_.current();
+            insn_t insn;
+            if (decode_insn(&insn, ea) > 0 && is_call_insn(insn)) {
+                current_ea_ = ea;
+                callee_addr_ = get_first_fcref_from(ea);
+                if (callee_addr_ != BADADDR) {
+                    callee_name_ = safe_name(callee_addr_);
+                } else {
+                    callee_name_.clear();
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+public:
+    explicit DisasmCallsInFuncIterator(ea_t func_addr)
+        : func_addr_(func_addr)
+    {
+        pfn_ = get_func(func_addr_);
+    }
+
+    bool next() override {
+        if (!pfn_) return false;
+
+        if (!started_) {
+            started_ = true;
+            // Initialize iterator and find first code item
+            if (!fii_.set(pfn_)) {
+                valid_ = false;
+                return false;
+            }
+            // Check if first item is a call
+            ea_t ea = fii_.current();
+            insn_t insn;
+            if (decode_insn(&insn, ea) > 0 && is_call_insn(insn)) {
+                current_ea_ = ea;
+                callee_addr_ = get_first_fcref_from(ea);
+                if (callee_addr_ != BADADDR) {
+                    callee_name_ = safe_name(callee_addr_);
+                } else {
+                    callee_name_.clear();
+                }
+                valid_ = true;
+                return true;
+            }
+            // First item wasn't a call, find next
+            valid_ = find_next_call();
+            return valid_;
+        }
+
+        valid_ = find_next_call();
+        return valid_;
+    }
+
+    bool eof() const override {
+        return started_ && !valid_;
+    }
+
+    void column(sqlite3_context* ctx, int col) override {
+        switch (col) {
+            case 0: // func_addr
+                sqlite3_result_int64(ctx, static_cast<int64_t>(func_addr_));
+                break;
+            case 1: // ea
+                sqlite3_result_int64(ctx, static_cast<int64_t>(current_ea_));
+                break;
+            case 2: // callee_addr
+                if (callee_addr_ != BADADDR) {
+                    sqlite3_result_int64(ctx, static_cast<int64_t>(callee_addr_));
+                } else {
+                    sqlite3_result_int64(ctx, 0);
+                }
+                break;
+            case 3: // callee_name
+                sqlite3_result_text(ctx, callee_name_.c_str(),
+                                    static_cast<int>(callee_name_.size()),
+                                    SQLITE_TRANSIENT);
+                break;
+        }
+    }
+
+    int64_t rowid() const override {
+        return static_cast<int64_t>(current_ea_);
+    }
+};
+
 inline VTableDef define_disasm_calls() {
     rebuild_disasm_calls_cache();
 
@@ -116,6 +223,10 @@ inline VTableDef define_disasm_calls() {
             auto& cache = get_disasm_calls_cache();
             return i < cache.size() ? cache[i].callee_name : "";
         })
+        // Constraint pushdown: func_addr = X bypasses full cache
+        .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<DisasmCallsInFuncIterator>(static_cast<ea_t>(func_addr));
+        }, 10.0)  // Low cost - only iterates one function
         .build();
 }
 
