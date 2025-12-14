@@ -462,6 +462,104 @@ inline void rebuild_xrefs_cache() {
     }
 }
 
+// ============================================================================
+// Xref Iterators for Constraint Pushdown
+// ============================================================================
+
+/**
+ * Iterator for xrefs TO a specific address.
+ * Used when query has: WHERE to_ea = X
+ * Uses xrefblk_t::first_to/next_to for O(refs_to_X) instead of O(all_xrefs)
+ */
+class XrefsToIterator : public xsql::RowIterator {
+    ea_t target_;
+    xrefblk_t xb_;
+    bool started_ = false;
+    bool valid_ = false;
+
+public:
+    explicit XrefsToIterator(ea_t target) : target_(target) {}
+
+    bool next() override {
+        if (!started_) {
+            started_ = true;
+            valid_ = xb_.first_to(target_, XREF_ALL);
+        } else if (valid_) {
+            valid_ = xb_.next_to();
+        }
+        return valid_;
+    }
+
+    bool eof() const override {
+        return started_ && !valid_;
+    }
+
+    void column(sqlite3_context* ctx, int col) override {
+        if (!valid_) {
+            sqlite3_result_null(ctx);
+            return;
+        }
+        switch (col) {
+            case 0: sqlite3_result_int64(ctx, static_cast<int64_t>(xb_.from)); break;
+            case 1: sqlite3_result_int64(ctx, static_cast<int64_t>(target_)); break;
+            case 2: sqlite3_result_int(ctx, xb_.type); break;
+            case 3: sqlite3_result_int(ctx, xb_.iscode ? 1 : 0); break;
+            default: sqlite3_result_null(ctx); break;
+        }
+    }
+
+    int64_t rowid() const override {
+        return valid_ ? static_cast<int64_t>(xb_.from) : 0;
+    }
+};
+
+/**
+ * Iterator for xrefs FROM a specific address.
+ * Used when query has: WHERE from_ea = X
+ * Uses xrefblk_t::first_from/next_from for O(refs_from_X) instead of O(all_xrefs)
+ */
+class XrefsFromIterator : public xsql::RowIterator {
+    ea_t source_;
+    xrefblk_t xb_;
+    bool started_ = false;
+    bool valid_ = false;
+
+public:
+    explicit XrefsFromIterator(ea_t source) : source_(source) {}
+
+    bool next() override {
+        if (!started_) {
+            started_ = true;
+            valid_ = xb_.first_from(source_, XREF_ALL);
+        } else if (valid_) {
+            valid_ = xb_.next_from();
+        }
+        return valid_;
+    }
+
+    bool eof() const override {
+        return started_ && !valid_;
+    }
+
+    void column(sqlite3_context* ctx, int col) override {
+        if (!valid_) {
+            sqlite3_result_null(ctx);
+            return;
+        }
+        switch (col) {
+            case 0: sqlite3_result_int64(ctx, static_cast<int64_t>(source_)); break;
+            case 1: sqlite3_result_int64(ctx, static_cast<int64_t>(xb_.to)); break;
+            case 2: sqlite3_result_int(ctx, xb_.type); break;
+            case 3: sqlite3_result_int(ctx, xb_.iscode ? 1 : 0); break;
+            default: sqlite3_result_null(ctx); break;
+        }
+    }
+
+    int64_t rowid() const override {
+        return valid_ ? static_cast<int64_t>(xb_.to) : 0;
+    }
+};
+
 inline VTableDef define_xrefs() {
     rebuild_xrefs_cache();
 
@@ -486,6 +584,13 @@ inline VTableDef define_xrefs() {
             auto& cache = get_xrefs_cache();
             return i < cache.size() ? (cache[i].is_code ? 1 : 0) : 0;
         })
+        // Constraint pushdown filters
+        .filter_eq("to_ea", [](int64_t target) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<XrefsToIterator>(static_cast<ea_t>(target));
+        }, 10.0, 5.0)  // Cost: 10, Est rows: 5
+        .filter_eq("from_ea", [](int64_t source) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<XrefsFromIterator>(static_cast<ea_t>(source));
+        }, 10.0, 5.0)
         .build();
 }
 
@@ -527,6 +632,56 @@ inline void rebuild_blocks_cache() {
     }
 }
 
+/**
+ * Iterator for blocks in a specific function.
+ * Used when query has: WHERE func_ea = X
+ * Uses qflow_chart_t on single function for O(func_blocks) instead of O(all_blocks)
+ */
+class BlocksInFuncIterator : public xsql::RowIterator {
+    ea_t func_ea_;
+    qflow_chart_t fc_;
+    int idx_ = -1;
+    bool valid_ = false;
+
+public:
+    explicit BlocksInFuncIterator(ea_t func_ea) : func_ea_(func_ea) {
+        func_t* pfn = get_func(func_ea);
+        if (pfn) {
+            fc_.create("", pfn, pfn->start_ea, pfn->end_ea, FC_NOEXT);
+        }
+    }
+
+    bool next() override {
+        ++idx_;
+        valid_ = (idx_ < fc_.size());
+        return valid_;
+    }
+
+    bool eof() const override {
+        return idx_ >= 0 && !valid_;
+    }
+
+    void column(sqlite3_context* ctx, int col) override {
+        if (!valid_ || idx_ < 0 || idx_ >= fc_.size()) {
+            sqlite3_result_null(ctx);
+            return;
+        }
+        const qbasic_block_t& bb = fc_.blocks[idx_];
+        switch (col) {
+            case 0: sqlite3_result_int64(ctx, static_cast<int64_t>(func_ea_)); break;
+            case 1: sqlite3_result_int64(ctx, static_cast<int64_t>(bb.start_ea)); break;
+            case 2: sqlite3_result_int64(ctx, static_cast<int64_t>(bb.end_ea)); break;
+            case 3: sqlite3_result_int64(ctx, static_cast<int64_t>(bb.end_ea - bb.start_ea)); break;
+            default: sqlite3_result_null(ctx); break;
+        }
+    }
+
+    int64_t rowid() const override {
+        if (!valid_ || idx_ < 0 || idx_ >= fc_.size()) return 0;
+        return static_cast<int64_t>(fc_.blocks[idx_].start_ea);
+    }
+};
+
 inline VTableDef define_blocks() {
     rebuild_blocks_cache();
 
@@ -552,6 +707,10 @@ inline VTableDef define_blocks() {
             if (i >= cache.size()) return 0;
             return static_cast<int64_t>(cache[i].end_ea - cache[i].start_ea);
         })
+        // Constraint pushdown filter
+        .filter_eq("func_ea", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<BlocksInFuncIterator>(static_cast<ea_t>(func_addr));
+        }, 10.0, 10.0)  // Cost: 10, Est rows: 10 blocks per function
         .build();
 }
 
