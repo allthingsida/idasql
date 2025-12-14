@@ -1798,6 +1798,85 @@ inline bool register_ctree_views(sqlite3* db) {
     sqlite3_exec(db, v_deref, nullptr, nullptr, &err);
     if (err) { sqlite3_free(err); err = nullptr; }
 
+    // ctree_v_calls_in_loops - All calls inside loop constructs (recursive CTE)
+    const char* v_calls_in_loops = R"(
+        CREATE VIEW IF NOT EXISTS ctree_v_calls_in_loops AS
+        WITH RECURSIVE loop_contents(func_addr, item_id, loop_id, loop_op, depth) AS (
+            -- Base: all loops
+            SELECT func_addr, item_id, item_id, op_name, 0
+            FROM ctree
+            WHERE op_name IN ('cit_for', 'cit_while', 'cit_do')
+
+            UNION ALL
+
+            -- Recursive: all children of loop contents
+            SELECT c.func_addr, c.item_id, lc.loop_id, lc.loop_op, lc.depth + 1
+            FROM ctree c
+            JOIN loop_contents lc ON c.func_addr = lc.func_addr AND c.parent_id = lc.item_id
+            WHERE lc.depth < 50
+        )
+        SELECT DISTINCT
+            c.func_addr,
+            c.item_id,
+            c.ea,
+            c.depth AS call_depth,
+            lc.loop_id,
+            lc.loop_op,
+            x.obj_ea AS callee_addr,
+            x.obj_name AS callee_name,
+            x.helper_name
+        FROM loop_contents lc
+        JOIN ctree c ON c.func_addr = lc.func_addr AND c.item_id = lc.item_id
+        LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
+        WHERE c.op_name = 'cot_call'
+    )";
+    sqlite3_exec(db, v_calls_in_loops, nullptr, nullptr, &err);
+    if (err) { sqlite3_free(err); err = nullptr; }
+
+    // ctree_v_calls_in_ifs - All calls inside if branches (recursive CTE)
+    const char* v_calls_in_ifs = R"(
+        CREATE VIEW IF NOT EXISTS ctree_v_calls_in_ifs AS
+        WITH RECURSIVE if_contents(func_addr, item_id, if_id, branch, depth) AS (
+            -- Base: 'then' branches (ithen is child of if with then_id)
+            SELECT c.func_addr, c.item_id, p.item_id, 'then', 0
+            FROM ctree c
+            JOIN ctree p ON c.func_addr = p.func_addr AND c.item_id = p.then_id
+            WHERE p.op_name = 'cit_if'
+
+            UNION ALL
+
+            -- Base: 'else' branches
+            SELECT c.func_addr, c.item_id, p.item_id, 'else', 0
+            FROM ctree c
+            JOIN ctree p ON c.func_addr = p.func_addr AND c.item_id = p.else_id
+            WHERE p.op_name = 'cit_if'
+
+            UNION ALL
+
+            -- Recursive: all children
+            SELECT c.func_addr, c.item_id, ic.if_id, ic.branch, ic.depth + 1
+            FROM ctree c
+            JOIN if_contents ic ON c.func_addr = ic.func_addr AND c.parent_id = ic.item_id
+            WHERE ic.depth < 50
+        )
+        SELECT DISTINCT
+            c.func_addr,
+            c.item_id,
+            c.ea,
+            c.depth AS call_depth,
+            ic.if_id,
+            ic.branch,
+            x.obj_ea AS callee_addr,
+            x.obj_name AS callee_name,
+            x.helper_name
+        FROM if_contents ic
+        JOIN ctree c ON c.func_addr = ic.func_addr AND c.item_id = ic.item_id
+        LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
+        WHERE c.op_name = 'cot_call'
+    )";
+    sqlite3_exec(db, v_calls_in_ifs, nullptr, nullptr, &err);
+    if (err) { sqlite3_free(err); err = nullptr; }
+
     return true;
 }
 
