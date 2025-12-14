@@ -16,8 +16,10 @@ namespace testing {
 static std::vector<std::string> sql_search_paths = {
     "sql/",
     "../sql/",
+    "../../sql/",           // From build/RelWithDebInfo/ to build/sql/
     "../tests/sql/",
-    "../../tests/sql/"
+    "../../tests/sql/",
+    "../../../tests/sql/",  // From build/RelWithDebInfo/ to tests/sql/
 };
 
 std::string load_sql(const std::string& filename) {
