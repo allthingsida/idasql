@@ -65,6 +65,7 @@ ida_add_idalib(idasql_tests
         cli_test.cpp
         ctree_table_test.cpp
         disasm_table_test.cpp
+        types_table_test.cpp
 )
 target_link_libraries(idasql_tests PRIVATE
     GTest::gtest

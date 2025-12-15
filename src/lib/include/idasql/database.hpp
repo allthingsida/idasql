@@ -37,6 +37,7 @@
 #include <idasql/entities.hpp>
 #include <idasql/entities_live.hpp>
 #include <idasql/entities_ext.hpp>
+#include <idasql/entities_types.hpp>
 #include <idasql/metadata.hpp>
 #include <idasql/functions.hpp>
 #include <idasql/disassembly.hpp>
@@ -247,6 +248,7 @@ private:
     std::unique_ptr<metadata::MetadataRegistry> metadata_;
     std::unique_ptr<extended::ExtendedRegistry> extended_;
     std::unique_ptr<disassembly::DisassemblyRegistry> disassembly_;
+    std::unique_ptr<types::TypesRegistry> types_;
 #ifdef USE_HEXRAYS
     std::unique_ptr<decompiler::DecompilerRegistry> decompiler_;
 #endif
@@ -273,6 +275,9 @@ private:
 
         disassembly_ = std::make_unique<disassembly::DisassemblyRegistry>();
         disassembly_->register_all(db_);
+
+        types_ = std::make_unique<types::TypesRegistry>();
+        types_->register_all(db_);
 
         functions::register_sql_functions(db_);
 

@@ -30,6 +30,7 @@
 // IDASQL headers (new namespace)
 #include <idasql/vtable.hpp>
 #include <idasql/entities.hpp>
+#include <idasql/entities_types.hpp>
 #include <idasql/metadata.hpp>
 #include "test_utils.hpp"
 
@@ -96,6 +97,7 @@ protected:
     sqlite3* db_ = nullptr;
     entities::TableRegistry* entities_ = nullptr;
     metadata::MetadataRegistry* metadata_ = nullptr;
+    types::TypesRegistry* types_ = nullptr;
 
     static bool ida_initialized_;
     static bool database_loaded_;
@@ -134,13 +136,19 @@ protected:
         // Register metadata tables
         metadata_ = new metadata::MetadataRegistry();
         metadata_->register_all(db_);
+
+        // Register types tables
+        types_ = new types::TypesRegistry();
+        types_->register_all(db_);
     }
 
     void TearDown() override {
         delete entities_;
         delete metadata_;
+        delete types_;
         entities_ = nullptr;
         metadata_ = nullptr;
+        types_ = nullptr;
 
         if (db_) {
             sqlite3_close(db_);
