@@ -92,9 +92,11 @@ TEST_F(TypesTableTest, TypesMembersHasRequiredColumns) {
     auto result = query(
         "SELECT type_ordinal, type_name, member_index, member_name, "
         "offset, offset_bits, size, size_bits, member_type, "
-        "is_bitfield, is_baseclass, comment FROM types_members LIMIT 1"
+        "is_bitfield, is_baseclass, comment, "
+        "mt_is_struct, mt_is_union, mt_is_enum, mt_is_ptr, mt_is_array, "
+        "member_type_ordinal FROM types_members LIMIT 1"
     );
-    EXPECT_EQ(result.col_count(), 12) << "types_members table should have 12 columns";
+    EXPECT_EQ(result.col_count(), 18) << "types_members table should have 18 columns";
 }
 
 TEST_F(TypesTableTest, TypesMembersOffsetConsistency) {
@@ -109,6 +111,51 @@ TEST_F(TypesTableTest, TypesMembersOffsetConsistency) {
         EXPECT_EQ(offset, offset_bits / 8)
             << "offset should equal offset_bits / 8 for member: "
             << result.get(i, "member_name");
+    }
+}
+
+TEST_F(TypesTableTest, TypesMembersTypeClassificationBooleans) {
+    // Verify mt_is_* columns are 0 or 1
+    auto result = query(
+        "SELECT mt_is_struct, mt_is_union, mt_is_enum, mt_is_ptr, mt_is_array "
+        "FROM types_members LIMIT 20"
+    );
+    for (size_t i = 0; i < result.row_count(); i++) {
+        for (int col = 0; col < 5; col++) {
+            int val = std::stoi(result.get(i, col));
+            EXPECT_TRUE(val == 0 || val == 1)
+                << "mt_is_* column should be 0 or 1, got " << val;
+        }
+    }
+}
+
+TEST_F(TypesTableTest, TypesMembersEmbeddedStructsQuery) {
+    // The optimized query using mt_is_struct instead of string matching
+    auto result = query(
+        "SELECT type_name, COUNT(*) as total, "
+        "SUM(mt_is_struct + mt_is_union) as embedded "
+        "FROM types_members "
+        "WHERE mt_is_ptr = 0 "  // Embedded, not pointer-to
+        "GROUP BY type_ordinal "
+        "HAVING embedded > 0 "
+        "ORDER BY embedded DESC LIMIT 5"
+    );
+    // Just verify query works - results depend on test database
+    EXPECT_GE(result.row_count(), 0);
+}
+
+TEST_F(TypesTableTest, TypesMemberTypeOrdinalJoin) {
+    // Verify member_type_ordinal can join with types table
+    auto result = query(
+        "SELECT m.type_name, m.member_name, t.name as member_type_name, t.size "
+        "FROM types_members m "
+        "JOIN types t ON t.ordinal = m.member_type_ordinal "
+        "LIMIT 10"
+    );
+    // All joined rows should have matching ordinals
+    for (size_t i = 0; i < result.row_count(); i++) {
+        EXPECT_FALSE(result.get(i, "member_type_name").empty())
+            << "Joined type name should not be empty";
     }
 }
 

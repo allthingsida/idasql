@@ -225,11 +225,56 @@ struct MemberEntry {
     bool is_bitfield;
     bool is_baseclass;
     std::string comment;
+    // Member type classification (for efficient filtering)
+    bool mt_is_struct;
+    bool mt_is_union;
+    bool mt_is_enum;
+    bool mt_is_ptr;
+    bool mt_is_array;
+    int member_type_ordinal;  // -1 if member type not in local types
 };
 
 inline std::vector<MemberEntry>& get_members_cache() {
     static std::vector<MemberEntry> cache;
     return cache;
+}
+
+// Helper to get ordinal of a type by name
+inline int get_type_ordinal_by_name(til_t* ti, const char* type_name) {
+    if (!ti || !type_name || !type_name[0]) return -1;
+    uint32_t ord = get_type_ordinal(ti, type_name);
+    return (ord != 0) ? static_cast<int>(ord) : -1;
+}
+
+// Helper to classify member type and get ordinal
+inline void classify_member_type(const tinfo_t& mtype, til_t* ti,
+                                  bool& is_struct, bool& is_union, bool& is_enum,
+                                  bool& is_ptr, bool& is_array, int& type_ordinal) {
+    is_struct = false;
+    is_union = false;
+    is_enum = false;
+    is_ptr = mtype.is_ptr();
+    is_array = mtype.is_array();
+    type_ordinal = -1;
+
+    // Get the base type (dereference pointers/arrays to find underlying type)
+    tinfo_t base_type = mtype;
+    if (mtype.is_ptr()) {
+        base_type = mtype.get_pointed_object();
+    } else if (mtype.is_array()) {
+        base_type = mtype.get_array_element();
+    }
+
+    // Classify the base type
+    is_struct = base_type.is_struct();
+    is_union = base_type.is_union();
+    is_enum = base_type.is_enum();
+
+    // Try to get ordinal of the base type
+    qstring type_name;
+    if (base_type.get_type_name(&type_name) && !type_name.empty()) {
+        type_ordinal = get_type_ordinal_by_name(ti, type_name.c_str());
+    }
 }
 
 inline void rebuild_members_cache() {
@@ -267,6 +312,11 @@ inline void rebuild_members_cache() {
                         qstring type_str;
                         m.type.print(&type_str);
                         entry.member_type = type_str.c_str();
+
+                        // Classify member type
+                        classify_member_type(m.type, ti,
+                            entry.mt_is_struct, entry.mt_is_union, entry.mt_is_enum,
+                            entry.mt_is_ptr, entry.mt_is_array, entry.member_type_ordinal);
 
                         cache.push_back(entry);
                     }
@@ -341,6 +391,24 @@ public:
             case 9: sqlite3_result_int(ctx, m.is_bitfield() ? 1 : 0); break;
             case 10: sqlite3_result_int(ctx, m.is_baseclass() ? 1 : 0); break;
             case 11: sqlite3_result_text(ctx, m.cmt.c_str(), -1, SQLITE_TRANSIENT); break;
+            // Member type classification columns
+            case 12: case 13: case 14: case 15: case 16: case 17: {
+                // Classify the member type on-the-fly for iterator
+                bool mt_is_struct, mt_is_union, mt_is_enum, mt_is_ptr, mt_is_array;
+                int mt_ordinal;
+                classify_member_type(m.type, get_idati(),
+                    mt_is_struct, mt_is_union, mt_is_enum,
+                    mt_is_ptr, mt_is_array, mt_ordinal);
+                switch (col) {
+                    case 12: sqlite3_result_int(ctx, mt_is_struct ? 1 : 0); break;
+                    case 13: sqlite3_result_int(ctx, mt_is_union ? 1 : 0); break;
+                    case 14: sqlite3_result_int(ctx, mt_is_enum ? 1 : 0); break;
+                    case 15: sqlite3_result_int(ctx, mt_is_ptr ? 1 : 0); break;
+                    case 16: sqlite3_result_int(ctx, mt_is_array ? 1 : 0); break;
+                    case 17: sqlite3_result_int(ctx, mt_ordinal); break;
+                }
+                break;
+            }
             default: sqlite3_result_null(ctx); break;
         }
     }
@@ -403,6 +471,31 @@ inline VTableDef define_types_members() {
         .column_text("comment", [](size_t i) -> std::string {
             auto& cache = get_members_cache();
             return i < cache.size() ? cache[i].comment : "";
+        })
+        // Member type classification columns (for efficient filtering)
+        .column_int("mt_is_struct", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_struct ? 1 : 0) : 0;
+        })
+        .column_int("mt_is_union", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_union ? 1 : 0) : 0;
+        })
+        .column_int("mt_is_enum", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_enum ? 1 : 0) : 0;
+        })
+        .column_int("mt_is_ptr", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_ptr ? 1 : 0) : 0;
+        })
+        .column_int("mt_is_array", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_array ? 1 : 0) : 0;
+        })
+        .column_int("member_type_ordinal", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? cache[i].member_type_ordinal : -1;
         })
         // Constraint pushdown: type_ordinal = X
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
@@ -979,6 +1072,31 @@ inline VTableDef define_types_members_live() {
                 ref.udt[idx].cmt = new_comment;
                 return ref.save();
             })
+        // Member type classification columns (read-only)
+        .column_int("mt_is_struct", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_struct ? 1 : 0) : 0;
+        })
+        .column_int("mt_is_union", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_union ? 1 : 0) : 0;
+        })
+        .column_int("mt_is_enum", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_enum ? 1 : 0) : 0;
+        })
+        .column_int("mt_is_ptr", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_ptr ? 1 : 0) : 0;
+        })
+        .column_int("mt_is_array", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? (cache[i].mt_is_array ? 1 : 0) : 0;
+        })
+        .column_int("member_type_ordinal", [](size_t i) -> int {
+            auto& cache = get_members_cache();
+            return i < cache.size() ? cache[i].member_type_ordinal : -1;
+        })
         .deletable([](size_t i) -> bool {
             auto& cache = get_members_cache();
             if (i >= cache.size()) return false;
