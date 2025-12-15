@@ -97,7 +97,7 @@ protected:
     sqlite3* db_ = nullptr;
     entities::TableRegistry* entities_ = nullptr;
     metadata::MetadataRegistry* metadata_ = nullptr;
-    types::TypesRegistry* types_ = nullptr;
+    types::TypesRegistryLive* types_ = nullptr;
 
     static bool ida_initialized_;
     static bool database_loaded_;
@@ -137,8 +137,8 @@ protected:
         metadata_ = new metadata::MetadataRegistry();
         metadata_->register_all(db_);
 
-        // Register types tables
-        types_ = new types::TypesRegistry();
+        // Register types tables (with live tables for CRUD)
+        types_ = new types::TypesRegistryLive();
         types_->register_all(db_);
     }
 
