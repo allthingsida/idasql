@@ -178,68 +178,10 @@ struct ImportInfo {
     uval_t ord;
 };
 
-// Global import cache (rebuilt on filter)
-inline std::vector<ImportInfo>& get_import_cache() {
-    static std::vector<ImportInfo> cache;
-    return cache;
-}
-
-inline void rebuild_import_cache() {
-    auto& cache = get_import_cache();
-    cache.clear();
-
-    uint mod_qty = get_import_module_qty();
-    for (uint m = 0; m < mod_qty; m++) {
-        enum_import_names(m, [](ea_t ea, const char* name, uval_t ord, void* param) -> int {
-            int mod_idx = *static_cast<int*>(param);
-            ImportInfo info;
-            info.module_idx = mod_idx;
-            info.ea = ea;
-            info.name = name ? name : "";
-            info.ord = ord;
-            get_import_cache().push_back(info);
-            return 1;  // continue enumeration
-        }, &m);
-    }
-}
-
 inline std::string get_import_module_name_safe(int idx) {
     qstring name;
     get_import_module_name(&name, idx);
     return std::string(name.c_str());
-}
-
-inline VTableDef define_imports() {
-    // Build cache initially
-    rebuild_import_cache();
-
-    return table("imports")
-        .count([]() {
-            rebuild_import_cache();  // Refresh on each scan
-            return get_import_cache().size();
-        })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& cache = get_import_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].ea) : 0;
-        })
-        .column_text("name", [](size_t i) -> std::string {
-            auto& cache = get_import_cache();
-            return i < cache.size() ? cache[i].name : "";
-        })
-        .column_int64("ordinal", [](size_t i) -> int64_t {
-            auto& cache = get_import_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].ord) : 0;
-        })
-        .column_text("module", [](size_t i) -> std::string {
-            auto& cache = get_import_cache();
-            if (i >= cache.size()) return "";
-            return get_import_module_name_safe(cache[i].module_idx);
-        })
-        .column_int("module_idx", [](size_t i) -> int {
-            auto& cache = get_import_cache();
-            return i < cache.size() ? cache[i].module_idx : -1;
-        })
-        .build();
 }
 
 // ============================================================================
@@ -267,160 +209,10 @@ inline const char* get_string_type_name(int strtype) {
     }
 }
 
-// All strings cache
-inline std::vector<string_info_t>& get_strings_cache() {
-    static std::vector<string_info_t> cache;
-    return cache;
-}
-
-inline void rebuild_strings_cache() {
-    auto& cache = get_strings_cache();
-    cache.clear();
-
-    size_t n = get_strlist_qty();
-    for (size_t i = 0; i < n; i++) {
-        string_info_t si;
-        if (get_strlist_item(&si, i)) {
-            cache.push_back(si);
-        }
-    }
-}
-
 inline std::string get_string_content(const string_info_t& si) {
     qstring content;
     get_strlit_contents(&content, si.ea, si.length, si.type);
     return std::string(content.c_str());
-}
-
-// Main strings table with type information
-inline VTableDef define_strings() {
-    rebuild_strings_cache();
-
-    return table("strings")
-        .count([]() {
-            rebuild_strings_cache();
-            return get_strings_cache().size();
-        })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& cache = get_strings_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].ea) : 0;
-        })
-        .column_int("length", [](size_t i) -> int {
-            auto& cache = get_strings_cache();
-            return i < cache.size() ? static_cast<int>(cache[i].length) : 0;
-        })
-        .column_int("type", [](size_t i) -> int {
-            auto& cache = get_strings_cache();
-            return i < cache.size() ? static_cast<int>(cache[i].type) : 0;
-        })
-        .column_text("type_name", [](size_t i) -> std::string {
-            auto& cache = get_strings_cache();
-            if (i >= cache.size()) return "";
-            return get_string_type_name(cache[i].type);
-        })
-        .column_int("width", [](size_t i) -> int {
-            auto& cache = get_strings_cache();
-            if (i >= cache.size()) return 0;
-            return get_string_width(cache[i].type);
-        })
-        .column_text("content", [](size_t i) -> std::string {
-            auto& cache = get_strings_cache();
-            return i < cache.size() ? get_string_content(cache[i]) : "";
-        })
-        .build();
-}
-
-// ASCII strings only (width == 0)
-inline std::vector<string_info_t>& get_ascii_strings_cache() {
-    static std::vector<string_info_t> cache;
-    return cache;
-}
-
-inline void rebuild_ascii_strings_cache() {
-    auto& cache = get_ascii_strings_cache();
-    cache.clear();
-
-    size_t n = get_strlist_qty();
-    for (size_t i = 0; i < n; i++) {
-        string_info_t si;
-        if (get_strlist_item(&si, i)) {
-            if (get_string_width(si.type) == 0) {
-                cache.push_back(si);
-            }
-        }
-    }
-}
-
-inline VTableDef define_strings_ascii() {
-    rebuild_ascii_strings_cache();
-
-    return table("strings_ascii")
-        .count([]() {
-            rebuild_ascii_strings_cache();
-            return get_ascii_strings_cache().size();
-        })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& cache = get_ascii_strings_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].ea) : 0;
-        })
-        .column_int("length", [](size_t i) -> int {
-            auto& cache = get_ascii_strings_cache();
-            return i < cache.size() ? static_cast<int>(cache[i].length) : 0;
-        })
-        .column_text("content", [](size_t i) -> std::string {
-            auto& cache = get_ascii_strings_cache();
-            return i < cache.size() ? get_string_content(cache[i]) : "";
-        })
-        .build();
-}
-
-// Unicode strings only (width > 0: UTF-16 or UTF-32)
-inline std::vector<string_info_t>& get_unicode_strings_cache() {
-    static std::vector<string_info_t> cache;
-    return cache;
-}
-
-inline void rebuild_unicode_strings_cache() {
-    auto& cache = get_unicode_strings_cache();
-    cache.clear();
-
-    size_t n = get_strlist_qty();
-    for (size_t i = 0; i < n; i++) {
-        string_info_t si;
-        if (get_strlist_item(&si, i)) {
-            if (get_string_width(si.type) > 0) {  // UTF-16 or UTF-32
-                cache.push_back(si);
-            }
-        }
-    }
-}
-
-inline VTableDef define_strings_unicode() {
-    rebuild_unicode_strings_cache();
-
-    return table("strings_unicode")
-        .count([]() {
-            rebuild_unicode_strings_cache();
-            return get_unicode_strings_cache().size();
-        })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& cache = get_unicode_strings_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].ea) : 0;
-        })
-        .column_int("length", [](size_t i) -> int {
-            auto& cache = get_unicode_strings_cache();
-            return i < cache.size() ? static_cast<int>(cache[i].length) : 0;
-        })
-        .column_text("type_name", [](size_t i) -> std::string {
-            auto& cache = get_unicode_strings_cache();
-            if (i >= cache.size()) return "";
-            return get_string_type_name(cache[i].type);
-        })
-        .column_text("content", [](size_t i) -> std::string {
-            auto& cache = get_unicode_strings_cache();
-            return i < cache.size() ? get_string_content(cache[i]) : "";
-        })
-        .build();
 }
 
 // ============================================================================
@@ -434,33 +226,6 @@ struct XrefInfo {
     uint8_t type;
     bool is_code;
 };
-
-inline std::vector<XrefInfo>& get_xrefs_cache() {
-    static std::vector<XrefInfo> cache;
-    return cache;
-}
-
-inline void rebuild_xrefs_cache() {
-    auto& cache = get_xrefs_cache();
-    cache.clear();
-
-    size_t func_qty = get_func_qty();
-    for (size_t i = 0; i < func_qty; i++) {
-        func_t* func = getn_func(i);
-        if (!func) continue;
-
-        // Xrefs TO this function
-        xrefblk_t xb;
-        for (bool ok = xb.first_to(func->start_ea, XREF_ALL); ok; ok = xb.next_to()) {
-            XrefInfo xi;
-            xi.from_ea = xb.from;
-            xi.to_ea = func->start_ea;
-            xi.type = xb.type;
-            xi.is_code = xb.iscode;
-            cache.push_back(xi);
-        }
-    }
-}
 
 // ============================================================================
 // Xref Iterators for Constraint Pushdown
@@ -560,34 +325,57 @@ public:
     }
 };
 
-inline VTableDef define_xrefs() {
-    rebuild_xrefs_cache();
+/**
+ * Xrefs table with query-scoped cache.
+ *
+ * Features:
+ * - Cache lives in cursor (freed when query completes)
+ * - Lazy cache build (only if not using constraint pushdown)
+ * - Row count estimation (no cache rebuild in xBestIndex)
+ */
+inline CachedTableDef<XrefInfo> define_xrefs() {
+    return cached_table<XrefInfo>("xrefs")
+        // Estimate row count without building cache
+        .estimate_rows([]() -> size_t {
+            // Heuristic: ~10 xrefs per function on average
+            return get_func_qty() * 10;
+        })
+        // Cache builder (called lazily, only if pushdown doesn't handle query)
+        .cache_builder([](std::vector<XrefInfo>& cache) {
+            size_t func_qty = get_func_qty();
+            for (size_t i = 0; i < func_qty; i++) {
+                func_t* func = getn_func(i);
+                if (!func) continue;
 
-    return table("xrefs")
-        .count([]() {
-            rebuild_xrefs_cache();
-            return get_xrefs_cache().size();
+                // Xrefs TO this function
+                xrefblk_t xb;
+                for (bool ok = xb.first_to(func->start_ea, XREF_ALL); ok; ok = xb.next_to()) {
+                    XrefInfo xi;
+                    xi.from_ea = xb.from;
+                    xi.to_ea = func->start_ea;
+                    xi.type = xb.type;
+                    xi.is_code = xb.iscode;
+                    cache.push_back(xi);
+                }
+            }
         })
-        .column_int64("from_ea", [](size_t i) -> int64_t {
-            auto& cache = get_xrefs_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].from_ea) : 0;
+        // Column accessors take const XrefInfo& directly
+        .column_int64("from_ea", [](const XrefInfo& r) -> int64_t {
+            return static_cast<int64_t>(r.from_ea);
         })
-        .column_int64("to_ea", [](size_t i) -> int64_t {
-            auto& cache = get_xrefs_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].to_ea) : 0;
+        .column_int64("to_ea", [](const XrefInfo& r) -> int64_t {
+            return static_cast<int64_t>(r.to_ea);
         })
-        .column_int("type", [](size_t i) -> int {
-            auto& cache = get_xrefs_cache();
-            return i < cache.size() ? static_cast<int>(cache[i].type) : 0;
+        .column_int("type", [](const XrefInfo& r) -> int {
+            return static_cast<int>(r.type);
         })
-        .column_int("is_code", [](size_t i) -> int {
-            auto& cache = get_xrefs_cache();
-            return i < cache.size() ? (cache[i].is_code ? 1 : 0) : 0;
+        .column_int("is_code", [](const XrefInfo& r) -> int {
+            return r.is_code ? 1 : 0;
         })
-        // Constraint pushdown filters
+        // Constraint pushdown filters (same iterators as V1)
         .filter_eq("to_ea", [](int64_t target) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<XrefsToIterator>(static_cast<ea_t>(target));
-        }, 10.0, 5.0)  // Cost: 10, Est rows: 5
+        }, 10.0, 5.0)
         .filter_eq("from_ea", [](int64_t source) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<XrefsFromIterator>(static_cast<ea_t>(source));
         }, 10.0, 5.0)
@@ -603,34 +391,6 @@ struct BlockInfo {
     ea_t start_ea;
     ea_t end_ea;
 };
-
-inline std::vector<BlockInfo>& get_blocks_cache() {
-    static std::vector<BlockInfo> cache;
-    return cache;
-}
-
-inline void rebuild_blocks_cache() {
-    auto& cache = get_blocks_cache();
-    cache.clear();
-
-    size_t func_qty = get_func_qty();
-    for (size_t i = 0; i < func_qty; i++) {
-        func_t* func = getn_func(i);
-        if (!func) continue;
-
-        qflow_chart_t fc;
-        fc.create("", func, func->start_ea, func->end_ea, FC_NOEXT);
-
-        for (int j = 0; j < fc.size(); j++) {
-            const qbasic_block_t& bb = fc.blocks[j];
-            BlockInfo bi;
-            bi.func_ea = func->start_ea;
-            bi.start_ea = bb.start_ea;
-            bi.end_ea = bb.end_ea;
-            cache.push_back(bi);
-        }
-    }
-}
 
 /**
  * Iterator for blocks in a specific function.
@@ -682,35 +442,138 @@ public:
     }
 };
 
-inline VTableDef define_blocks() {
-    rebuild_blocks_cache();
+inline CachedTableDef<BlockInfo> define_blocks() {
+    return cached_table<BlockInfo>("blocks")
+        .estimate_rows([]() -> size_t {
+            // Heuristic: ~10 blocks per function
+            return get_func_qty() * 10;
+        })
+        .cache_builder([](std::vector<BlockInfo>& cache) {
+            size_t func_qty = get_func_qty();
+            for (size_t i = 0; i < func_qty; i++) {
+                func_t* func = getn_func(i);
+                if (!func) continue;
 
-    return table("blocks")
-        .count([]() {
-            rebuild_blocks_cache();
-            return get_blocks_cache().size();
+                qflow_chart_t fc;
+                fc.create("", func, func->start_ea, func->end_ea, FC_NOEXT);
+
+                for (int j = 0; j < fc.size(); j++) {
+                    const qbasic_block_t& bb = fc.blocks[j];
+                    BlockInfo bi;
+                    bi.func_ea = func->start_ea;
+                    bi.start_ea = bb.start_ea;
+                    bi.end_ea = bb.end_ea;
+                    cache.push_back(bi);
+                }
+            }
         })
-        .column_int64("func_ea", [](size_t i) -> int64_t {
-            auto& cache = get_blocks_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].func_ea) : 0;
+        .column_int64("func_ea", [](const BlockInfo& r) -> int64_t {
+            return static_cast<int64_t>(r.func_ea);
         })
-        .column_int64("start_ea", [](size_t i) -> int64_t {
-            auto& cache = get_blocks_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].start_ea) : 0;
+        .column_int64("start_ea", [](const BlockInfo& r) -> int64_t {
+            return static_cast<int64_t>(r.start_ea);
         })
-        .column_int64("end_ea", [](size_t i) -> int64_t {
-            auto& cache = get_blocks_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].end_ea) : 0;
+        .column_int64("end_ea", [](const BlockInfo& r) -> int64_t {
+            return static_cast<int64_t>(r.end_ea);
         })
-        .column_int64("size", [](size_t i) -> int64_t {
-            auto& cache = get_blocks_cache();
-            if (i >= cache.size()) return 0;
-            return static_cast<int64_t>(cache[i].end_ea - cache[i].start_ea);
+        .column_int64("size", [](const BlockInfo& r) -> int64_t {
+            return static_cast<int64_t>(r.end_ea - r.start_ea);
         })
-        // Constraint pushdown filter
         .filter_eq("func_ea", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<BlocksInFuncIterator>(static_cast<ea_t>(func_addr));
-        }, 10.0, 10.0)  // Cost: 10, Est rows: 10 blocks per function
+        }, 10.0, 10.0)
+        .build();
+}
+
+// ============================================================================
+// IMPORTS Table (query-scoped cache)
+// ============================================================================
+
+// Helper struct for import enumeration callback
+struct ImportEnumContext {
+    std::vector<ImportInfo>* cache;
+    int module_idx;
+};
+
+inline CachedTableDef<ImportInfo> define_imports() {
+    return cached_table<ImportInfo>("imports")
+        .estimate_rows([]() -> size_t {
+            // Estimate: ~100 imports per module
+            return get_import_module_qty() * 100;
+        })
+        .cache_builder([](std::vector<ImportInfo>& cache) {
+            uint mod_qty = get_import_module_qty();
+            for (uint m = 0; m < mod_qty; m++) {
+                ImportEnumContext ctx;
+                ctx.cache = &cache;
+                ctx.module_idx = static_cast<int>(m);
+
+                enum_import_names(m, [](ea_t ea, const char* name, uval_t ord, void* param) -> int {
+                    auto* ctx = static_cast<ImportEnumContext*>(param);
+                    ImportInfo info;
+                    info.module_idx = ctx->module_idx;
+                    info.ea = ea;
+                    info.name = name ? name : "";
+                    info.ord = ord;
+                    ctx->cache->push_back(info);
+                    return 1;  // continue enumeration
+                }, &ctx);
+            }
+        })
+        .column_int64("address", [](const ImportInfo& r) -> int64_t {
+            return static_cast<int64_t>(r.ea);
+        })
+        .column_text("name", [](const ImportInfo& r) -> std::string {
+            return r.name;
+        })
+        .column_int64("ordinal", [](const ImportInfo& r) -> int64_t {
+            return static_cast<int64_t>(r.ord);
+        })
+        .column_text("module", [](const ImportInfo& r) -> std::string {
+            return get_import_module_name_safe(r.module_idx);
+        })
+        .column_int("module_idx", [](const ImportInfo& r) -> int {
+            return r.module_idx;
+        })
+        .build();
+}
+
+// ============================================================================
+// STRINGS Table (query-scoped cache)
+// ============================================================================
+
+inline CachedTableDef<string_info_t> define_strings() {
+    return cached_table<string_info_t>("strings")
+        .estimate_rows([]() -> size_t {
+            return get_strlist_qty();
+        })
+        .cache_builder([](std::vector<string_info_t>& cache) {
+            size_t n = get_strlist_qty();
+            for (size_t i = 0; i < n; i++) {
+                string_info_t si;
+                if (get_strlist_item(&si, i)) {
+                    cache.push_back(si);
+                }
+            }
+        })
+        .column_int64("address", [](const string_info_t& r) -> int64_t {
+            return static_cast<int64_t>(r.ea);
+        })
+        .column_int("length", [](const string_info_t& r) -> int {
+            return static_cast<int>(r.length);
+        })
+        .column_int("type", [](const string_info_t& r) -> int {
+            return static_cast<int>(r.type);
+        })
+        .column_text("type_name", [](const string_info_t& r) -> std::string {
+            return get_string_type_name(r.type);
+        })
+        .column_int("width", [](const string_info_t& r) -> int {
+            return get_string_width(r.type);
+        })
+        .column_text("content", [](const string_info_t& r) -> std::string {
+            return get_string_content(r);
+        })
         .build();
 }
 
@@ -719,47 +582,54 @@ inline VTableDef define_blocks() {
 // ============================================================================
 
 struct TableRegistry {
+    // Index-based tables (use IDA's indexed access, no cache needed)
     VTableDef funcs;
     VTableDef segments;
     VTableDef names;
     VTableDef entries;
-    VTableDef imports;
-    VTableDef strings;
-    VTableDef strings_ascii;
-    VTableDef strings_unicode;
-    VTableDef xrefs;
-    VTableDef blocks;
+
+    // Cached tables (query-scoped cache - memory freed after query)
+    CachedTableDef<XrefInfo> xrefs;
+    CachedTableDef<BlockInfo> blocks;
+    CachedTableDef<ImportInfo> imports;
+    CachedTableDef<string_info_t> strings;
 
     TableRegistry()
         : funcs(define_funcs())
         , segments(define_segments())
         , names(define_names())
         , entries(define_entries())
-        , imports(define_imports())
-        , strings(define_strings())
-        , strings_ascii(define_strings_ascii())
-        , strings_unicode(define_strings_unicode())
         , xrefs(define_xrefs())
         , blocks(define_blocks())
+        , imports(define_imports())
+        , strings(define_strings())
     {}
 
     void register_all(sqlite3* db) {
-        register_and_create(db, "funcs", &funcs);
-        register_and_create(db, "segments", &segments);
-        register_and_create(db, "names", &names);
-        register_and_create(db, "entries", &entries);
-        register_and_create(db, "imports", &imports);
-        register_and_create(db, "strings", &strings);
-        register_and_create(db, "strings_ascii", &strings_ascii);
-        register_and_create(db, "strings_unicode", &strings_unicode);
-        register_and_create(db, "xrefs", &xrefs);
-        register_and_create(db, "blocks", &blocks);
+        // Index-based tables (use IDA's indexed access)
+        register_index_table(db, "funcs", &funcs);
+        register_index_table(db, "segments", &segments);
+        register_index_table(db, "names", &names);
+        register_index_table(db, "entries", &entries);
+
+        // Cached tables (query-scoped cache)
+        register_cached_table(db, "xrefs", &xrefs);
+        register_cached_table(db, "blocks", &blocks);
+        register_cached_table(db, "imports", &imports);
+        register_cached_table(db, "strings", &strings);
     }
 
 private:
-    void register_and_create(sqlite3* db, const char* name, const VTableDef* def) {
+    void register_index_table(sqlite3* db, const char* name, const VTableDef* def) {
         std::string module_name = std::string("ida_") + name;
         register_vtable(db, module_name.c_str(), def);
+        create_vtable(db, name, module_name.c_str());
+    }
+
+    template<typename RowData>
+    void register_cached_table(sqlite3* db, const char* name, const CachedTableDef<RowData>* def) {
+        std::string module_name = std::string("ida_") + name;
+        xsql::register_cached_vtable(db, module_name.c_str(), def);
         create_vtable(db, name, module_name.c_str());
     }
 };

@@ -4,21 +4,22 @@
  * This file re-exports the xsql virtual table framework types into the idasql
  * namespace for convenience.
  *
- * Example usage:
+ * Two table patterns are available:
+ *
+ * 1. Index-based tables (for IDA's indexed access like getn_func):
  *
  *   auto funcs_table = idasql::table("funcs")
  *       .count([]() { return get_func_qty(); })
- *       .column_int64("address", [](size_t i) {
- *           return getn_func(i)->start_ea;
- *       })
- *       .column_text("name", [](size_t i) {
- *           qstring n; get_func_name(&n, getn_func(i)->start_ea);
- *           return std::string(n.c_str());
- *       })
+ *       .column_int64("address", [](size_t i) { return getn_func(i)->start_ea; })
  *       .build();
  *
- *   idasql::register_vtable(db, "ida_funcs", &funcs_table);
- *   idasql::create_vtable(db, "funcs", "ida_funcs");
+ * 2. Cached tables (for enumeration-based data, cache freed after query):
+ *
+ *   auto xrefs_table = idasql::cached_table<XrefInfo>("xrefs")
+ *       .estimate_rows([]() { return get_func_qty() * 10; })
+ *       .cache_builder([](auto& cache) { /* populate */ })
+ *       .column_int64("from_ea", [](const XrefInfo& r) { return r.from_ea; })
+ *       .build();
  */
 
 #pragma once
@@ -35,10 +36,10 @@ namespace idasql {
 using xsql::ColumnType;
 using xsql::column_type_sql;
 
-// Column definition
+// Column definition (index-based)
 using xsql::ColumnDef;
 
-// Virtual table definition
+// Virtual table definition (index-based)
 using xsql::VTableDef;
 
 // SQLite virtual table implementation
@@ -49,9 +50,46 @@ using xsql::Cursor;
 using xsql::register_vtable;
 using xsql::create_vtable;
 
-// Table builder (fluent API)
+// Index-based table builder
 using xsql::VTableBuilder;
 using xsql::table;
+
+// ============================================================================
+// Cached Table API (query-scoped cache, freed after query)
+// ============================================================================
+
+// Row iterator for constraint pushdown
+using xsql::RowIterator;
+using xsql::FilterDef;
+using xsql::FILTER_NONE;
+
+// Cached column definition (row-typed)
+template<typename RowData>
+using CachedColumnDef = xsql::CachedColumnDef<RowData>;
+
+// Cached table definition
+template<typename RowData>
+using CachedTableDef = xsql::CachedTableDef<RowData>;
+
+// Cached cursor (owns cache)
+template<typename RowData>
+using CachedCursor = xsql::CachedCursor<RowData>;
+
+// Cached table registration
+template<typename RowData>
+inline bool register_cached_vtable(sqlite3* db, const char* module_name,
+                                   const CachedTableDef<RowData>* def) {
+    return xsql::register_cached_vtable(db, module_name, def);
+}
+
+// Cached table builder
+template<typename RowData>
+using CachedTableBuilder = xsql::CachedTableBuilder<RowData>;
+
+template<typename RowData>
+inline CachedTableBuilder<RowData> cached_table(const char* name) {
+    return xsql::cached_table<RowData>(name);
+}
 
 } // namespace idasql
 
