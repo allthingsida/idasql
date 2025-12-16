@@ -145,6 +145,7 @@ inline void rebuild_types_cache() {
 
 inline VTableDef define_types() {
     return table("types")
+        .on_modify(ida_undo_hook)
         .count([]() {
             rebuild_types_cache();
             return get_types_cache().size();
@@ -153,10 +154,27 @@ inline VTableDef define_types() {
             auto& cache = get_types_cache();
             return i < cache.size() ? cache[i].ordinal : 0;
         })
-        .column_text("name", [](size_t i) -> std::string {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].name : "";
-        })
+        .column_text_rw("name",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& cache = get_types_cache();
+                return i < cache.size() ? cache[i].name : "";
+            },
+            // Setter - rename type
+            [](size_t i, const char* new_name) -> bool {
+                auto& cache = get_types_cache();
+                if (i >= cache.size()) return false;
+
+                til_t* ti = get_idati();
+                if (!ti) return false;
+
+                // Get the type
+                tinfo_t tif;
+                if (!tif.get_numbered_type(ti, cache[i].ordinal)) return false;
+
+                // Rename it using tinfo_t::rename_type()
+                return tif.rename_type(new_name) == TERR_OK;
+            })
         .column_text("kind", [](size_t i) -> std::string {
             auto& cache = get_types_cache();
             return i < cache.size() ? cache[i].kind : "";
@@ -204,6 +222,15 @@ inline VTableDef define_types() {
         .column_text("resolved", [](size_t i) -> std::string {
             auto& cache = get_types_cache();
             return i < cache.size() ? cache[i].resolved : "";
+        })
+        .deletable([](size_t i) -> bool {
+            auto& cache = get_types_cache();
+            if (i >= cache.size()) return false;
+
+            til_t* ti = get_idati();
+            if (!ti) return false;
+
+            return del_numbered_type(ti, cache[i].ordinal);
         })
         .build();
 }
@@ -418,8 +445,34 @@ public:
     }
 };
 
+// Helper to get type and member by ordinal/index (for write operations)
+struct TypeMemberRef {
+    tinfo_t tif;
+    udt_type_data_t udt;
+    bool valid;
+    uint32_t ordinal;
+
+    TypeMemberRef(uint32_t ord) : valid(false), ordinal(ord) {
+        til_t* ti = get_idati();
+        if (!ti) return;
+        if (tif.get_numbered_type(ti, ord)) {
+            if (tif.is_struct() || tif.is_union()) {
+                valid = tif.get_udt_details(&udt);
+            }
+        }
+    }
+
+    bool save() {
+        if (!valid) return false;
+        tinfo_t new_tif;
+        new_tif.create_udt(udt, tif.is_union() ? BTF_UNION : BTF_STRUCT);
+        return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr);
+    }
+};
+
 inline VTableDef define_types_members() {
     return table("types_members")
+        .on_modify(ida_undo_hook)
         .count([]() {
             rebuild_members_cache();
             return get_members_cache().size();
@@ -436,10 +489,26 @@ inline VTableDef define_types_members() {
             auto& cache = get_members_cache();
             return i < cache.size() ? cache[i].member_index : 0;
         })
-        .column_text("member_name", [](size_t i) -> std::string {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].member_name : "";
-        })
+        .column_text_rw("member_name",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& cache = get_members_cache();
+                return i < cache.size() ? cache[i].member_name : "";
+            },
+            // Setter - rename member
+            [](size_t i, const char* new_name) -> bool {
+                auto& cache = get_members_cache();
+                if (i >= cache.size()) return false;
+
+                TypeMemberRef ref(cache[i].type_ordinal);
+                if (!ref.valid) return false;
+
+                int idx = cache[i].member_index;
+                if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) return false;
+
+                ref.udt[idx].name = new_name;
+                return ref.save();
+            })
         .column_int64("offset", [](size_t i) -> int64_t {
             auto& cache = get_members_cache();
             return i < cache.size() ? cache[i].offset : 0;
@@ -468,10 +537,26 @@ inline VTableDef define_types_members() {
             auto& cache = get_members_cache();
             return i < cache.size() ? (cache[i].is_baseclass ? 1 : 0) : 0;
         })
-        .column_text("comment", [](size_t i) -> std::string {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].comment : "";
-        })
+        .column_text_rw("comment",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& cache = get_members_cache();
+                return i < cache.size() ? cache[i].comment : "";
+            },
+            // Setter - update member comment
+            [](size_t i, const char* new_comment) -> bool {
+                auto& cache = get_members_cache();
+                if (i >= cache.size()) return false;
+
+                TypeMemberRef ref(cache[i].type_ordinal);
+                if (!ref.valid) return false;
+
+                int idx = cache[i].member_index;
+                if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) return false;
+
+                ref.udt[idx].cmt = new_comment;
+                return ref.save();
+            })
         // Member type classification columns (for efficient filtering)
         .column_int("mt_is_struct", [](size_t i) -> int {
             auto& cache = get_members_cache();
@@ -496,6 +581,19 @@ inline VTableDef define_types_members() {
         .column_int("member_type_ordinal", [](size_t i) -> int {
             auto& cache = get_members_cache();
             return i < cache.size() ? cache[i].member_type_ordinal : -1;
+        })
+        .deletable([](size_t i) -> bool {
+            auto& cache = get_members_cache();
+            if (i >= cache.size()) return false;
+
+            TypeMemberRef ref(cache[i].type_ordinal);
+            if (!ref.valid) return false;
+
+            int idx = cache[i].member_index;
+            if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) return false;
+
+            ref.udt.erase(ref.udt.begin() + idx);
+            return ref.save();
         })
         // Constraint pushdown: type_ordinal = X
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
@@ -622,8 +720,34 @@ public:
     }
 };
 
+// Helper to get enum type by ordinal (for write operations)
+struct EnumTypeRef {
+    tinfo_t tif;
+    enum_type_data_t ei;
+    bool valid;
+    uint32_t ordinal;
+
+    EnumTypeRef(uint32_t ord) : valid(false), ordinal(ord) {
+        til_t* ti = get_idati();
+        if (!ti) return;
+        if (tif.get_numbered_type(ti, ord)) {
+            if (tif.is_enum()) {
+                valid = tif.get_enum_details(&ei);
+            }
+        }
+    }
+
+    bool save() {
+        if (!valid) return false;
+        tinfo_t new_tif;
+        new_tif.create_enum(ei);
+        return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr);
+    }
+};
+
 inline VTableDef define_types_enum_values() {
     return table("types_enum_values")
+        .on_modify(ida_undo_hook)
         .count([]() {
             rebuild_enum_values_cache();
             return get_enum_values_cache().size();
@@ -640,21 +764,82 @@ inline VTableDef define_types_enum_values() {
             auto& cache = get_enum_values_cache();
             return i < cache.size() ? cache[i].value_index : 0;
         })
-        .column_text("value_name", [](size_t i) -> std::string {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? cache[i].value_name : "";
-        })
-        .column_int64("value", [](size_t i) -> int64_t {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? cache[i].value : 0;
-        })
+        .column_text_rw("value_name",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& cache = get_enum_values_cache();
+                return i < cache.size() ? cache[i].value_name : "";
+            },
+            // Setter - rename enum value
+            [](size_t i, const char* new_name) -> bool {
+                auto& cache = get_enum_values_cache();
+                if (i >= cache.size()) return false;
+
+                EnumTypeRef ref(cache[i].type_ordinal);
+                if (!ref.valid) return false;
+
+                int idx = cache[i].value_index;
+                if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
+
+                ref.ei[idx].name = new_name;
+                return ref.save();
+            })
+        .column_int64_rw("value",
+            // Getter
+            [](size_t i) -> int64_t {
+                auto& cache = get_enum_values_cache();
+                return i < cache.size() ? cache[i].value : 0;
+            },
+            // Setter - change enum value
+            [](size_t i, int64_t new_value) -> bool {
+                auto& cache = get_enum_values_cache();
+                if (i >= cache.size()) return false;
+
+                EnumTypeRef ref(cache[i].type_ordinal);
+                if (!ref.valid) return false;
+
+                int idx = cache[i].value_index;
+                if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
+
+                ref.ei[idx].value = static_cast<uint64_t>(new_value);
+                return ref.save();
+            })
         .column_int64("uvalue", [](size_t i) -> int64_t {
             auto& cache = get_enum_values_cache();
             return i < cache.size() ? static_cast<int64_t>(cache[i].uvalue) : 0;
         })
-        .column_text("comment", [](size_t i) -> std::string {
+        .column_text_rw("comment",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& cache = get_enum_values_cache();
+                return i < cache.size() ? cache[i].comment : "";
+            },
+            // Setter - update enum value comment
+            [](size_t i, const char* new_comment) -> bool {
+                auto& cache = get_enum_values_cache();
+                if (i >= cache.size()) return false;
+
+                EnumTypeRef ref(cache[i].type_ordinal);
+                if (!ref.valid) return false;
+
+                int idx = cache[i].value_index;
+                if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
+
+                ref.ei[idx].cmt = new_comment;
+                return ref.save();
+            })
+        .deletable([](size_t i) -> bool {
             auto& cache = get_enum_values_cache();
-            return i < cache.size() ? cache[i].comment : "";
+            if (i >= cache.size()) return false;
+
+            EnumTypeRef ref(cache[i].type_ordinal);
+            if (!ref.valid) return false;
+
+            int idx = cache[i].value_index;
+            if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
+
+            ref.ei.erase(ref.ei.begin() + idx);
+            return ref.save();
         })
         // Constraint pushdown: type_ordinal = X
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
@@ -927,459 +1112,6 @@ struct TypesRegistry {
 
         register_vtable(db, "ida_types_func_args", &types_func_args);
         create_vtable(db, "types_func_args", "ida_types_func_args");
-
-        // Create views
-        create_views(db);
-    }
-
-private:
-    void create_views(sqlite3* db) {
-        // Filtering views
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_structs AS SELECT * FROM types WHERE is_struct = 1");
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_unions AS SELECT * FROM types WHERE is_union = 1");
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_enums AS SELECT * FROM types WHERE is_enum = 1");
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_typedefs AS SELECT * FROM types WHERE is_typedef = 1");
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_funcs AS SELECT * FROM types WHERE is_func = 1");
-
-        // Backward compatibility - alias for old local_types table
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS local_types AS SELECT ordinal, name, definition AS type, "
-                     "is_struct, is_enum, is_typedef FROM types");
-    }
-
-    void exec_sql(sqlite3* db, const char* sql) {
-        char* err = nullptr;
-        sqlite3_exec(db, sql, nullptr, nullptr, &err);
-        if (err) sqlite3_free(err);
-    }
-};
-
-// ============================================================================
-// CRUD Operations - Live Types Tables
-// ============================================================================
-
-// ============================================================================
-// TYPES_MEMBERS_LIVE - Writable struct/union members
-// ============================================================================
-
-// Helper to get type and member by ordinal/index
-struct TypeMemberRef {
-    tinfo_t tif;
-    udt_type_data_t udt;
-    bool valid;
-    uint32_t ordinal;
-
-    TypeMemberRef(uint32_t ord) : valid(false), ordinal(ord) {
-        til_t* ti = get_idati();
-        if (!ti) return;
-        if (tif.get_numbered_type(ti, ord)) {
-            if (tif.is_struct() || tif.is_union()) {
-                valid = tif.get_udt_details(&udt);
-            }
-        }
-    }
-
-    bool save() {
-        if (!valid) return false;
-        tinfo_t new_tif;
-        new_tif.create_udt(udt, tif.is_union() ? BTF_UNION : BTF_STRUCT);
-        return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr);
-    }
-};
-
-inline VTableDef define_types_members_live() {
-    return live_table("types_members_live")
-        .count([]() {
-            rebuild_members_cache();
-            return get_members_cache().size();
-        })
-        .column_int("type_ordinal", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].type_ordinal : 0;
-        })
-        .column_text("type_name", [](size_t i) -> std::string {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].type_name : "";
-        })
-        .column_int("member_index", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].member_index : 0;
-        })
-        .column_text_rw("member_name",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_members_cache();
-                return i < cache.size() ? cache[i].member_name : "";
-            },
-            // Setter - rename member
-            [](size_t i, const char* new_name) -> bool {
-                auto& cache = get_members_cache();
-                if (i >= cache.size()) return false;
-
-                TypeMemberRef ref(cache[i].type_ordinal);
-                if (!ref.valid) return false;
-
-                int idx = cache[i].member_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) return false;
-
-                ref.udt[idx].name = new_name;
-                return ref.save();
-            })
-        .column_int64("offset", [](size_t i) -> int64_t {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].offset : 0;
-        })
-        .column_int64("offset_bits", [](size_t i) -> int64_t {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].offset_bits : 0;
-        })
-        .column_int64("size", [](size_t i) -> int64_t {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].size : 0;
-        })
-        .column_int64("size_bits", [](size_t i) -> int64_t {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].size_bits : 0;
-        })
-        .column_text("member_type", [](size_t i) -> std::string {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].member_type : "";
-        })
-        .column_int("is_bitfield", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].is_bitfield ? 1 : 0) : 0;
-        })
-        .column_int("is_baseclass", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].is_baseclass ? 1 : 0) : 0;
-        })
-        .column_text_rw("comment",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_members_cache();
-                return i < cache.size() ? cache[i].comment : "";
-            },
-            // Setter - update member comment
-            [](size_t i, const char* new_comment) -> bool {
-                auto& cache = get_members_cache();
-                if (i >= cache.size()) return false;
-
-                TypeMemberRef ref(cache[i].type_ordinal);
-                if (!ref.valid) return false;
-
-                int idx = cache[i].member_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) return false;
-
-                ref.udt[idx].cmt = new_comment;
-                return ref.save();
-            })
-        // Member type classification columns (read-only)
-        .column_int("mt_is_struct", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_struct ? 1 : 0) : 0;
-        })
-        .column_int("mt_is_union", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_union ? 1 : 0) : 0;
-        })
-        .column_int("mt_is_enum", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_enum ? 1 : 0) : 0;
-        })
-        .column_int("mt_is_ptr", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_ptr ? 1 : 0) : 0;
-        })
-        .column_int("mt_is_array", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_array ? 1 : 0) : 0;
-        })
-        .column_int("member_type_ordinal", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].member_type_ordinal : -1;
-        })
-        .deletable([](size_t i) -> bool {
-            auto& cache = get_members_cache();
-            if (i >= cache.size()) return false;
-
-            TypeMemberRef ref(cache[i].type_ordinal);
-            if (!ref.valid) return false;
-
-            int idx = cache[i].member_index;
-            if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) return false;
-
-            ref.udt.erase(ref.udt.begin() + idx);
-            return ref.save();
-        })
-        .build();
-}
-
-// ============================================================================
-// TYPES_ENUM_VALUES_LIVE - Writable enum values
-// ============================================================================
-
-struct EnumTypeRef {
-    tinfo_t tif;
-    enum_type_data_t ei;
-    bool valid;
-    uint32_t ordinal;
-
-    EnumTypeRef(uint32_t ord) : valid(false), ordinal(ord) {
-        til_t* ti = get_idati();
-        if (!ti) return;
-        if (tif.get_numbered_type(ti, ord)) {
-            if (tif.is_enum()) {
-                valid = tif.get_enum_details(&ei);
-            }
-        }
-    }
-
-    bool save() {
-        if (!valid) return false;
-        tinfo_t new_tif;
-        new_tif.create_enum(ei);
-        return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr);
-    }
-};
-
-inline VTableDef define_types_enum_values_live() {
-    return live_table("types_enum_values_live")
-        .count([]() {
-            rebuild_enum_values_cache();
-            return get_enum_values_cache().size();
-        })
-        .column_int("type_ordinal", [](size_t i) -> int {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? cache[i].type_ordinal : 0;
-        })
-        .column_text("type_name", [](size_t i) -> std::string {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? cache[i].type_name : "";
-        })
-        .column_int("value_index", [](size_t i) -> int {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? cache[i].value_index : 0;
-        })
-        .column_text_rw("value_name",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_enum_values_cache();
-                return i < cache.size() ? cache[i].value_name : "";
-            },
-            // Setter - rename enum value
-            [](size_t i, const char* new_name) -> bool {
-                auto& cache = get_enum_values_cache();
-                if (i >= cache.size()) return false;
-
-                EnumTypeRef ref(cache[i].type_ordinal);
-                if (!ref.valid) return false;
-
-                int idx = cache[i].value_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
-
-                ref.ei[idx].name = new_name;
-                return ref.save();
-            })
-        .column_int64_rw("value",
-            // Getter
-            [](size_t i) -> int64_t {
-                auto& cache = get_enum_values_cache();
-                return i < cache.size() ? cache[i].value : 0;
-            },
-            // Setter - change enum value
-            [](size_t i, int64_t new_value) -> bool {
-                auto& cache = get_enum_values_cache();
-                if (i >= cache.size()) return false;
-
-                EnumTypeRef ref(cache[i].type_ordinal);
-                if (!ref.valid) return false;
-
-                int idx = cache[i].value_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
-
-                ref.ei[idx].value = static_cast<uint64_t>(new_value);
-                return ref.save();
-            })
-        .column_int64("uvalue", [](size_t i) -> int64_t {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].uvalue) : 0;
-        })
-        .column_text_rw("comment",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_enum_values_cache();
-                return i < cache.size() ? cache[i].comment : "";
-            },
-            // Setter - update enum value comment
-            [](size_t i, const char* new_comment) -> bool {
-                auto& cache = get_enum_values_cache();
-                if (i >= cache.size()) return false;
-
-                EnumTypeRef ref(cache[i].type_ordinal);
-                if (!ref.valid) return false;
-
-                int idx = cache[i].value_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
-
-                ref.ei[idx].cmt = new_comment;
-                return ref.save();
-            })
-        .deletable([](size_t i) -> bool {
-            auto& cache = get_enum_values_cache();
-            if (i >= cache.size()) return false;
-
-            EnumTypeRef ref(cache[i].type_ordinal);
-            if (!ref.valid) return false;
-
-            int idx = cache[i].value_index;
-            if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
-
-            ref.ei.erase(ref.ei.begin() + idx);
-            return ref.save();
-        })
-        .build();
-}
-
-// ============================================================================
-// TYPES_LIVE - Writable types (rename, delete)
-// ============================================================================
-
-inline VTableDef define_types_live() {
-    return live_table("types_live")
-        .count([]() {
-            rebuild_types_cache();
-            return get_types_cache().size();
-        })
-        .column_int("ordinal", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].ordinal : 0;
-        })
-        .column_text_rw("name",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_types_cache();
-                return i < cache.size() ? cache[i].name : "";
-            },
-            // Setter - rename type
-            [](size_t i, const char* new_name) -> bool {
-                auto& cache = get_types_cache();
-                if (i >= cache.size()) return false;
-
-                til_t* ti = get_idati();
-                if (!ti) return false;
-
-                // Get the type
-                tinfo_t tif;
-                if (!tif.get_numbered_type(ti, cache[i].ordinal)) return false;
-
-                // Rename it using tinfo_t::rename_type()
-                return tif.rename_type(new_name) == TERR_OK;
-            })
-        .column_text("kind", [](size_t i) -> std::string {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].kind : "";
-        })
-        .column_int64("size", [](size_t i) -> int64_t {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].size : -1;
-        })
-        .column_int("alignment", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].alignment : 0;
-        })
-        .column_int("is_struct", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_struct ? 1 : 0) : 0;
-        })
-        .column_int("is_union", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_union ? 1 : 0) : 0;
-        })
-        .column_int("is_enum", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_enum ? 1 : 0) : 0;
-        })
-        .column_int("is_typedef", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_typedef ? 1 : 0) : 0;
-        })
-        .column_int("is_func", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_func ? 1 : 0) : 0;
-        })
-        .column_int("is_ptr", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_ptr ? 1 : 0) : 0;
-        })
-        .column_int("is_array", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_array ? 1 : 0) : 0;
-        })
-        .column_text("definition", [](size_t i) -> std::string {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].definition : "";
-        })
-        .column_text("resolved", [](size_t i) -> std::string {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].resolved : "";
-        })
-        .deletable([](size_t i) -> bool {
-            auto& cache = get_types_cache();
-            if (i >= cache.size()) return false;
-
-            til_t* ti = get_idati();
-            if (!ti) return false;
-
-            return del_numbered_type(ti, cache[i].ordinal);
-        })
-        .build();
-}
-
-// ============================================================================
-// Extended Types Registry (includes live tables)
-// ============================================================================
-
-struct TypesRegistryLive {
-    VTableDef types;
-    VTableDef types_members;
-    VTableDef types_enum_values;
-    VTableDef types_func_args;
-    VTableDef types_live;
-    VTableDef types_members_live;
-    VTableDef types_enum_values_live;
-
-    TypesRegistryLive()
-        : types(define_types())
-        , types_members(define_types_members())
-        , types_enum_values(define_types_enum_values())
-        , types_func_args(define_types_func_args())
-        , types_live(define_types_live())
-        , types_members_live(define_types_members_live())
-        , types_enum_values_live(define_types_enum_values_live())
-    {}
-
-    void register_all(sqlite3* db) {
-        // Read-only tables
-        register_vtable(db, "ida_types", &types);
-        create_vtable(db, "types", "ida_types");
-
-        register_vtable(db, "ida_types_members", &types_members);
-        create_vtable(db, "types_members", "ida_types_members");
-
-        register_vtable(db, "ida_types_enum_values", &types_enum_values);
-        create_vtable(db, "types_enum_values", "ida_types_enum_values");
-
-        register_vtable(db, "ida_types_func_args", &types_func_args);
-        create_vtable(db, "types_func_args", "ida_types_func_args");
-
-        // Live (writable) tables
-        register_vtable(db, "ida_types_live", &types_live);
-        create_vtable(db, "types_live", "ida_types_live");
-
-        register_vtable(db, "ida_types_members_live", &types_members_live);
-        create_vtable(db, "types_members_live", "ida_types_members_live");
-
-        register_vtable(db, "ida_types_enum_values_live", &types_enum_values_live);
-        create_vtable(db, "types_enum_values_live", "ida_types_enum_values_live");
 
         // Create views
         create_views(db);

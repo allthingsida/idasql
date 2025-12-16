@@ -17,7 +17,7 @@
  *
  *   auto xrefs_table = idasql::cached_table<XrefInfo>("xrefs")
  *       .estimate_rows([]() { return get_func_qty() * 10; })
- *       .cache_builder([](auto& cache) { /* populate */ })
+ *       .cache_builder([](auto& cache) { ... populate ... })
  *       .column_int64("from_ea", [](const XrefInfo& r) { return r.from_ea; })
  *       .build();
  */

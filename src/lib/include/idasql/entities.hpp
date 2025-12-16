@@ -16,6 +16,7 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
+#include <idasql/vtable_v2.hpp>  // For ida_undo_hook
 
 // IDA SDK headers
 #include <ida.hpp>
@@ -28,6 +29,7 @@
 #include <strlist.hpp>
 #include <gdl.hpp>
 #include <bytes.hpp>
+#include <lines.hpp>  // For comments (get_cmt, set_cmt)
 
 namespace idasql {
 namespace entities {
@@ -70,20 +72,29 @@ inline std::string safe_entry_name(size_t idx) {
 }
 
 // ============================================================================
-// FUNCS Table
+// FUNCS Table (with UPDATE/DELETE support)
 // ============================================================================
 
 inline VTableDef define_funcs() {
     return table("funcs")
+        .on_modify(ida_undo_hook)
         .count([]() { return get_func_qty(); })
         .column_int64("address", [](size_t i) -> int64_t {
             func_t* f = getn_func(i);
             return f ? static_cast<int64_t>(f->start_ea) : 0;
         })
-        .column_text("name", [](size_t i) -> std::string {
-            func_t* f = getn_func(i);
-            return f ? safe_func_name(f->start_ea) : "";
-        })
+        .column_text_rw("name",
+            // Getter
+            [](size_t i) -> std::string {
+                func_t* f = getn_func(i);
+                return f ? safe_func_name(f->start_ea) : "";
+            },
+            // Setter - rename function
+            [](size_t i, const char* new_name) -> bool {
+                func_t* f = getn_func(i);
+                if (!f) return false;
+                return set_name(f->start_ea, new_name, SN_CHECK) != 0;
+            })
         .column_int64("size", [](size_t i) -> int64_t {
             func_t* f = getn_func(i);
             return f ? static_cast<int64_t>(f->size()) : 0;
@@ -95,6 +106,11 @@ inline VTableDef define_funcs() {
         .column_int64("flags", [](size_t i) -> int64_t {
             func_t* f = getn_func(i);
             return f ? static_cast<int64_t>(f->flags) : 0;
+        })
+        .deletable([](size_t i) -> bool {
+            func_t* f = getn_func(i);
+            if (!f) return false;
+            return del_func(f->start_ea);
         })
         .build();
 }
@@ -130,18 +146,33 @@ inline VTableDef define_segments() {
 }
 
 // ============================================================================
-// NAMES Table (from nlist)
+// NAMES Table (with UPDATE support)
 // ============================================================================
 
 inline VTableDef define_names() {
     return table("names")
+        .on_modify(ida_undo_hook)
         .count([]() { return get_nlist_size(); })
         .column_int64("address", [](size_t i) -> int64_t {
             return static_cast<int64_t>(get_nlist_ea(i));
         })
-        .column_text("name", [](size_t i) -> std::string {
-            const char* n = get_nlist_name(i);
-            return n ? std::string(n) : "";
+        .column_text_rw("name",
+            // Getter
+            [](size_t i) -> std::string {
+                const char* n = get_nlist_name(i);
+                return n ? std::string(n) : "";
+            },
+            // Setter - rename the address
+            [](size_t i, const char* new_name) -> bool {
+                ea_t ea = get_nlist_ea(i);
+                if (ea == BADADDR) return false;
+                return set_name(ea, new_name, SN_CHECK) != 0;
+            })
+        .column_int("is_public", [](size_t i) -> int {
+            return is_public_name(get_nlist_ea(i)) ? 1 : 0;
+        })
+        .column_int("is_weak", [](size_t i) -> int {
+            return is_weak_name(get_nlist_ea(i)) ? 1 : 0;
         })
         .build();
 }
@@ -162,6 +193,92 @@ inline VTableDef define_entries() {
         })
         .column_text("name", [](size_t i) -> std::string {
             return safe_entry_name(i);
+        })
+        .build();
+}
+
+// ============================================================================
+// COMMENTS Table (with UPDATE/DELETE support)
+// ============================================================================
+
+// Helper to iterate addresses with comments
+struct CommentIterator {
+    static std::vector<ea_t>& get_addresses() {
+        static std::vector<ea_t> addrs;
+        return addrs;
+    }
+
+    static void rebuild() {
+        auto& addrs = get_addresses();
+        addrs.clear();
+
+        ea_t ea = inf_get_min_ea();
+        ea_t max_ea = inf_get_max_ea();
+
+        while (ea < max_ea) {
+            qstring cmt, rpt;
+            bool has_cmt = get_cmt(&cmt, ea, false) > 0;
+            bool has_rpt = get_cmt(&rpt, ea, true) > 0;
+
+            if (has_cmt || has_rpt) {
+                addrs.push_back(ea);
+            }
+
+            ea = next_head(ea, max_ea);
+            if (ea == BADADDR) break;
+        }
+    }
+};
+
+inline VTableDef define_comments() {
+    return table("comments")
+        .on_modify(ida_undo_hook)
+        .count([]() {
+            CommentIterator::rebuild();
+            return CommentIterator::get_addresses().size();
+        })
+        .column_int64("address", [](size_t i) -> int64_t {
+            auto& addrs = CommentIterator::get_addresses();
+            return i < addrs.size() ? addrs[i] : 0;
+        })
+        .column_text_rw("comment",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& addrs = CommentIterator::get_addresses();
+                if (i >= addrs.size()) return "";
+                qstring cmt;
+                get_cmt(&cmt, addrs[i], false);
+                return cmt.c_str();
+            },
+            // Setter
+            [](size_t i, const char* new_cmt) -> bool {
+                auto& addrs = CommentIterator::get_addresses();
+                if (i >= addrs.size()) return false;
+                return set_cmt(addrs[i], new_cmt, false);
+            })
+        .column_text_rw("rpt_comment",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& addrs = CommentIterator::get_addresses();
+                if (i >= addrs.size()) return "";
+                qstring cmt;
+                get_cmt(&cmt, addrs[i], true);
+                return cmt.c_str();
+            },
+            // Setter
+            [](size_t i, const char* new_cmt) -> bool {
+                auto& addrs = CommentIterator::get_addresses();
+                if (i >= addrs.size()) return false;
+                return set_cmt(addrs[i], new_cmt, true);
+            })
+        .deletable([](size_t i) -> bool {
+            // Delete both comments at this address
+            auto& addrs = CommentIterator::get_addresses();
+            if (i >= addrs.size()) return false;
+            ea_t ea = addrs[i];
+            set_cmt(ea, "", false);  // Delete regular
+            set_cmt(ea, "", true);   // Delete repeatable
+            return true;
         })
         .build();
 }
@@ -587,6 +704,7 @@ struct TableRegistry {
     VTableDef segments;
     VTableDef names;
     VTableDef entries;
+    VTableDef comments;
 
     // Cached tables (query-scoped cache - memory freed after query)
     CachedTableDef<XrefInfo> xrefs;
@@ -599,6 +717,7 @@ struct TableRegistry {
         , segments(define_segments())
         , names(define_names())
         , entries(define_entries())
+        , comments(define_comments())
         , xrefs(define_xrefs())
         , blocks(define_blocks())
         , imports(define_imports())
@@ -611,6 +730,7 @@ struct TableRegistry {
         register_index_table(db, "segments", &segments);
         register_index_table(db, "names", &names);
         register_index_table(db, "entries", &entries);
+        register_index_table(db, "comments", &comments);
 
         // Cached tables (query-scoped cache)
         register_cached_table(db, "xrefs", &xrefs);
