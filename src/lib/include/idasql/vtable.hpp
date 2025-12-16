@@ -94,6 +94,35 @@ inline CachedTableBuilder<RowData> cached_table(const char* name) {
 } // namespace idasql
 
 // ============================================================================
+// IDA Undo Integration (requires IDA SDK)
+// ============================================================================
+
+#include <ida.hpp>
+#include <undo.hpp>
+
+namespace idasql {
+
+/**
+ * Hook function for IDA undo point creation.
+ * Pass this to VTableBuilder::on_modify() to automatically create
+ * undo points before any UPDATE or DELETE operation.
+ */
+inline void ida_undo_hook(const std::string& operation_desc) {
+    std::string undo_desc = "IDASQL " + operation_desc;
+    create_undo_point(reinterpret_cast<const uchar*>(undo_desc.c_str()), undo_desc.size());
+}
+
+/**
+ * Helper to create a table with IDA undo integration.
+ * Equivalent to table(name).on_modify(ida_undo_hook)
+ */
+inline VTableBuilder live_table(const char* name) {
+    return table(name).on_modify(ida_undo_hook);
+}
+
+} // namespace idasql
+
+// ============================================================================
 // Convenience Macros (namespace-qualified for idasql)
 // ============================================================================
 

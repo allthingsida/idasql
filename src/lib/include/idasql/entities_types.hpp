@@ -19,7 +19,6 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
-#include <idasql/vtable_v2.hpp>
 
 // IDA SDK headers
 #include <ida.hpp>

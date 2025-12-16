@@ -9,7 +9,7 @@
 
 #pragma once
 
-#include <idasql/vtable_v2.hpp>
+#include <idasql/vtable.hpp>
 
 // IDA SDK headers (order matters)
 #include <ida.hpp>

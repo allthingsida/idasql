@@ -16,7 +16,6 @@
 
 // Core virtual table framework
 #include <idasql/vtable.hpp>
-#include <idasql/vtable_v2.hpp>
 
 // Entity tables
 #include <idasql/entities.hpp>

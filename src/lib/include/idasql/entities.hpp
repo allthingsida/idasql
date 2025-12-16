@@ -16,7 +16,6 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
-#include <idasql/vtable_v2.hpp>  // For ida_undo_hook
 
 // IDA SDK headers
 #include <ida.hpp>
