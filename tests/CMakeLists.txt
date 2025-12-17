@@ -85,8 +85,13 @@ target_compile_definitions(idasql_tests PRIVATE
 )
 
 # Register with CTest
+# Test executable uses IDASQL_TEST_DB_PATH as default when no database is specified
+# This allows gtest_discover_tests to work (runs exe without args for discovery)
 include(GoogleTest)
-gtest_discover_tests(idasql_tests)
+gtest_discover_tests(idasql_tests
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DISCOVERY_TIMEOUT 60
+)
 
 # Copy SQL test files to build directory
 file(GLOB SQL_FILES ${CMAKE_CURRENT_SOURCE_DIR}/sql/*.sql)

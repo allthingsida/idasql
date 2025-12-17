@@ -37,15 +37,23 @@ namespace decompiler {
 // Decompiler Initialization
 // ============================================================================
 
+// Global flag tracking if Hex-Rays is available
+// Set once during DecompilerRegistry::register_all()
+inline bool& hexrays_available() {
+    static bool available = false;
+    return available;
+}
+
+// Initialize Hex-Rays decompiler - call ONCE at startup
+// Returns true if decompiler is available
 inline bool init_hexrays() {
     static bool initialized = false;
-    static bool available = false;
 
     if (!initialized) {
         initialized = true;
-        available = init_hexrays_plugin();
+        hexrays_available() = init_hexrays_plugin();
     }
-    return available;
+    return hexrays_available();
 }
 
 // ============================================================================
@@ -196,7 +204,7 @@ inline void collect_all_pseudocode(std::vector<PseudocodeLine>& lines) {
 inline bool collect_lvars(std::vector<LvarInfo>& vars, ea_t func_addr) {
     vars.clear();
 
-    if (!init_hexrays()) return false;
+    if (!hexrays_available()) return false;
 
     func_t* f = get_func(func_addr);
     if (!f) return false;
@@ -238,7 +246,7 @@ inline bool collect_lvars(std::vector<LvarInfo>& vars, ea_t func_addr) {
 inline void collect_all_lvars(std::vector<LvarInfo>& vars) {
     vars.clear();
 
-    if (!init_hexrays()) return;
+    if (!hexrays_available()) return;
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
@@ -450,7 +458,7 @@ struct ctree_collector_t : public ctree_parentee_t {
 inline bool collect_ctree(std::vector<CtreeItem>& items, ea_t func_addr) {
     items.clear();
 
-    if (!init_hexrays()) return false;
+    if (!hexrays_available()) return false;
 
     func_t* f = get_func(func_addr);
     if (!f) return false;
@@ -470,7 +478,7 @@ inline bool collect_ctree(std::vector<CtreeItem>& items, ea_t func_addr) {
 inline void collect_all_ctree(std::vector<CtreeItem>& items) {
     items.clear();
 
-    if (!init_hexrays()) return;
+    if (!hexrays_available()) return;
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
@@ -564,7 +572,7 @@ struct call_args_collector_t : public ctree_parentee_t {
 inline bool collect_call_args(std::vector<CallArgInfo>& args, ea_t func_addr) {
     args.clear();
 
-    if (!init_hexrays()) return false;
+    if (!hexrays_available()) return false;
 
     func_t* f = get_func(func_addr);
     if (!f) return false;
@@ -583,7 +591,7 @@ inline bool collect_call_args(std::vector<CallArgInfo>& args, ea_t func_addr) {
 inline void collect_all_call_args(std::vector<CallArgInfo>& args) {
     args.clear();
 
-    if (!init_hexrays()) return;
+    if (!hexrays_available()) return;
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
@@ -617,21 +625,8 @@ struct LvarsCache {
     static void rebuild() { collect_all_lvars(get()); }
 };
 
-struct CtreeCache {
-    static std::vector<CtreeItem>& get() {
-        static std::vector<CtreeItem> cache;
-        return cache;
-    }
-    static void rebuild() { collect_all_ctree(get()); }
-};
-
-struct CallArgsCache {
-    static std::vector<CallArgInfo>& get() {
-        static std::vector<CallArgInfo> cache;
-        return cache;
-    }
-    static void rebuild() { collect_all_call_args(get()); }
-};
+// Note: ctree and ctree_call_args use query-scoped caches (CachedTableDef)
+// No static caches needed - cache is created per-query and freed after
 
 // ============================================================================
 // Iterators for constraint pushdown
@@ -883,62 +878,80 @@ inline VTableDef define_ctree_lvars() {
         .build();
 }
 
-inline VTableDef define_ctree() {
-    return table("ctree")
-        .count([]() { CtreeCache::rebuild(); return CtreeCache::get().size(); })
-        .column_int64("func_addr", [](size_t i) -> int64_t { auto& c = CtreeCache::get(); return i < c.size() ? c[i].func_addr : 0; })
-        .column_int("item_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].item_id : 0; })
-        .column_int("is_expr", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? (c[i].is_expr ? 1 : 0) : 0; })
-        .column_int("op", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].op : 0; })
-        .column_text("op_name", [](size_t i) -> std::string { auto& c = CtreeCache::get(); return i < c.size() ? c[i].op_name : ""; })
-        .column_int64("ea", [](size_t i) -> int64_t { auto& c = CtreeCache::get(); return (i < c.size() && c[i].ea != BADADDR) ? c[i].ea : 0; })
-        .column_int("parent_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].parent_id : -1; })
-        .column_int("depth", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].depth : 0; })
-        .column_int("x_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].x_id : -1; })
-        .column_int("y_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].y_id : -1; })
-        .column_int("z_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].z_id : -1; })
-        .column_int("cond_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].cond_id : -1; })
-        .column_int("then_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].then_id : -1; })
-        .column_int("else_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].else_id : -1; })
-        .column_int("body_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].body_id : -1; })
-        .column_int("init_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].init_id : -1; })
-        .column_int("step_id", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].step_id : -1; })
-        .column_int("var_idx", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].var_idx : -1; })
-        .column_int64("obj_ea", [](size_t i) -> int64_t { auto& c = CtreeCache::get(); return (i < c.size() && c[i].obj_ea != BADADDR) ? c[i].obj_ea : 0; })
-        .column_int64("num_value", [](size_t i) -> int64_t { auto& c = CtreeCache::get(); return i < c.size() ? c[i].num_value : 0; })
-        .column_text("str_value", [](size_t i) -> std::string { auto& c = CtreeCache::get(); return i < c.size() ? c[i].str_value : ""; })
-        .column_text("helper_name", [](size_t i) -> std::string { auto& c = CtreeCache::get(); return i < c.size() ? c[i].helper_name : ""; })
-        .column_int("member_offset", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? c[i].member_offset : 0; })
-        .column_text("var_name", [](size_t i) -> std::string { auto& c = CtreeCache::get(); return i < c.size() ? c[i].var_name : ""; })
-        .column_int("var_is_stk", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? (c[i].var_is_stk ? 1 : 0) : 0; })
-        .column_int("var_is_reg", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? (c[i].var_is_reg ? 1 : 0) : 0; })
-        .column_int("var_is_arg", [](size_t i) -> int { auto& c = CtreeCache::get(); return i < c.size() ? (c[i].var_is_arg ? 1 : 0) : 0; })
-        .column_text("obj_name", [](size_t i) -> std::string { auto& c = CtreeCache::get(); return i < c.size() ? c[i].obj_name : ""; })
+inline CachedTableDef<CtreeItem> define_ctree() {
+    return cached_table<CtreeItem>("ctree")
+        // Cheap estimate for query planning (doesn't decompile)
+        .estimate_rows([]() -> size_t {
+            // Heuristic: ~50 AST items per function
+            return get_func_qty() * 50;
+        })
+        // Cache builder (called lazily for full scans, freed after query)
+        .cache_builder([](std::vector<CtreeItem>& cache) {
+            if (!hexrays_available()) return;
+            collect_all_ctree(cache);
+        })
+        .column_int64("func_addr", [](const CtreeItem& r) -> int64_t { return r.func_addr; })
+        .column_int("item_id", [](const CtreeItem& r) -> int { return r.item_id; })
+        .column_int("is_expr", [](const CtreeItem& r) -> int { return r.is_expr ? 1 : 0; })
+        .column_int("op", [](const CtreeItem& r) -> int { return r.op; })
+        .column_text("op_name", [](const CtreeItem& r) -> std::string { return r.op_name; })
+        .column_int64("ea", [](const CtreeItem& r) -> int64_t { return r.ea != BADADDR ? r.ea : 0; })
+        .column_int("parent_id", [](const CtreeItem& r) -> int { return r.parent_id; })
+        .column_int("depth", [](const CtreeItem& r) -> int { return r.depth; })
+        .column_int("x_id", [](const CtreeItem& r) -> int { return r.x_id; })
+        .column_int("y_id", [](const CtreeItem& r) -> int { return r.y_id; })
+        .column_int("z_id", [](const CtreeItem& r) -> int { return r.z_id; })
+        .column_int("cond_id", [](const CtreeItem& r) -> int { return r.cond_id; })
+        .column_int("then_id", [](const CtreeItem& r) -> int { return r.then_id; })
+        .column_int("else_id", [](const CtreeItem& r) -> int { return r.else_id; })
+        .column_int("body_id", [](const CtreeItem& r) -> int { return r.body_id; })
+        .column_int("init_id", [](const CtreeItem& r) -> int { return r.init_id; })
+        .column_int("step_id", [](const CtreeItem& r) -> int { return r.step_id; })
+        .column_int("var_idx", [](const CtreeItem& r) -> int { return r.var_idx; })
+        .column_int64("obj_ea", [](const CtreeItem& r) -> int64_t { return r.obj_ea != BADADDR ? r.obj_ea : 0; })
+        .column_int64("num_value", [](const CtreeItem& r) -> int64_t { return r.num_value; })
+        .column_text("str_value", [](const CtreeItem& r) -> std::string { return r.str_value; })
+        .column_text("helper_name", [](const CtreeItem& r) -> std::string { return r.helper_name; })
+        .column_int("member_offset", [](const CtreeItem& r) -> int { return r.member_offset; })
+        .column_text("var_name", [](const CtreeItem& r) -> std::string { return r.var_name; })
+        .column_int("var_is_stk", [](const CtreeItem& r) -> int { return r.var_is_stk ? 1 : 0; })
+        .column_int("var_is_reg", [](const CtreeItem& r) -> int { return r.var_is_reg ? 1 : 0; })
+        .column_int("var_is_arg", [](const CtreeItem& r) -> int { return r.var_is_arg ? 1 : 0; })
+        .column_text("obj_name", [](const CtreeItem& r) -> std::string { return r.obj_name; })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<CtreeInFuncIterator>(static_cast<ea_t>(func_addr));
-        }, 100.0)
+        }, 100.0, 100.0)
         .build();
 }
 
-inline VTableDef define_ctree_call_args() {
-    return table("ctree_call_args")
-        .count([]() { CallArgsCache::rebuild(); return CallArgsCache::get().size(); })
-        .column_int64("func_addr", [](size_t i) -> int64_t { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].func_addr : 0; })
-        .column_int("call_item_id", [](size_t i) -> int { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].call_item_id : 0; })
-        .column_int("arg_idx", [](size_t i) -> int { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].arg_idx : 0; })
-        .column_int("arg_item_id", [](size_t i) -> int { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].arg_item_id : 0; })
-        .column_text("arg_op", [](size_t i) -> std::string { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].arg_op : ""; })
-        .column_int("arg_var_idx", [](size_t i) -> int { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].arg_var_idx : -1; })
-        .column_text("arg_var_name", [](size_t i) -> std::string { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].arg_var_name : ""; })
-        .column_int("arg_var_is_stk", [](size_t i) -> int { auto& c = CallArgsCache::get(); return i < c.size() ? (c[i].arg_var_is_stk ? 1 : 0) : 0; })
-        .column_int("arg_var_is_arg", [](size_t i) -> int { auto& c = CallArgsCache::get(); return i < c.size() ? (c[i].arg_var_is_arg ? 1 : 0) : 0; })
-        .column_int64("arg_obj_ea", [](size_t i) -> int64_t { auto& c = CallArgsCache::get(); return (i < c.size() && c[i].arg_obj_ea != BADADDR) ? c[i].arg_obj_ea : 0; })
-        .column_text("arg_obj_name", [](size_t i) -> std::string { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].arg_obj_name : ""; })
-        .column_int64("arg_num_value", [](size_t i) -> int64_t { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].arg_num_value : 0; })
-        .column_text("arg_str_value", [](size_t i) -> std::string { auto& c = CallArgsCache::get(); return i < c.size() ? c[i].arg_str_value : ""; })
+inline CachedTableDef<CallArgInfo> define_ctree_call_args() {
+    return cached_table<CallArgInfo>("ctree_call_args")
+        // Cheap estimate for query planning
+        .estimate_rows([]() -> size_t {
+            // Heuristic: ~20 call args per function
+            return get_func_qty() * 20;
+        })
+        // Cache builder (called lazily for full scans, freed after query)
+        .cache_builder([](std::vector<CallArgInfo>& cache) {
+            if (!hexrays_available()) return;
+            collect_all_call_args(cache);
+        })
+        .column_int64("func_addr", [](const CallArgInfo& r) -> int64_t { return r.func_addr; })
+        .column_int("call_item_id", [](const CallArgInfo& r) -> int { return r.call_item_id; })
+        .column_int("arg_idx", [](const CallArgInfo& r) -> int { return r.arg_idx; })
+        .column_int("arg_item_id", [](const CallArgInfo& r) -> int { return r.arg_item_id; })
+        .column_text("arg_op", [](const CallArgInfo& r) -> std::string { return r.arg_op; })
+        .column_int("arg_var_idx", [](const CallArgInfo& r) -> int { return r.arg_var_idx; })
+        .column_text("arg_var_name", [](const CallArgInfo& r) -> std::string { return r.arg_var_name; })
+        .column_int("arg_var_is_stk", [](const CallArgInfo& r) -> int { return r.arg_var_is_stk ? 1 : 0; })
+        .column_int("arg_var_is_arg", [](const CallArgInfo& r) -> int { return r.arg_var_is_arg ? 1 : 0; })
+        .column_int64("arg_obj_ea", [](const CallArgInfo& r) -> int64_t { return r.arg_obj_ea != BADADDR ? r.arg_obj_ea : 0; })
+        .column_text("arg_obj_name", [](const CallArgInfo& r) -> std::string { return r.arg_obj_name; })
+        .column_int64("arg_num_value", [](const CallArgInfo& r) -> int64_t { return r.arg_num_value; })
+        .column_text("arg_str_value", [](const CallArgInfo& r) -> std::string { return r.arg_str_value; })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<CallArgsInFuncIterator>(static_cast<ea_t>(func_addr));
-        }, 100.0)
+        }, 100.0, 100.0)
         .build();
 }
 
@@ -1128,10 +1141,12 @@ inline bool register_ctree_views(sqlite3* db) {
 // ============================================================================
 
 struct DecompilerRegistry {
+    // Index-based tables
     VTableDef pseudocode;
     VTableDef ctree_lvars;
-    VTableDef ctree;
-    VTableDef ctree_call_args;
+    // Cached tables (query-scoped cache)
+    CachedTableDef<CtreeItem> ctree;
+    CachedTableDef<CallArgInfo> ctree_call_args;
 
     DecompilerRegistry()
         : pseudocode(define_pseudocode())
@@ -1141,16 +1156,22 @@ struct DecompilerRegistry {
     {}
 
     void register_all(sqlite3* db) {
+        // Initialize Hex-Rays decompiler ONCE at startup
+        // If unavailable, tables will return empty results (no crash)
+        init_hexrays();
+
+        // Index-based tables
         register_vtable(db, "ida_pseudocode", &pseudocode);
         create_vtable(db, "pseudocode", "ida_pseudocode");
 
         register_vtable(db, "ida_ctree_lvars", &ctree_lvars);
         create_vtable(db, "ctree_lvars", "ida_ctree_lvars");
 
-        register_vtable(db, "ida_ctree", &ctree);
+        // Cached tables (query-scoped cache, freed after query completes)
+        xsql::register_cached_vtable(db, "ida_ctree", &ctree);
         create_vtable(db, "ctree", "ida_ctree");
 
-        register_vtable(db, "ida_ctree_call_args", &ctree_call_args);
+        xsql::register_cached_vtable(db, "ida_ctree_call_args", &ctree_call_args);
         create_vtable(db, "ctree_call_args", "ida_ctree_call_args");
 
         register_ctree_views(db);

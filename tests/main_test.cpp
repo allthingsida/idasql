@@ -106,11 +106,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Validate database path
+    // Use default database path if not specified
     if (db_path.empty()) {
-        std::cerr << "Error: No database specified\n\n";
-        print_usage(argv[0]);
-        return 1;
+#ifdef IDASQL_TEST_DB_PATH
+        db_path = IDASQL_TEST_DB_PATH;
+#else
+        // Fallback: try testdb.i64 in current directory
+        db_path = "testdb.i64";
+#endif
     }
 
     // Check database exists
