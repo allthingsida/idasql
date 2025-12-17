@@ -86,12 +86,24 @@ target_compile_definitions(idasql_tests PRIVATE
 
 # Register with CTest
 # Test executable uses IDASQL_TEST_DB_PATH as default when no database is specified
-# This allows gtest_discover_tests to work (runs exe without args for discovery)
+# NOTE: Use gtest_add_tests() to avoid running the executable during build-time
+# discovery (idalib-based tests require IDA DLLs on PATH).
 include(GoogleTest)
-gtest_discover_tests(idasql_tests
+
+gtest_add_tests(TARGET idasql_tests
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    DISCOVERY_TIMEOUT 60
+    TEST_LIST IDASQL_GTESTS
 )
+
+if(WIN32 AND DEFINED ENV{IDASDK})
+    file(TO_NATIVE_PATH "$ENV{IDASDK}/bin" IDASDK_BIN_NATIVE)
+    set_tests_properties(${IDASQL_GTESTS} PROPERTIES
+        TIMEOUT 20
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${IDASDK_BIN_NATIVE}"
+    )
+else()
+    set_tests_properties(${IDASQL_GTESTS} PROPERTIES TIMEOUT 20)
+endif()
 
 # Copy SQL test files to build directory
 file(GLOB SQL_FILES ${CMAKE_CURRENT_SOURCE_DIR}/sql/*.sql)

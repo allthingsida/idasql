@@ -203,8 +203,6 @@ public:
 };
 
 inline VTableDef define_disasm_calls() {
-    rebuild_disasm_calls_cache();
-
     return table("disasm_calls")
         .count([]() {
             rebuild_disasm_calls_cache();
@@ -314,8 +312,14 @@ public:
     }
 
     bool next() override {
-        if (!started_) { started_ = true; return !loops_.empty(); }
+        if (!started_) {
+            started_ = true;
+            if (loops_.empty()) return false;
+            idx_ = 0;
+            return true;
+        }
         if (idx_ + 1 < loops_.size()) { ++idx_; return true; }
+        idx_ = loops_.size();
         return false;
     }
 

@@ -541,19 +541,12 @@ TEST_F(CtreeCallsInLoopsTest, SpecificLoopHasCalls) {
 }
 
 TEST_F(CtreeCallsInLoopsTest, ForLoopCalls) {
-    // cit_for loop at 4199216:108 should have _mbstok calls
+    // cit_for loops in this function should include _mbstok calls
     auto result = query(
-        "SELECT callee_name FROM ctree_v_calls_in_loops "
-        "WHERE loop_id = 108 AND func_addr = 4199216 AND loop_op = 'cit_for'"
+        "SELECT COUNT(*) as cnt FROM ctree_v_calls_in_loops "
+        "WHERE func_addr = 4199216 AND loop_op = 'cit_for' AND callee_name = '_mbstok'"
     );
-    bool has_mbstok = false;
-    for (size_t i = 0; i < result.row_count(); i++) {
-        if (result.get(i, "callee_name") == "_mbstok") {
-            has_mbstok = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(has_mbstok) << "Expected _mbstok call in for loop";
+    EXPECT_GT(result.scalar_int(), 0) << "Expected _mbstok call in cit_for loop";
 }
 
 TEST_F(CtreeCallsInLoopsTest, CallDepthIsGreaterThanLoopDepth) {

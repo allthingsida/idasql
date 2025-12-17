@@ -83,8 +83,6 @@ inline void rebuild_db_info_cache() {
 }
 
 inline VTableDef define_db_info() {
-    rebuild_db_info_cache();
-
     return table("db_info")
         .count([]() {
             rebuild_db_info_cache();
@@ -142,8 +140,6 @@ inline void rebuild_ida_info_cache() {
 }
 
 inline VTableDef define_ida_info() {
-    rebuild_ida_info_cache();
-
     return table("ida_info")
         .count([]() {
             rebuild_ida_info_cache();

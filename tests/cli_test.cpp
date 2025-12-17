@@ -37,7 +37,7 @@ inline std::string& cli_test_database_path() {
 // ============================================================================
 
 class CLITest : public ::testing::Test {
-protected:
+ protected:
     // Path to idasql.exe (set via environment or default)
     static std::string idasql_path;
 
@@ -49,6 +49,35 @@ protected:
         return f.good();
     }
 
+    static std::string join_path(const std::string& base,
+                                 const std::string& a,
+                                 const std::string& b) {
+        if (base.empty()) return a + "/" + b;
+        if (base.back() == '/' || base.back() == '\\') return base + a + "/" + b;
+        return base + "/" + a + "/" + b;
+    }
+
+    static std::string find_cli_in_build_dir(const std::string& build_dir,
+                                             const std::string& preferred_config) {
+        if (build_dir.empty()) return {};
+
+        auto try_config = [&](const std::string& config) -> std::string {
+            if (config.empty()) return {};
+            std::string candidate = join_path(build_dir, config, "idasql.exe");
+            if (file_exists(candidate)) return candidate;
+            return {};
+        };
+
+        if (auto found = try_config(preferred_config); !found.empty()) return found;
+
+        const char* fallback_configs[] = {"RelWithDebInfo", "Release", "Debug", "MinSizeRel"};
+        for (const char* config : fallback_configs) {
+            if (auto found = try_config(config); !found.empty()) return found;
+        }
+
+        return {};
+    }
+
     static void SetUpTestSuite() {
         // Try environment variable first
         const char* env_path = getenv("IDASQL_PATH");
@@ -58,7 +87,8 @@ protected:
 #if defined(IDASQL_CLI_DIR) && defined(IDASQL_CLI_CONFIG)
         // Use CMake-provided path (matches build configuration)
         else {
-            idasql_path = std::string(IDASQL_CLI_DIR) + "/" + IDASQL_CLI_CONFIG + "/idasql.exe";
+            idasql_path =
+                find_cli_in_build_dir(std::string(IDASQL_CLI_DIR), std::string(IDASQL_CLI_CONFIG));
         }
 #else
         // Fallback: search multiple configs (when not built via CMake)
@@ -79,11 +109,12 @@ protected:
                 }
                 if (!idasql_path.empty()) break;
             }
-            if (idasql_path.empty()) {
-                idasql_path = "../src/cli/build/RelWithDebInfo/idasql.exe";
-            }
         }
 #endif
+
+        if (!idasql_path.empty() && !file_exists(idasql_path)) {
+            idasql_path.clear();
+        }
 
         // Get test database path: environment variable or compile-time default
         const char* db_path = getenv("IDASQL_TEST_DB");
@@ -112,6 +143,12 @@ protected:
 
     CommandResult run_cli(const std::string& args) {
         CommandResult result;
+
+        if (idasql_path.empty() || !file_exists(idasql_path)) {
+            result.exit_code = -1;
+            result.stderr_output = "idasql CLI executable not found";
+            return result;
+        }
 
         // Build command with PATH set for IDA DLLs
         std::string cmd;
@@ -147,13 +184,12 @@ protected:
         }
 
 #ifdef _WIN32
-        _pclose(pipe);
+        result.exit_code = _pclose(pipe);
 #else
-        pclose(pipe);
+        result.exit_code = pclose(pipe);
 #endif
 
         result.stdout_output = output;
-        result.exit_code = 0;  // pclose returns exit code but we simplify
         return result;
     }
 

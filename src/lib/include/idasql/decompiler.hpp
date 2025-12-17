@@ -24,6 +24,7 @@
 
 // IDA SDK headers
 #include <ida.hpp>
+#include <auto.hpp>
 #include <funcs.hpp>
 #include <name.hpp>
 
@@ -52,6 +53,11 @@ inline bool init_hexrays() {
     if (!initialized) {
         initialized = true;
         hexrays_available() = init_hexrays_plugin();
+        if (hexrays_available()) {
+            // Hex-Rays initialization may trigger additional auto-analysis work.
+            // Ensure analysis is complete before running decompiler-backed queries.
+            auto_wait();
+        }
     }
     return hexrays_available();
 }
@@ -644,8 +650,14 @@ public:
     }
 
     bool next() override {
-        if (!started_) { started_ = true; return !lines_.empty(); }
+        if (!started_) {
+            started_ = true;
+            if (lines_.empty()) return false;
+            idx_ = 0;
+            return true;
+        }
         if (idx_ + 1 < lines_.size()) { ++idx_; return true; }
+        idx_ = lines_.size();
         return false;
     }
 
@@ -680,8 +692,14 @@ public:
     }
 
     bool next() override {
-        if (!started_) { started_ = true; return !vars_.empty(); }
+        if (!started_) {
+            started_ = true;
+            if (vars_.empty()) return false;
+            idx_ = 0;
+            return true;
+        }
         if (idx_ + 1 < vars_.size()) { ++idx_; return true; }
+        idx_ = vars_.size();
         return false;
     }
 
@@ -720,8 +738,14 @@ public:
     }
 
     bool next() override {
-        if (!started_) { started_ = true; return !items_.empty(); }
+        if (!started_) {
+            started_ = true;
+            if (items_.empty()) return false;
+            idx_ = 0;
+            return true;
+        }
         if (idx_ + 1 < items_.size()) { ++idx_; return true; }
+        idx_ = items_.size();
         return false;
     }
 
@@ -777,8 +801,14 @@ public:
     }
 
     bool next() override {
-        if (!started_) { started_ = true; return !args_.empty(); }
+        if (!started_) {
+            started_ = true;
+            if (args_.empty()) return false;
+            idx_ = 0;
+            return true;
+        }
         if (idx_ + 1 < args_.size()) { ++idx_; return true; }
+        idx_ = args_.size();
         return false;
     }
 
@@ -967,7 +997,7 @@ inline bool register_ctree_views(sqlite3* db) {
         SELECT
             c.func_addr, c.item_id, c.ea,
             x.op_name AS callee_op,
-            x.obj_ea AS callee_addr,
+            NULLIF(x.obj_ea, 0) AS callee_addr,
             x.obj_name AS callee_name,
             x.helper_name,
             (SELECT COUNT(*) FROM ctree_call_args a
@@ -1066,7 +1096,7 @@ inline bool register_ctree_views(sqlite3* db) {
         SELECT DISTINCT
             c.func_addr, c.item_id, c.ea, c.depth AS call_depth,
             lc.loop_id, lc.loop_op,
-            x.obj_ea AS callee_addr, x.obj_name AS callee_name, x.helper_name
+            NULLIF(x.obj_ea, 0) AS callee_addr, x.obj_name AS callee_name, x.helper_name
         FROM loop_contents lc
         JOIN ctree c ON c.func_addr = lc.func_addr AND c.item_id = lc.item_id
         LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
@@ -1096,7 +1126,7 @@ inline bool register_ctree_views(sqlite3* db) {
         SELECT DISTINCT
             c.func_addr, c.item_id, c.ea, c.depth AS call_depth,
             ic.if_id, ic.branch,
-            x.obj_ea AS callee_addr, x.obj_name AS callee_name, x.helper_name
+            NULLIF(x.obj_ea, 0) AS callee_addr, x.obj_name AS callee_name, x.helper_name
         FROM if_contents ic
         JOIN ctree c ON c.func_addr = ic.func_addr AND c.item_id = ic.item_id
         LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
@@ -1109,9 +1139,19 @@ inline bool register_ctree_views(sqlite3* db) {
         CREATE VIEW IF NOT EXISTS ctree_v_leaf_funcs AS
         SELECT f.address, f.name
         FROM funcs f
-        LEFT JOIN ctree_v_calls c ON c.func_addr = f.address
-        GROUP BY f.address
-        HAVING COUNT(c.callee_addr) = 0
+        WHERE
+            -- Only consider functions that Hex-Rays can decompile (avoid false "leaf" results
+            -- when decompilation fails and the ctree tables return empty rows).
+            EXISTS (
+                SELECT 1 FROM ctree t
+                WHERE t.func_addr = f.address
+                LIMIT 1
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM ctree_v_calls c
+                WHERE c.func_addr = f.address AND c.callee_addr IS NOT NULL
+                LIMIT 1
+            )
     )";
     sqlite3_exec(db, v_leaf_funcs, nullptr, nullptr, &err);
     if (err) { sqlite3_free(err); err = nullptr; }
