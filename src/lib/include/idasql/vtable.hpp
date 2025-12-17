@@ -20,6 +20,14 @@
  *       .cache_builder([](auto& cache) { ... populate ... })
  *       .column_int64("from_ea", [](const XrefInfo& r) { return r.from_ea; })
  *       .build();
+ *
+ * 3. Generator tables (for expensive full scans that must be lazy):
+ *
+ *   auto ctree_table = idasql::generator_table<CtreeItem>("ctree")
+ *       .estimate_rows([]() { return get_func_qty() * 50; })
+ *       .generator([]() { return std::make_unique<CtreeGenerator>(); })
+ *       .column_int64("func_addr", [](const CtreeItem& r) { return r.func_addr; })
+ *       .build();
  */
 
 #pragma once
@@ -89,6 +97,33 @@ using CachedTableBuilder = xsql::CachedTableBuilder<RowData>;
 template<typename RowData>
 inline CachedTableBuilder<RowData> cached_table(const char* name) {
     return xsql::cached_table<RowData>(name);
+}
+
+// ============================================================================
+// Generator Table API (streaming, no full-cache materialization)
+// ============================================================================
+
+template<typename RowData>
+using Generator = xsql::Generator<RowData>;
+
+template<typename RowData>
+using GeneratorTableDef = xsql::GeneratorTableDef<RowData>;
+
+template<typename RowData>
+using GeneratorCursor = xsql::GeneratorCursor<RowData>;
+
+template<typename RowData>
+inline bool register_generator_vtable(sqlite3* db, const char* module_name,
+                                      const GeneratorTableDef<RowData>* def) {
+    return xsql::register_generator_vtable(db, module_name, def);
+}
+
+template<typename RowData>
+using GeneratorTableBuilder = xsql::GeneratorTableBuilder<RowData>;
+
+template<typename RowData>
+inline GeneratorTableBuilder<RowData> generator_table(const char* name) {
+    return xsql::generator_table<RowData>(name);
 }
 
 } // namespace idasql

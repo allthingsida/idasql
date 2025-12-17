@@ -631,8 +631,8 @@ struct LvarsCache {
     static void rebuild() { collect_all_lvars(get()); }
 };
 
-// Note: ctree and ctree_call_args use query-scoped caches (CachedTableDef)
-// No static caches needed - cache is created per-query and freed after
+// Note: ctree and ctree_call_args use streaming generator tables (GeneratorTableDef)
+// No static caches needed - iteration is lazy and owned by the query cursor
 
 // ============================================================================
 // Iterators for constraint pushdown
@@ -838,6 +838,106 @@ public:
 };
 
 // ============================================================================
+// Generators for full scans (lazy, one function at a time)
+// ============================================================================
+
+class CtreeGenerator : public xsql::Generator<CtreeItem> {
+    size_t func_idx_ = 0;
+    std::vector<CtreeItem> items_;
+    size_t idx_ = 0;
+    sqlite3_int64 rowid_ = -1;
+    bool started_ = false;
+
+    bool load_next_func() {
+        if (!hexrays_available()) return false;
+
+        size_t func_qty = get_func_qty();
+        while (func_idx_ < func_qty) {
+            func_t* f = getn_func(func_idx_++);
+            if (!f) continue;
+
+            if (collect_ctree(items_, f->start_ea) && !items_.empty()) {
+                idx_ = 0;
+                return true;
+            }
+        }
+        return false;
+    }
+
+public:
+    bool next() override {
+        if (!started_) {
+            started_ = true;
+            if (!load_next_func()) return false;
+            rowid_ = 0;
+            return true;
+        }
+
+        if (idx_ + 1 < items_.size()) {
+            ++idx_;
+            ++rowid_;
+            return true;
+        }
+
+        if (!load_next_func()) return false;
+        ++rowid_;
+        return true;
+    }
+
+    const CtreeItem& current() const override { return items_[idx_]; }
+
+    sqlite3_int64 rowid() const override { return rowid_; }
+};
+
+class CallArgsGenerator : public xsql::Generator<CallArgInfo> {
+    size_t func_idx_ = 0;
+    std::vector<CallArgInfo> args_;
+    size_t idx_ = 0;
+    sqlite3_int64 rowid_ = -1;
+    bool started_ = false;
+
+    bool load_next_func() {
+        if (!hexrays_available()) return false;
+
+        size_t func_qty = get_func_qty();
+        while (func_idx_ < func_qty) {
+            func_t* f = getn_func(func_idx_++);
+            if (!f) continue;
+
+            if (collect_call_args(args_, f->start_ea) && !args_.empty()) {
+                idx_ = 0;
+                return true;
+            }
+        }
+        return false;
+    }
+
+public:
+    bool next() override {
+        if (!started_) {
+            started_ = true;
+            if (!load_next_func()) return false;
+            rowid_ = 0;
+            return true;
+        }
+
+        if (idx_ + 1 < args_.size()) {
+            ++idx_;
+            ++rowid_;
+            return true;
+        }
+
+        if (!load_next_func()) return false;
+        ++rowid_;
+        return true;
+    }
+
+    const CallArgInfo& current() const override { return args_[idx_]; }
+
+    sqlite3_int64 rowid() const override { return rowid_; }
+};
+
+// ============================================================================
 // Table Definitions
 // ============================================================================
 
@@ -908,17 +1008,16 @@ inline VTableDef define_ctree_lvars() {
         .build();
 }
 
-inline CachedTableDef<CtreeItem> define_ctree() {
-    return cached_table<CtreeItem>("ctree")
+inline GeneratorTableDef<CtreeItem> define_ctree() {
+    return generator_table<CtreeItem>("ctree")
         // Cheap estimate for query planning (doesn't decompile)
         .estimate_rows([]() -> size_t {
             // Heuristic: ~50 AST items per function
             return get_func_qty() * 50;
         })
-        // Cache builder (called lazily for full scans, freed after query)
-        .cache_builder([](std::vector<CtreeItem>& cache) {
-            if (!hexrays_available()) return;
-            collect_all_ctree(cache);
+        // Full scan generator (decompiles one function at a time)
+        .generator([]() -> std::unique_ptr<xsql::Generator<CtreeItem>> {
+            return std::make_unique<CtreeGenerator>();
         })
         .column_int64("func_addr", [](const CtreeItem& r) -> int64_t { return r.func_addr; })
         .column_int("item_id", [](const CtreeItem& r) -> int { return r.item_id; })
@@ -954,17 +1053,16 @@ inline CachedTableDef<CtreeItem> define_ctree() {
         .build();
 }
 
-inline CachedTableDef<CallArgInfo> define_ctree_call_args() {
-    return cached_table<CallArgInfo>("ctree_call_args")
+inline GeneratorTableDef<CallArgInfo> define_ctree_call_args() {
+    return generator_table<CallArgInfo>("ctree_call_args")
         // Cheap estimate for query planning
         .estimate_rows([]() -> size_t {
             // Heuristic: ~20 call args per function
             return get_func_qty() * 20;
         })
-        // Cache builder (called lazily for full scans, freed after query)
-        .cache_builder([](std::vector<CallArgInfo>& cache) {
-            if (!hexrays_available()) return;
-            collect_all_call_args(cache);
+        // Full scan generator (decompiles one function at a time)
+        .generator([]() -> std::unique_ptr<xsql::Generator<CallArgInfo>> {
+            return std::make_unique<CallArgsGenerator>();
         })
         .column_int64("func_addr", [](const CallArgInfo& r) -> int64_t { return r.func_addr; })
         .column_int("call_item_id", [](const CallArgInfo& r) -> int { return r.call_item_id; })
@@ -1184,9 +1282,9 @@ struct DecompilerRegistry {
     // Index-based tables
     VTableDef pseudocode;
     VTableDef ctree_lvars;
-    // Cached tables (query-scoped cache)
-    CachedTableDef<CtreeItem> ctree;
-    CachedTableDef<CallArgInfo> ctree_call_args;
+    // Generator tables (lazy full scans)
+    GeneratorTableDef<CtreeItem> ctree;
+    GeneratorTableDef<CallArgInfo> ctree_call_args;
 
     DecompilerRegistry()
         : pseudocode(define_pseudocode())
@@ -1207,11 +1305,11 @@ struct DecompilerRegistry {
         register_vtable(db, "ida_ctree_lvars", &ctree_lvars);
         create_vtable(db, "ctree_lvars", "ida_ctree_lvars");
 
-        // Cached tables (query-scoped cache, freed after query completes)
-        xsql::register_cached_vtable(db, "ida_ctree", &ctree);
+        // Generator tables (lazy full scans, stop work early with LIMIT)
+        xsql::register_generator_vtable(db, "ida_ctree", &ctree);
         create_vtable(db, "ctree", "ida_ctree");
 
-        xsql::register_cached_vtable(db, "ida_ctree_call_args", &ctree_call_args);
+        xsql::register_generator_vtable(db, "ida_ctree_call_args", &ctree_call_args);
         create_vtable(db, "ctree_call_args", "ida_ctree_call_args");
 
         register_ctree_views(db);

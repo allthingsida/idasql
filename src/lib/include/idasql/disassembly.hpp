@@ -58,43 +58,6 @@ struct DisasmCallInfo {
     std::string callee_name;
 };
 
-inline std::vector<DisasmCallInfo>& get_disasm_calls_cache() {
-    static std::vector<DisasmCallInfo> cache;
-    return cache;
-}
-
-inline void rebuild_disasm_calls_cache() {
-    auto& cache = get_disasm_calls_cache();
-    cache.clear();
-
-    size_t func_qty = get_func_qty();
-    for (size_t i = 0; i < func_qty; i++) {
-        func_t* pfn = getn_func(i);
-        if (!pfn) continue;
-
-        // Iterate all code items in function
-        func_item_iterator_t fii;
-        for (bool ok = fii.set(pfn); ok; ok = fii.next_code()) {
-            ea_t ea = fii.current();
-            insn_t insn;
-
-            if (decode_insn(&insn, ea) > 0 && is_call_insn(insn)) {
-                DisasmCallInfo info;
-                info.func_addr = pfn->start_ea;
-                info.ea = ea;
-
-                // Get call target from xrefs
-                info.callee_addr = get_first_fcref_from(ea);
-                if (info.callee_addr != BADADDR) {
-                    info.callee_name = safe_name(info.callee_addr);
-                }
-
-                cache.push_back(info);
-            }
-        }
-    }
-}
-
 // ============================================================================
 // DisasmCallsInFuncIterator - Constraint pushdown for func_addr = X
 // Iterates calls in a single function without building the full cache
@@ -202,32 +165,89 @@ public:
     }
 };
 
-inline VTableDef define_disasm_calls() {
-    return table("disasm_calls")
-        .count([]() {
-            rebuild_disasm_calls_cache();
-            return get_disasm_calls_cache().size();
+class DisasmCallsGenerator : public xsql::Generator<DisasmCallInfo> {
+    size_t func_idx_ = 0;
+    func_t* pfn_ = nullptr;
+    func_item_iterator_t fii_;
+    bool in_func_started_ = false;
+    DisasmCallInfo current_;
+
+    bool start_next_func() {
+        size_t func_qty = get_func_qty();
+        while (func_idx_ < func_qty) {
+            pfn_ = getn_func(func_idx_++);
+            if (!pfn_) continue;
+
+            if (fii_.set(pfn_)) {
+                in_func_started_ = false;
+                return true;
+            }
+        }
+        pfn_ = nullptr;
+        return false;
+    }
+
+    bool find_next_call_in_current_func() {
+        if (!pfn_) return false;
+
+        while (true) {
+            ea_t ea = BADADDR;
+            if (!in_func_started_) {
+                in_func_started_ = true;
+                ea = fii_.current();
+            } else {
+                if (!fii_.next_code()) return false;
+                ea = fii_.current();
+            }
+
+            insn_t insn;
+            if (decode_insn(&insn, ea) > 0 && is_call_insn(insn)) {
+                current_.func_addr = pfn_->start_ea;
+                current_.ea = ea;
+                current_.callee_addr = get_first_fcref_from(ea);
+                if (current_.callee_addr != BADADDR) {
+                    current_.callee_name = safe_name(current_.callee_addr);
+                } else {
+                    current_.callee_name.clear();
+                }
+                return true;
+            }
+        }
+    }
+
+public:
+    bool next() override {
+        while (true) {
+            if (!pfn_) {
+                if (!start_next_func()) return false;
+            }
+
+            if (find_next_call_in_current_func()) return true;
+            pfn_ = nullptr;
+        }
+    }
+
+    const DisasmCallInfo& current() const override { return current_; }
+
+    sqlite3_int64 rowid() const override { return static_cast<sqlite3_int64>(current_.ea); }
+};
+
+inline GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
+    return generator_table<DisasmCallInfo>("disasm_calls")
+        .estimate_rows([]() -> size_t {
+            // Heuristic: a few calls per function
+            return get_func_qty() * 5;
         })
-        .column_int64("func_addr", [](size_t i) -> int64_t {
-            auto& cache = get_disasm_calls_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].func_addr) : 0;
+        .generator([]() -> std::unique_ptr<xsql::Generator<DisasmCallInfo>> {
+            return std::make_unique<DisasmCallsGenerator>();
         })
-        .column_int64("ea", [](size_t i) -> int64_t {
-            auto& cache = get_disasm_calls_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].ea) : 0;
+        .column_int64("func_addr", [](const DisasmCallInfo& r) -> int64_t { return r.func_addr; })
+        .column_int64("ea", [](const DisasmCallInfo& r) -> int64_t { return r.ea; })
+        .column_int64("callee_addr", [](const DisasmCallInfo& r) -> int64_t {
+            return r.callee_addr != BADADDR ? static_cast<int64_t>(r.callee_addr) : 0;
         })
-        .column_int64("callee_addr", [](size_t i) -> int64_t {
-            auto& cache = get_disasm_calls_cache();
-            if (i >= cache.size()) return 0;
-            return cache[i].callee_addr != BADADDR
-                ? static_cast<int64_t>(cache[i].callee_addr)
-                : 0;  // NULL represented as 0 for now
-        })
-        .column_text("callee_name", [](size_t i) -> std::string {
-            auto& cache = get_disasm_calls_cache();
-            return i < cache.size() ? cache[i].callee_name : "";
-        })
-        // Constraint pushdown: func_addr = X bypasses full cache
+        .column_text("callee_name", [](const DisasmCallInfo& r) -> std::string { return r.callee_name; })
+        // Constraint pushdown: func_addr = X bypasses full scan
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<DisasmCallsInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 10.0)  // Low cost - only iterates one function
@@ -247,11 +267,6 @@ struct LoopInfo {
     ea_t back_edge_block_ea;  // Block containing the back-edge jump
     ea_t back_edge_block_end; // End of back-edge block
 };
-
-inline std::vector<LoopInfo>& get_disasm_loops_cache() {
-    static std::vector<LoopInfo> cache;
-    return cache;
-}
 
 inline void collect_loops_for_func(std::vector<LoopInfo>& loops, func_t* pfn) {
     if (!pfn) return;
@@ -282,18 +297,6 @@ inline void collect_loops_for_func(std::vector<LoopInfo>& loops, func_t* pfn) {
                 loops.push_back(li);
             }
         }
-    }
-}
-
-inline void rebuild_disasm_loops_cache() {
-    auto& cache = get_disasm_loops_cache();
-    cache.clear();
-
-    size_t func_qty = get_func_qty();
-    for (size_t i = 0; i < func_qty; i++) {
-        func_t* pfn = getn_func(i);
-        if (!pfn) continue;
-        collect_loops_for_func(cache, pfn);
     }
 }
 
@@ -341,36 +344,69 @@ public:
     int64_t rowid() const override { return static_cast<int64_t>(idx_); }
 };
 
-inline VTableDef define_disasm_loops() {
-    return table("disasm_loops")
-        .count([]() {
-            rebuild_disasm_loops_cache();
-            return get_disasm_loops_cache().size();
+class DisasmLoopsGenerator : public xsql::Generator<LoopInfo> {
+    size_t func_idx_ = 0;
+    std::vector<LoopInfo> loops_;
+    size_t idx_ = 0;
+    sqlite3_int64 rowid_ = -1;
+    bool started_ = false;
+
+    bool load_next_func() {
+        size_t func_qty = get_func_qty();
+        while (func_idx_ < func_qty) {
+            func_t* pfn = getn_func(func_idx_++);
+            if (!pfn) continue;
+
+            loops_.clear();
+            collect_loops_for_func(loops_, pfn);
+            if (!loops_.empty()) {
+                idx_ = 0;
+                return true;
+            }
+        }
+        return false;
+    }
+
+public:
+    bool next() override {
+        if (!started_) {
+            started_ = true;
+            if (!load_next_func()) return false;
+            rowid_ = 0;
+            return true;
+        }
+
+        if (idx_ + 1 < loops_.size()) {
+            ++idx_;
+            ++rowid_;
+            return true;
+        }
+
+        if (!load_next_func()) return false;
+        ++rowid_;
+        return true;
+    }
+
+    const LoopInfo& current() const override { return loops_[idx_]; }
+
+    sqlite3_int64 rowid() const override { return rowid_; }
+};
+
+inline GeneratorTableDef<LoopInfo> define_disasm_loops() {
+    return generator_table<LoopInfo>("disasm_loops")
+        .estimate_rows([]() -> size_t {
+            // Heuristic: very few loops per function
+            return get_func_qty() * 2;
         })
-        .column_int64("func_addr", [](size_t i) -> int64_t {
-            auto& cache = get_disasm_loops_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].func_addr) : 0;
+        .generator([]() -> std::unique_ptr<xsql::Generator<LoopInfo>> {
+            return std::make_unique<DisasmLoopsGenerator>();
         })
-        .column_int("loop_id", [](size_t i) -> int {
-            auto& cache = get_disasm_loops_cache();
-            return i < cache.size() ? cache[i].loop_id : 0;
-        })
-        .column_int64("header_ea", [](size_t i) -> int64_t {
-            auto& cache = get_disasm_loops_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].header_ea) : 0;
-        })
-        .column_int64("header_end_ea", [](size_t i) -> int64_t {
-            auto& cache = get_disasm_loops_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].header_end_ea) : 0;
-        })
-        .column_int64("back_edge_block_ea", [](size_t i) -> int64_t {
-            auto& cache = get_disasm_loops_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].back_edge_block_ea) : 0;
-        })
-        .column_int64("back_edge_block_end", [](size_t i) -> int64_t {
-            auto& cache = get_disasm_loops_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].back_edge_block_end) : 0;
-        })
+        .column_int64("func_addr", [](const LoopInfo& r) -> int64_t { return r.func_addr; })
+        .column_int("loop_id", [](const LoopInfo& r) -> int { return r.loop_id; })
+        .column_int64("header_ea", [](const LoopInfo& r) -> int64_t { return r.header_ea; })
+        .column_int64("header_end_ea", [](const LoopInfo& r) -> int64_t { return r.header_end_ea; })
+        .column_int64("back_edge_block_ea", [](const LoopInfo& r) -> int64_t { return r.back_edge_block_ea; })
+        .column_int64("back_edge_block_end", [](const LoopInfo& r) -> int64_t { return r.back_edge_block_end; })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<LoopsInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 5.0)
@@ -469,8 +505,8 @@ inline bool register_disasm_views(sqlite3* db) {
 // ============================================================================
 
 struct DisassemblyRegistry {
-    VTableDef disasm_calls;
-    VTableDef disasm_loops;
+    GeneratorTableDef<DisasmCallInfo> disasm_calls;
+    GeneratorTableDef<LoopInfo> disasm_loops;
 
     DisassemblyRegistry()
         : disasm_calls(define_disasm_calls())
@@ -478,19 +514,14 @@ struct DisassemblyRegistry {
     {}
 
     void register_all(sqlite3* db) {
-        // Register virtual tables
-        register_and_create(db, "disasm_calls", &disasm_calls);
-        register_and_create(db, "disasm_loops", &disasm_loops);
+        xsql::register_generator_vtable(db, "ida_disasm_calls", &disasm_calls);
+        create_vtable(db, "disasm_calls", "ida_disasm_calls");
+
+        xsql::register_generator_vtable(db, "ida_disasm_loops", &disasm_loops);
+        create_vtable(db, "disasm_loops", "ida_disasm_loops");
 
         // Register views on top
         register_disasm_views(db);
-    }
-
-private:
-    void register_and_create(sqlite3* db, const char* name, const VTableDef* def) {
-        std::string module_name = std::string("ida_") + name;
-        register_vtable(db, module_name.c_str(), def);
-        create_vtable(db, name, module_name.c_str());
     }
 };
 
