@@ -35,8 +35,8 @@
 #include <cstring>
 #include <vector>
 
-// Remote mode header - completely IDA-independent (socket client only)
-#include "remote.hpp"
+// Socket client for remote mode (shared library, no IDA dependency)
+#include <xsql/socket/client.hpp>
 
 // ============================================================================
 // Table Printing (shared between remote and local modes)
@@ -128,7 +128,7 @@ static int table_callback(void*, int argc, char** argv, char** colNames) {
 // On Windows with delayed loading, ida.dll/idalib.dll are never loaded
 // when running in remote mode.
 
-static void print_remote_result(const idasql::RemoteResult& qr) {
+static void print_remote_result(const xsql::socket::RemoteResult& qr) {
     if (qr.rows.empty() && qr.columns.empty()) {
         std::cout << "OK\n";
         return;
@@ -152,7 +152,7 @@ static int run_remote_mode(const std::string& host, int port,
                            const std::string& sql_file,
                            bool interactive) {
     std::cerr << "Connecting to " << host << ":" << port << "..." << std::endl;
-    idasql::RemoteSession remote;
+    xsql::socket::Client remote;
     if (!remote.connect(host, port)) {
         std::cerr << "Error: " << remote.error() << std::endl;
         return 1;
