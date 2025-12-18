@@ -59,6 +59,9 @@ if(MSVC)
     set_target_properties(idasql_cli PROPERTIES
         VS_DEBUGGER_ENVIRONMENT "PATH=${IDABIN_NATIVE};%PATH%"
     )
+    # Windows: Link winsock for remote mode
+    target_link_libraries(idasql_cli PRIVATE ws2_32)
+    # Note: Delayed loading not possible for ida.dll due to data symbol imports (callui)
 elseif(APPLE)
     # macOS: Set RPATH for dylib loading
     set_target_properties(idasql_cli PROPERTIES

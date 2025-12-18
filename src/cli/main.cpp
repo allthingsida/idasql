@@ -2,22 +2,30 @@
  * idasql CLI - Command-line SQL interface to IDA databases
  *
  * Usage:
- *   idasql -s database.i64 -q "SELECT * FROM funcs"     # Single query
+ *   idasql -s database.i64 -q "SELECT * FROM funcs"     # Single query (local)
  *   idasql -s database.i64 -c "SELECT * FROM funcs"     # Same as -q (Python-style)
  *   idasql -s database.i64 -f script.sql                # Execute SQL file
  *   idasql -s database.i64 -i                           # Interactive mode
  *   idasql -s database.i64 --export out.sql             # Export all tables to SQL
  *   idasql -s database.i64 --export out.sql --export-tables=funcs,segments
+ *   idasql --remote localhost:13337 -q "SELECT * FROM funcs"  # Remote mode
  *
  * Switches:
- *   -s <file>            IDA database file (.idb/.i64)
+ *   -s <file>            IDA database file (.idb/.i64) for local mode
+ *   --remote <host:port> Connect to IDASQL plugin server
  *   -q <sql>             Execute single SQL query
  *   -c <sql>             Execute single SQL query (alias for -q)
  *   -f <file>            Execute SQL from file
  *   -i                   Interactive REPL mode
- *   --export <file>      Export tables to SQL file
+ *   --export <file>      Export tables to SQL file (local only)
  *   --export-tables=...  Tables to export (* for all, or table1,table2,...)
  *   -h                   Show help
+ *
+ * Architecture Note:
+ *   Remote mode (--remote) is a thin client that only uses sockets - no IDA
+ *   functions are called. However, ida.dll must still be in PATH because the
+ *   executable links against it (delayed loading is not possible due to
+ *   data symbol imports like callui).
  */
 
 #include <iostream>
@@ -27,10 +35,11 @@
 #include <cstring>
 #include <vector>
 
-#include <idasql/database.hpp>
+// Remote mode header - completely IDA-independent (socket client only)
+#include "remote.hpp"
 
 // ============================================================================
-// Output Formatting
+// Table Printing (shared between remote and local modes)
 // ============================================================================
 
 static int print_callback(void*, int argc, char** argv, char** colNames) {
@@ -55,7 +64,7 @@ struct TablePrinter {
             widths.resize(argc, 0);
             for (int i = 0; i < argc; i++) {
                 columns.push_back(colNames[i] ? colNames[i] : "");
-                widths[i] = std::max(widths[i], columns[i].length());
+                widths[i] = (std::max)(widths[i], columns[i].length());
             }
             first_row = false;
         }
@@ -65,7 +74,7 @@ struct TablePrinter {
         for (int i = 0; i < argc; i++) {
             std::string val = argv[i] ? argv[i] : "NULL";
             row.push_back(val);
-            widths[i] = std::max(widths[i], val.length());
+            widths[i] = (std::max)(widths[i], val.length());
         }
         rows.push_back(std::move(row));
     }
@@ -113,7 +122,150 @@ static int table_callback(void*, int argc, char** argv, char** colNames) {
 }
 
 // ============================================================================
-// REPL - Interactive Mode
+// Remote Mode - Pure socket client (NO IDA DEPENDENCIES)
+// ============================================================================
+// This entire section uses only standard C++ and sockets.
+// On Windows with delayed loading, ida.dll/idalib.dll are never loaded
+// when running in remote mode.
+
+static void print_remote_result(const idasql::RemoteResult& qr) {
+    if (qr.rows.empty() && qr.columns.empty()) {
+        std::cout << "OK\n";
+        return;
+    }
+    TablePrinter printer;
+    for (size_t r = 0; r < qr.rows.size(); r++) {
+        std::vector<char*> argv_ptrs(qr.columns.size());
+        std::vector<char*> cols_ptrs(qr.columns.size());
+        for (size_t c = 0; c < qr.columns.size(); c++) {
+            argv_ptrs[c] = const_cast<char*>(qr.rows[r][c].c_str());
+            cols_ptrs[c] = const_cast<char*>(qr.columns[c].c_str());
+        }
+        printer.add_row(static_cast<int>(qr.columns.size()),
+                        argv_ptrs.data(), cols_ptrs.data());
+    }
+    printer.print();
+}
+
+static int run_remote_mode(const std::string& host, int port,
+                           const std::string& query,
+                           const std::string& sql_file,
+                           bool interactive) {
+    std::cerr << "Connecting to " << host << ":" << port << "..." << std::endl;
+    idasql::RemoteSession remote;
+    if (!remote.connect(host, port)) {
+        std::cerr << "Error: " << remote.error() << std::endl;
+        return 1;
+    }
+    std::cerr << "Connected." << std::endl;
+
+    int result = 0;
+
+    if (!query.empty()) {
+        // Single query
+        auto qr = remote.query(query);
+        if (qr.success) {
+            print_remote_result(qr);
+        } else {
+            std::cerr << "Error: " << qr.error << "\n";
+            result = 1;
+        }
+    } else if (!sql_file.empty()) {
+        // File execution (remote)
+        std::ifstream file(sql_file);
+        if (!file.is_open()) {
+            std::cerr << "Cannot open file: " << sql_file << "\n";
+            return 1;
+        }
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        std::string content = buffer.str();
+
+        std::string stmt;
+        for (char c : content) {
+            stmt += c;
+            if (c == ';') {
+                auto qr = remote.query(stmt);
+                if (qr.success) {
+                    print_remote_result(qr);
+                    std::cout << "\n";
+                } else {
+                    std::cerr << "Error: " << qr.error << "\n";
+                    std::cerr << "Query: " << stmt << "\n";
+                    result = 1;
+                    break;
+                }
+                stmt.clear();
+            }
+        }
+    } else if (interactive) {
+        // Interactive REPL (remote)
+        std::string line;
+        std::string stmt;
+        std::cout << "IDASQL Remote Interactive Mode (" << host << ":" << port << ")\n"
+                  << "Type .quit to exit\n\n";
+
+        while (true) {
+            std::cout << (stmt.empty() ? "idasql> " : "   ...> ");
+            std::cout.flush();
+            if (!std::getline(std::cin, line)) break;
+            if (line.empty()) continue;
+
+            if (stmt.empty() && line[0] == '.') {
+                if (line == ".quit" || line == ".exit") break;
+                if (line == ".tables") {
+                    auto qr = remote.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;");
+                    if (qr.success) {
+                        std::cout << "Tables:\n";
+                        for (const auto& row : qr.rows) {
+                            std::cout << "  " << row[0] << "\n";
+                        }
+                    }
+                    continue;
+                }
+                if (line == ".help") {
+                    std::cout << R"(
+Commands:
+  .tables             List all tables
+  .quit / .exit       Exit interactive mode
+  .help               Show this help
+
+SQL queries end with semicolon (;)
+)" << std::endl;
+                    continue;
+                }
+                std::cerr << "Unknown command: " << line << "\n";
+                continue;
+            }
+
+            stmt += line + " ";
+            size_t last = line.length() - 1;
+            while (last > 0 && (line[last] == ' ' || line[last] == '\t')) last--;
+            if (line[last] == ';') {
+                auto qr = remote.query(stmt);
+                if (qr.success) {
+                    print_remote_result(qr);
+                } else {
+                    std::cerr << "Error: " << qr.error << "\n";
+                }
+                stmt.clear();
+            }
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Local Mode - Uses IDA SDK (delay-loaded on Windows)
+// ============================================================================
+// From here on, code may call IDA functions. On Windows with /DELAYLOAD,
+// ida.dll and idalib.dll are loaded on first use.
+
+#include <idasql/database.hpp>
+
+// ============================================================================
+// REPL - Interactive Mode (Local)
 // ============================================================================
 
 static void show_help() {
@@ -414,14 +566,16 @@ static bool execute_file(idasql::Database& db, const char* path) {
 
 static void print_usage(const char* prog) {
     std::cerr << "IDASQL - SQL interface to IDA databases\n\n"
-              << "Usage: " << prog << " -s <database> [-q|-c <query>] [-f <file>] [-i] [--export <file>]\n\n"
+              << "Usage: " << prog << " -s <database> [-q|-c <query>] [-f <file>] [-i] [--export <file>]\n"
+              << "       " << prog << " --remote <host:port> [-q|-c <query>] [-f <file>] [-i]\n\n"
               << "Options:\n"
-              << "  -s <file>            IDA database file (.idb/.i64) [required]\n"
+              << "  -s <file>            IDA database file (.idb/.i64) for local mode\n"
+              << "  --remote <host:port> Connect to IDASQL plugin server (e.g., localhost:13337)\n"
               << "  -q <sql>             Execute single SQL query\n"
               << "  -c <sql>             Execute single SQL query (alias for -q)\n"
               << "  -f <file>            Execute SQL from file\n"
               << "  -i                   Interactive REPL mode\n"
-              << "  --export <file>      Export tables to SQL file\n"
+              << "  --export <file>      Export tables to SQL file (local mode only)\n"
               << "  --export-tables=X    Tables to export: * (all, default) or table1,table2,...\n"
               << "  -h                   Show this help\n\n"
               << "Examples:\n"
@@ -429,7 +583,8 @@ static void print_usage(const char* prog) {
               << "  " << prog << " -s test.i64 -f queries.sql\n"
               << "  " << prog << " -s test.i64 -i\n"
               << "  " << prog << " -s test.i64 --export dump.sql\n"
-              << "  " << prog << " -s test.i64 --export dump.sql --export-tables=funcs,segments,xrefs\n";
+              << "  " << prog << " --remote localhost:13337 -q \"SELECT * FROM funcs LIMIT 5\"\n"
+              << "  " << prog << " --remote localhost:13337 -i\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -438,12 +593,15 @@ int main(int argc, char* argv[]) {
     std::string sql_file;
     std::string export_file;
     std::string export_tables = "*";  // Default: all tables
+    std::string remote_spec;          // host:port for remote mode
     bool interactive = false;
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
             db_path = argv[++i];
+        } else if (strcmp(argv[i], "--remote") == 0 && i + 1 < argc) {
+            remote_spec = argv[++i];
         } else if ((strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "-c") == 0) && i + 1 < argc) {
             query = argv[++i];
         } else if ((strcmp(argv[i], "-f") == 0) && i + 1 < argc) {
@@ -465,8 +623,16 @@ int main(int argc, char* argv[]) {
     }
 
     // Validate arguments
-    if (db_path.empty()) {
-        std::cerr << "Error: Database path required (-s)\n\n";
+    bool remote_mode = !remote_spec.empty();
+
+    if (!remote_mode && db_path.empty()) {
+        std::cerr << "Error: Database path required (-s) or use --remote\n\n";
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    if (remote_mode && !db_path.empty()) {
+        std::cerr << "Error: Cannot use both -s and --remote\n\n";
         print_usage(argv[0]);
         return 1;
     }
@@ -477,8 +643,35 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Open database
-    std::cerr << "Opening: " << db_path << "..." << std::endl;  // Flush immediately
+    if (remote_mode && !export_file.empty()) {
+        std::cerr << "Error: --export not supported in remote mode\n\n";
+        print_usage(argv[0]);
+        return 1;
+    }
+
+    //=========================================================================
+    // Remote mode - thin client, no IDA kernel loaded
+    //=========================================================================
+    // IMPORTANT: This path never calls any IDA functions.
+    // On Windows with delayed loading, ida.dll/idalib.dll stay unloaded.
+    if (remote_mode) {
+        // Parse host:port
+        std::string host = "127.0.0.1";
+        int port = 13337;
+        auto colon = remote_spec.find(':');
+        if (colon != std::string::npos) {
+            host = remote_spec.substr(0, colon);
+            port = std::stoi(remote_spec.substr(colon + 1));
+        } else {
+            host = remote_spec;
+        }
+        return run_remote_mode(host, port, query, sql_file, interactive);
+    }
+
+    //=========================================================================
+    // Local mode - requires IDA SDK (delay-loaded on Windows)
+    //=========================================================================
+    std::cerr << "Opening: " << db_path << "..." << std::endl;
     idasql::Database db;
     if (!db.open(db_path.c_str())) {
         std::cerr << "Error: " << db.error() << std::endl;
