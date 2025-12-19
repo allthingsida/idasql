@@ -32,6 +32,7 @@
 #include <idasql/entities.hpp>
 #include <idasql/entities_types.hpp>
 #include <idasql/metadata.hpp>
+#include <idasql/functions.hpp>
 #include "test_utils.hpp"
 
 namespace idasql {
@@ -140,6 +141,9 @@ protected:
         // Register types tables
         types_ = new types::TypesRegistry();
         types_->register_all(db_);
+
+        // Register SQL functions (for jump_search, etc.)
+        functions::register_sql_functions(db_);
     }
 
     void TearDown() override {

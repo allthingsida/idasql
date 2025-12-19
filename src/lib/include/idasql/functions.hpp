@@ -1253,6 +1253,184 @@ static void sql_list_lvars(sqlite3_context* ctx, int, sqlite3_value**) {
 #endif
 
 // ============================================================================
+// Jump Search Functions (unified entity search)
+// ============================================================================
+
+// Build dynamic SQL query for entity search
+// prefix: search pattern
+// contains: if true, use '%prefix%', otherwise 'prefix%'
+// limit: max results
+// offset: pagination offset
+inline std::string build_jump_query(const std::string& prefix, bool contains, int limit, int offset) {
+    if (prefix.empty()) return "";
+
+    // Escape single quotes in prefix
+    std::string escaped;
+    for (char c : prefix) {
+        if (c == '\'') escaped += "''";
+        else escaped += std::tolower(c);
+    }
+
+    std::string pattern = contains
+        ? ("'%" + escaped + "%'")
+        : ("'" + escaped + "%'");
+
+    std::ostringstream sql;
+    sql << "SELECT name, kind, address, ordinal, parent_name, full_name FROM (\n";
+
+    // Functions
+    sql << "    SELECT name, 'function' as kind, address, NULL as ordinal,\n";
+    sql << "           NULL as parent_name, name as full_name\n";
+    sql << "    FROM funcs WHERE LOWER(name) LIKE " << pattern << "\n";
+    sql << "    UNION ALL\n";
+
+    // Labels (exclude function starts)
+    sql << "    SELECT name, 'label', address, NULL, NULL, name\n";
+    sql << "    FROM names n WHERE LOWER(name) LIKE " << pattern << "\n";
+    sql << "      AND NOT EXISTS (SELECT 1 FROM funcs f WHERE f.address = n.address)\n";
+    sql << "    UNION ALL\n";
+
+    // Segments
+    sql << "    SELECT name, 'segment', start_ea, NULL, NULL, name\n";
+    sql << "    FROM segments WHERE LOWER(name) LIKE " << pattern << "\n";
+    sql << "    UNION ALL\n";
+
+    // Structs
+    sql << "    SELECT name, 'struct', NULL, ordinal, NULL, name\n";
+    sql << "    FROM types WHERE is_struct = 1 AND LOWER(name) LIKE " << pattern << "\n";
+    sql << "    UNION ALL\n";
+
+    // Unions
+    sql << "    SELECT name, 'union', NULL, ordinal, NULL, name\n";
+    sql << "    FROM types WHERE is_union = 1 AND LOWER(name) LIKE " << pattern << "\n";
+    sql << "    UNION ALL\n";
+
+    // Enums
+    sql << "    SELECT name, 'enum', NULL, ordinal, NULL, name\n";
+    sql << "    FROM types WHERE is_enum = 1 AND LOWER(name) LIKE " << pattern << "\n";
+    sql << "    UNION ALL\n";
+
+    // Struct/union members
+    sql << "    SELECT member_name, 'member', NULL, type_ordinal,\n";
+    sql << "           type_name, type_name || '.' || member_name\n";
+    sql << "    FROM types_members WHERE LOWER(member_name) LIKE " << pattern << "\n";
+    sql << "    UNION ALL\n";
+
+    // Enum members
+    sql << "    SELECT value_name, 'enum_member', NULL, type_ordinal,\n";
+    sql << "           type_name, type_name || '.' || value_name\n";
+    sql << "    FROM types_enum_values WHERE LOWER(value_name) LIKE " << pattern << "\n";
+
+    sql << ")\n";
+    sql << "ORDER BY kind, name\n";
+    sql << "LIMIT " << limit << " OFFSET " << offset;
+
+    return sql.str();
+}
+
+// jump_search(prefix, mode, limit, offset) - Search entities, return JSON array
+// mode: 'prefix' or 'contains'
+static void sql_jump_search(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+    if (argc < 4) {
+        sqlite3_result_error(ctx, "jump_search requires 4 arguments (prefix, mode, limit, offset)", -1);
+        return;
+    }
+
+    const char* prefix = (const char*)sqlite3_value_text(argv[0]);
+    const char* mode = (const char*)sqlite3_value_text(argv[1]);
+    int limit = sqlite3_value_int(argv[2]);
+    int offset = sqlite3_value_int(argv[3]);
+
+    if (!prefix || !mode) {
+        sqlite3_result_error(ctx, "Invalid arguments", -1);
+        return;
+    }
+
+    bool contains = (strcmp(mode, "contains") == 0);
+    std::string query = build_jump_query(prefix, contains, limit, offset);
+
+    if (query.empty()) {
+        sqlite3_result_text(ctx, "[]", -1, SQLITE_STATIC);
+        return;
+    }
+
+    // Execute query and build JSON result
+    sqlite3* db = sqlite3_context_db_handle(ctx);
+    sqlite3_stmt* stmt;
+
+    if (sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        std::string err = "Query error: " + std::string(sqlite3_errmsg(db));
+        sqlite3_result_error(ctx, err.c_str(), -1);
+        return;
+    }
+
+    std::ostringstream json;
+    json << "[";
+    bool first = true;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (!first) json << ",";
+        first = false;
+
+        const char* name = (const char*)sqlite3_column_text(stmt, 0);
+        const char* kind = (const char*)sqlite3_column_text(stmt, 1);
+        int64_t address = sqlite3_column_int64(stmt, 2);
+        int ordinal = sqlite3_column_int(stmt, 3);
+        const char* parent = (const char*)sqlite3_column_text(stmt, 4);
+        const char* full_name = (const char*)sqlite3_column_text(stmt, 5);
+
+        json << "{";
+        json << "\"name\":\"" << (name ? name : "") << "\",";
+        json << "\"kind\":\"" << (kind ? kind : "") << "\",";
+
+        if (sqlite3_column_type(stmt, 2) != SQLITE_NULL) {
+            json << "\"address\":" << address << ",";
+        } else {
+            json << "\"address\":null,";
+        }
+
+        if (sqlite3_column_type(stmt, 3) != SQLITE_NULL) {
+            json << "\"ordinal\":" << ordinal << ",";
+        } else {
+            json << "\"ordinal\":null,";
+        }
+
+        json << "\"parent_name\":" << (parent ? ("\"" + std::string(parent) + "\"") : "null") << ",";
+        json << "\"full_name\":\"" << (full_name ? full_name : "") << "\"";
+        json << "}";
+    }
+
+    json << "]";
+    sqlite3_finalize(stmt);
+
+    std::string result = json.str();
+    sqlite3_result_text(ctx, result.c_str(), -1, SQLITE_TRANSIENT);
+}
+
+// jump_query(prefix, mode, limit, offset) - Return the SQL query string
+static void sql_jump_query(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+    if (argc < 4) {
+        sqlite3_result_error(ctx, "jump_query requires 4 arguments (prefix, mode, limit, offset)", -1);
+        return;
+    }
+
+    const char* prefix = (const char*)sqlite3_value_text(argv[0]);
+    const char* mode = (const char*)sqlite3_value_text(argv[1]);
+    int limit = sqlite3_value_int(argv[2]);
+    int offset = sqlite3_value_int(argv[3]);
+
+    if (!prefix || !mode) {
+        sqlite3_result_error(ctx, "Invalid arguments", -1);
+        return;
+    }
+
+    bool contains = (strcmp(mode, "contains") == 0);
+    std::string query = build_jump_query(prefix, contains, limit, offset);
+
+    sqlite3_result_text(ctx, query.c_str(), -1, SQLITE_TRANSIENT);
+}
+
+// ============================================================================
 // Registration
 // ============================================================================
 
@@ -1324,6 +1502,10 @@ inline bool register_sql_functions(sqlite3* db) {
     sqlite3_create_function(db, "gen_cfg_dot", 1, SQLITE_UTF8, nullptr, sql_gen_cfg_dot, nullptr, nullptr);
     sqlite3_create_function(db, "gen_cfg_dot_file", 2, SQLITE_UTF8, nullptr, sql_gen_cfg_dot_file, nullptr, nullptr);
     sqlite3_create_function(db, "gen_schema_dot", 0, SQLITE_UTF8, nullptr, sql_gen_schema_dot, nullptr, nullptr);
+
+    // Jump search
+    sqlite3_create_function(db, "jump_search", 4, SQLITE_UTF8, nullptr, sql_jump_search, nullptr, nullptr);
+    sqlite3_create_function(db, "jump_query", 4, SQLITE_UTF8, nullptr, sql_jump_query, nullptr, nullptr);
 
     return true;
 }
