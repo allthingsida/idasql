@@ -16,6 +16,7 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
+#include <idasql/entities_search.hpp>
 
 // IDA SDK headers
 #include <ida.hpp>
@@ -736,6 +737,9 @@ struct TableRegistry {
         register_cached_table(db, "blocks", &blocks);
         register_cached_table(db, "imports", &imports);
         register_cached_table(db, "strings", &strings);
+
+        // Table-valued function for entity search
+        search::register_jump_entities(db);
     }
 
 private:
