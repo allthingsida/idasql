@@ -35,7 +35,6 @@
 
 // IDASQL components
 #include <idasql/entities.hpp>
-#include <idasql/entities_live.hpp>
 #include <idasql/entities_ext.hpp>
 #include <idasql/entities_types.hpp>
 #include <idasql/metadata.hpp>
@@ -244,7 +243,6 @@ private:
 
     // Table registries (prevent dangling virtual table pointers)
     std::unique_ptr<entities::TableRegistry> entities_;
-    std::unique_ptr<live::LiveRegistry> live_;
     std::unique_ptr<metadata::MetadataRegistry> metadata_;
     std::unique_ptr<extended::ExtendedRegistry> extended_;
     std::unique_ptr<disassembly::DisassemblyRegistry> disassembly_;
@@ -263,9 +261,6 @@ private:
         // Register all virtual tables
         entities_ = std::make_unique<entities::TableRegistry>();
         entities_->register_all(db_);
-
-        live_ = std::make_unique<live::LiveRegistry>();
-        live_->register_all(db_);
 
         metadata_ = std::make_unique<metadata::MetadataRegistry>();
         metadata_->register_all(db_);

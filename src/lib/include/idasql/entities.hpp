@@ -20,6 +20,8 @@
 
 // IDA SDK headers
 #include <ida.hpp>
+#include <idp.hpp>
+#include <kernwin.hpp>  // Must come before moves.hpp
 #include <funcs.hpp>
 #include <segment.hpp>
 #include <name.hpp>
@@ -29,7 +31,9 @@
 #include <strlist.hpp>
 #include <gdl.hpp>
 #include <bytes.hpp>
-#include <lines.hpp>  // For comments (get_cmt, set_cmt)
+#include <lines.hpp>   // For comments (get_cmt, set_cmt)
+#include <ua.hpp>      // For instructions (insn_t, decode_insn)
+#include <moves.hpp>   // For bookmarks
 
 namespace idasql {
 namespace entities {
@@ -77,7 +81,6 @@ inline std::string safe_entry_name(size_t idx) {
 
 inline VTableDef define_funcs() {
     return table("funcs")
-        .on_modify(ida_undo_hook)
         .count([]() { return get_func_qty(); })
         .column_int64("address", [](size_t i) -> int64_t {
             func_t* f = getn_func(i);
@@ -91,9 +94,12 @@ inline VTableDef define_funcs() {
             },
             // Setter - rename function
             [](size_t i, const char* new_name) -> bool {
+                auto_wait();
                 func_t* f = getn_func(i);
                 if (!f) return false;
-                return set_name(f->start_ea, new_name, SN_CHECK) != 0;
+                bool ok = set_name(f->start_ea, new_name, SN_CHECK) != 0;
+                auto_wait();
+                return ok;
             })
         .column_int64("size", [](size_t i) -> int64_t {
             func_t* f = getn_func(i);
@@ -108,9 +114,12 @@ inline VTableDef define_funcs() {
             return f ? static_cast<int64_t>(f->flags) : 0;
         })
         .deletable([](size_t i) -> bool {
+            auto_wait();
             func_t* f = getn_func(i);
             if (!f) return false;
-            return del_func(f->start_ea);
+            bool ok = del_func(f->start_ea);
+            auto_wait();
+            return ok;
         })
         .build();
 }
@@ -146,12 +155,11 @@ inline VTableDef define_segments() {
 }
 
 // ============================================================================
-// NAMES Table (with UPDATE support)
+// NAMES Table (with UPDATE/DELETE support)
 // ============================================================================
 
 inline VTableDef define_names() {
     return table("names")
-        .on_modify(ida_undo_hook)
         .count([]() { return get_nlist_size(); })
         .column_int64("address", [](size_t i) -> int64_t {
             return static_cast<int64_t>(get_nlist_ea(i));
@@ -164,15 +172,27 @@ inline VTableDef define_names() {
             },
             // Setter - rename the address
             [](size_t i, const char* new_name) -> bool {
+                auto_wait();
                 ea_t ea = get_nlist_ea(i);
                 if (ea == BADADDR) return false;
-                return set_name(ea, new_name, SN_CHECK) != 0;
+                bool ok = set_name(ea, new_name, SN_CHECK) != 0;
+                auto_wait();
+                return ok;
             })
         .column_int("is_public", [](size_t i) -> int {
             return is_public_name(get_nlist_ea(i)) ? 1 : 0;
         })
         .column_int("is_weak", [](size_t i) -> int {
             return is_weak_name(get_nlist_ea(i)) ? 1 : 0;
+        })
+        // DELETE via set_name(ea, "") - removes the name
+        .deletable([](size_t i) -> bool {
+            auto_wait();
+            ea_t ea = get_nlist_ea(i);
+            if (ea == BADADDR) return false;
+            bool ok = set_name(ea, "", SN_NOWARN) != 0;
+            auto_wait();
+            return ok;
         })
         .build();
 }
@@ -232,7 +252,6 @@ struct CommentIterator {
 
 inline VTableDef define_comments() {
     return table("comments")
-        .on_modify(ida_undo_hook)
         .count([]() {
             CommentIterator::rebuild();
             return CommentIterator::get_addresses().size();
@@ -252,9 +271,12 @@ inline VTableDef define_comments() {
             },
             // Setter
             [](size_t i, const char* new_cmt) -> bool {
+                auto_wait();
                 auto& addrs = CommentIterator::get_addresses();
                 if (i >= addrs.size()) return false;
-                return set_cmt(addrs[i], new_cmt, false);
+                bool ok = set_cmt(addrs[i], new_cmt, false);
+                auto_wait();
+                return ok;
             })
         .column_text_rw("rpt_comment",
             // Getter
@@ -267,17 +289,22 @@ inline VTableDef define_comments() {
             },
             // Setter
             [](size_t i, const char* new_cmt) -> bool {
+                auto_wait();
                 auto& addrs = CommentIterator::get_addresses();
                 if (i >= addrs.size()) return false;
-                return set_cmt(addrs[i], new_cmt, true);
+                bool ok = set_cmt(addrs[i], new_cmt, true);
+                auto_wait();
+                return ok;
             })
         .deletable([](size_t i) -> bool {
+            auto_wait();
             // Delete both comments at this address
             auto& addrs = CommentIterator::get_addresses();
             if (i >= addrs.size()) return false;
             ea_t ea = addrs[i];
             set_cmt(ea, "", false);  // Delete regular
             set_cmt(ea, "", true);   // Delete repeatable
+            auto_wait();
             return true;
         })
         .build();
@@ -695,6 +722,355 @@ inline CachedTableDef<string_info_t> define_strings() {
 }
 
 // ============================================================================
+// BOOKMARKS Table (with UPDATE/DELETE support)
+// ============================================================================
+
+struct BookmarkIterator {
+    struct Entry {
+        uint32_t index;
+        ea_t ea;
+        std::string desc;
+    };
+
+    static std::vector<Entry>& get_entries() {
+        static std::vector<Entry> entries;
+        return entries;
+    }
+
+    static void rebuild() {
+        auto& entries = get_entries();
+        entries.clear();
+
+        // Get bookmarks for IDA View (disassembly)
+        idaplace_t idaplace(inf_get_min_ea(), 0);
+        renderer_info_t rinfo;
+        lochist_entry_t loc(&idaplace, rinfo);
+
+        uint32_t count = bookmarks_t::size(loc, nullptr);
+
+        for (uint32_t idx = 0; idx < count; ++idx) {
+            idaplace_t place(0, 0);
+            lochist_entry_t entry(&place, rinfo);
+            qstring desc;
+            uint32_t index = idx;
+
+            if (bookmarks_t::get(&entry, &desc, &index, nullptr)) {
+                Entry e;
+                e.index = index;
+                e.ea = ((idaplace_t*)entry.place())->ea;
+                e.desc = desc.c_str();
+                entries.push_back(e);
+            }
+        }
+    }
+};
+
+inline VTableDef define_bookmarks() {
+    return table("bookmarks")
+        .count([]() {
+            BookmarkIterator::rebuild();
+            return BookmarkIterator::get_entries().size();
+        })
+        .column_int("slot", [](size_t i) -> int {
+            auto& entries = BookmarkIterator::get_entries();
+            return i < entries.size() ? entries[i].index : 0;
+        })
+        .column_int64("address", [](size_t i) -> int64_t {
+            auto& entries = BookmarkIterator::get_entries();
+            return i < entries.size() ? entries[i].ea : 0;
+        })
+        .column_text_rw("description",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& entries = BookmarkIterator::get_entries();
+                return i < entries.size() ? entries[i].desc : "";
+            },
+            // Setter - update bookmark description
+            [](size_t i, const char* new_desc) -> bool {
+                auto_wait();
+                auto& entries = BookmarkIterator::get_entries();
+                if (i >= entries.size()) return false;
+
+                idaplace_t place(entries[i].ea, 0);
+                renderer_info_t rinfo;
+                lochist_entry_t loc(&place, rinfo);
+                bool ok = bookmarks_t_set_desc(qstring(new_desc), loc, entries[i].index, nullptr);
+                auto_wait();
+                return ok;
+            })
+        .deletable([](size_t i) -> bool {
+            auto_wait();
+            auto& entries = BookmarkIterator::get_entries();
+            if (i >= entries.size()) return false;
+
+            idaplace_t place(entries[i].ea, 0);
+            renderer_info_t rinfo;
+            lochist_entry_t loc(&place, rinfo);
+            bool ok = bookmarks_t::erase(loc, entries[i].index, nullptr);
+            auto_wait();
+            return ok;
+        })
+        .build();
+}
+
+// ============================================================================
+// HEADS Table - All defined items in the database
+// ============================================================================
+
+struct HeadsIterator {
+    static std::vector<ea_t>& get_addresses() {
+        static std::vector<ea_t> addrs;
+        return addrs;
+    }
+
+    static void rebuild() {
+        auto& addrs = get_addresses();
+        addrs.clear();
+
+        ea_t ea = inf_get_min_ea();
+        ea_t max_ea = inf_get_max_ea();
+
+        while (ea < max_ea && ea != BADADDR) {
+            addrs.push_back(ea);
+            ea = next_head(ea, max_ea);
+        }
+    }
+};
+
+inline const char* get_item_type_str(ea_t ea) {
+    flags64_t f = get_flags(ea);
+    if (is_code(f)) return "code";
+    if (is_strlit(f)) return "string";
+    if (is_struct(f)) return "struct";
+    if (is_align(f)) return "align";
+    if (is_data(f)) return "data";
+    if (is_unknown(f)) return "unknown";
+    return "other";
+}
+
+inline VTableDef define_heads() {
+    return table("heads")
+        .count([]() {
+            HeadsIterator::rebuild();
+            return HeadsIterator::get_addresses().size();
+        })
+        .column_int64("address", [](size_t i) -> int64_t {
+            auto& addrs = HeadsIterator::get_addresses();
+            return i < addrs.size() ? addrs[i] : 0;
+        })
+        .column_int64("size", [](size_t i) -> int64_t {
+            auto& addrs = HeadsIterator::get_addresses();
+            if (i >= addrs.size()) return 0;
+            return get_item_size(addrs[i]);
+        })
+        .column_text("type", [](size_t i) -> std::string {
+            auto& addrs = HeadsIterator::get_addresses();
+            if (i >= addrs.size()) return "";
+            return get_item_type_str(addrs[i]);
+        })
+        .column_int64("flags", [](size_t i) -> int64_t {
+            auto& addrs = HeadsIterator::get_addresses();
+            if (i >= addrs.size()) return 0;
+            return get_flags(addrs[i]);
+        })
+        .column_text("disasm", [](size_t i) -> std::string {
+            auto& addrs = HeadsIterator::get_addresses();
+            if (i >= addrs.size()) return "";
+            qstring line;
+            generate_disasm_line(&line, addrs[i], GENDSM_FORCE_CODE);
+            tag_remove(&line);
+            return line.c_str();
+        })
+        .build();
+}
+
+// ============================================================================
+// INSTRUCTIONS Table - With func_addr constraint pushdown
+// ============================================================================
+
+// Iterator for instructions within a single function (constraint pushdown)
+class InstructionsInFuncIterator : public xsql::RowIterator {
+    ea_t func_addr_;
+    func_t* pfn_ = nullptr;
+    func_item_iterator_t fii_;
+    bool started_ = false;
+    bool valid_ = false;
+    ea_t current_ea_ = BADADDR;
+
+public:
+    explicit InstructionsInFuncIterator(ea_t func_addr)
+        : func_addr_(func_addr)
+    {
+        pfn_ = get_func(func_addr_);
+    }
+
+    bool next() override {
+        if (!pfn_) return false;
+
+        if (!started_) {
+            started_ = true;
+            valid_ = fii_.set(pfn_);
+            if (valid_) current_ea_ = fii_.current();
+        } else if (valid_) {
+            valid_ = fii_.next_code();
+            if (valid_) current_ea_ = fii_.current();
+        }
+        return valid_;
+    }
+
+    bool eof() const override {
+        return started_ && !valid_;
+    }
+
+    void column(sqlite3_context* ctx, int col) override {
+        switch (col) {
+            case 0: // address
+                sqlite3_result_int64(ctx, current_ea_);
+                break;
+            case 1: { // itype
+                insn_t insn;
+                if (decode_insn(&insn, current_ea_) > 0) {
+                    sqlite3_result_int(ctx, insn.itype);
+                } else {
+                    sqlite3_result_int(ctx, 0);
+                }
+                break;
+            }
+            case 2: { // mnemonic
+                qstring mnem;
+                print_insn_mnem(&mnem, current_ea_);
+                sqlite3_result_text(ctx, mnem.c_str(), -1, SQLITE_TRANSIENT);
+                break;
+            }
+            case 3: // size
+                sqlite3_result_int(ctx, get_item_size(current_ea_));
+                break;
+            case 4: // operand0
+            case 5: // operand1
+            case 6: { // operand2
+                qstring op;
+                print_operand(&op, current_ea_, col - 4);
+                tag_remove(&op);
+                sqlite3_result_text(ctx, op.c_str(), -1, SQLITE_TRANSIENT);
+                break;
+            }
+            case 7: { // disasm
+                qstring line;
+                generate_disasm_line(&line, current_ea_, 0);
+                tag_remove(&line);
+                sqlite3_result_text(ctx, line.c_str(), -1, SQLITE_TRANSIENT);
+                break;
+            }
+            case 8: // func_addr
+                sqlite3_result_int64(ctx, func_addr_);
+                break;
+        }
+    }
+
+    int64_t rowid() const override {
+        return static_cast<int64_t>(current_ea_);
+    }
+};
+
+// Cache for full instruction scan
+struct InstructionsCache {
+    static std::vector<ea_t>& get() {
+        static std::vector<ea_t> cache;
+        return cache;
+    }
+
+    static void rebuild() {
+        auto& cache = get();
+        cache.clear();
+
+        ea_t ea = inf_get_min_ea();
+        ea_t max_ea = inf_get_max_ea();
+
+        while (ea < max_ea && ea != BADADDR) {
+            flags64_t f = get_flags(ea);
+            if (is_code(f)) {
+                cache.push_back(ea);
+            }
+            ea = next_head(ea, max_ea);
+        }
+    }
+};
+
+inline VTableDef define_instructions() {
+    return table("instructions")
+        .count([]() {
+            InstructionsCache::rebuild();
+            return InstructionsCache::get().size();
+        })
+        .column_int64("address", [](size_t i) -> int64_t {
+            auto& cache = InstructionsCache::get();
+            return i < cache.size() ? cache[i] : 0;
+        })
+        .column_int("itype", [](size_t i) -> int {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return 0;
+            insn_t insn;
+            if (decode_insn(&insn, cache[i]) > 0) return insn.itype;
+            return 0;
+        })
+        .column_text("mnemonic", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
+            qstring mnem;
+            print_insn_mnem(&mnem, cache[i]);
+            return mnem.c_str();
+        })
+        .column_int("size", [](size_t i) -> int {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return 0;
+            return get_item_size(cache[i]);
+        })
+        .column_text("operand0", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
+            qstring op;
+            print_operand(&op, cache[i], 0);
+            tag_remove(&op);
+            return op.c_str();
+        })
+        .column_text("operand1", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
+            qstring op;
+            print_operand(&op, cache[i], 1);
+            tag_remove(&op);
+            return op.c_str();
+        })
+        .column_text("operand2", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
+            qstring op;
+            print_operand(&op, cache[i], 2);
+            tag_remove(&op);
+            return op.c_str();
+        })
+        .column_text("disasm", [](size_t i) -> std::string {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return "";
+            qstring line;
+            generate_disasm_line(&line, cache[i], 0);
+            tag_remove(&line);
+            return line.c_str();
+        })
+        .column_int64("func_addr", [](size_t i) -> int64_t {
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return 0;
+            func_t* f = get_func(cache[i]);
+            return f ? f->start_ea : 0;
+        })
+        // Constraint pushdown: func_addr = X uses optimized iterator
+        .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<InstructionsInFuncIterator>(static_cast<ea_t>(func_addr));
+        }, 100.0)
+        .build();
+}
+
+// ============================================================================
 // Registry: All tables in one place
 // ============================================================================
 
@@ -705,6 +1081,9 @@ struct TableRegistry {
     VTableDef names;
     VTableDef entries;
     VTableDef comments;
+    VTableDef bookmarks;
+    VTableDef heads;
+    VTableDef instructions;
 
     // Cached tables (query-scoped cache - memory freed after query)
     CachedTableDef<XrefInfo> xrefs;
@@ -718,6 +1097,9 @@ struct TableRegistry {
         , names(define_names())
         , entries(define_entries())
         , comments(define_comments())
+        , bookmarks(define_bookmarks())
+        , heads(define_heads())
+        , instructions(define_instructions())
         , xrefs(define_xrefs())
         , blocks(define_blocks())
         , imports(define_imports())
@@ -731,6 +1113,9 @@ struct TableRegistry {
         register_index_table(db, "names", &names);
         register_index_table(db, "entries", &entries);
         register_index_table(db, "comments", &comments);
+        register_index_table(db, "bookmarks", &bookmarks);
+        register_index_table(db, "heads", &heads);
+        register_index_table(db, "instructions", &instructions);
 
         // Cached tables (query-scoped cache)
         register_cached_table(db, "xrefs", &xrefs);

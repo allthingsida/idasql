@@ -19,7 +19,6 @@
 
 // Entity tables
 #include <idasql/entities.hpp>
-#include <idasql/entities_live.hpp>
 #include <idasql/entities_ext.hpp>
 #include <idasql/entities_types.hpp>
 
