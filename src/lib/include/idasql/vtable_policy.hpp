@@ -180,7 +180,7 @@ inline void idasql_config_func(sqlite3_context* ctx, int argc, sqlite3_value** a
 // Register the config function with SQLite
 inline bool register_config_function(sqlite3* db) {
     return sqlite3_create_function(db, "idasql_config", -1,
-                                    SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                    SQLITE_UTF8,
                                     nullptr, idasql_config_func,
                                     nullptr, nullptr) == SQLITE_OK;
 }
