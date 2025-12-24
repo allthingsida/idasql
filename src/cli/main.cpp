@@ -150,9 +150,13 @@ static void print_remote_result(const xsql::socket::RemoteResult& qr) {
 static int run_remote_mode(const std::string& host, int port,
                            const std::string& query,
                            const std::string& sql_file,
+                           const std::string& auth_token,
                            bool interactive) {
-    std::cerr << "Connecting to " << host << ":" << port << "..." << std::endl;
+    std::cerr << "Connecting to " << host << ":" << port << "..." << std::endl; 
     xsql::socket::Client remote;
+    if (!auth_token.empty()) {
+        remote.set_auth_token(auth_token);
+    }
     if (!remote.connect(host, port)) {
         std::cerr << "Error: " << remote.error() << std::endl;
         return 1;
@@ -571,6 +575,7 @@ static void print_usage(const char* prog) {
               << "Options:\n"
               << "  -s <file>            IDA database file (.idb/.i64) for local mode\n"
               << "  --remote <host:port> Connect to IDASQL plugin server (e.g., localhost:13337)\n"
+              << "  --token <token>      Auth token for remote mode (if server requires it)\n"
               << "  -q <sql>             Execute single SQL query\n"
               << "  -c <sql>             Execute single SQL query (alias for -q)\n"
               << "  -f <file>            Execute SQL from file\n"
@@ -594,17 +599,20 @@ int main(int argc, char* argv[]) {
     std::string export_file;
     std::string export_tables = "*";  // Default: all tables
     std::string remote_spec;          // host:port for remote mode
+    std::string auth_token;           // --token for remote mode
     bool interactive = false;
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
             db_path = argv[++i];
-        } else if (strcmp(argv[i], "--remote") == 0 && i + 1 < argc) {
+        } else if (strcmp(argv[i], "--remote") == 0 && i + 1 < argc) {    
             remote_spec = argv[++i];
+        } else if (strcmp(argv[i], "--token") == 0 && i + 1 < argc) {
+            auth_token = argv[++i];
         } else if ((strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "-c") == 0) && i + 1 < argc) {
             query = argv[++i];
-        } else if ((strcmp(argv[i], "-f") == 0) && i + 1 < argc) {
+        } else if ((strcmp(argv[i], "-f") == 0) && i + 1 < argc) {        
             sql_file = argv[++i];
         } else if (strcmp(argv[i], "-i") == 0) {
             interactive = true;
@@ -665,7 +673,7 @@ int main(int argc, char* argv[]) {
         } else {
             host = remote_spec;
         }
-        return run_remote_mode(host, port, query, sql_file, interactive);
+        return run_remote_mode(host, port, query, sql_file, auth_token, interactive);
     }
 
     //=========================================================================
