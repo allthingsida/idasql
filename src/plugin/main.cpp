@@ -23,6 +23,8 @@
 #include <queue>
 #include <mutex>
 #include <functional>
+#include <limits>
+#include <cstdlib>
 
 // IDA SDK headers
 #include <ida.hpp>
@@ -109,31 +111,52 @@ std::string result_to_json(const idasql::QueryResult& result)
     return json.str();
 }
 
-std::string extract_sql(const std::string& json)
+std::string extract_field(const std::string& json, const char* field)
 {
-    auto pos = json.find("\"sql\"");
-    if (pos == std::string::npos) return "";
+    if (!field || !*field) return "";
 
-    pos = json.find("\"", pos + 5);
+    std::string key = "\"";
+    key += field;
+    key += "\"";
+
+    auto key_pos = json.find(key);
+    if (key_pos == std::string::npos) return "";
+
+    auto colon_pos = json.find(':', key_pos + key.size());
+    if (colon_pos == std::string::npos) return "";
+
+    auto pos = json.find('\"', colon_pos + 1);
     if (pos == std::string::npos) return "";
     pos++;
 
-    std::string sql;
-    while (pos < json.size() && json[pos] != '"') {
+    std::string value;
+    while (pos < json.size() && json[pos] != '\"') {
         if (json[pos] == '\\' && pos + 1 < json.size()) {
             pos++;
             switch (json[pos]) {
-                case 'n': sql += '\n'; break;
-                case 'r': sql += '\r'; break;
-                case 't': sql += '\t'; break;
-                default: sql += json[pos]; break;
+                case 'n': value += '\n'; break;
+                case 'r': value += '\r'; break;
+                case 't': value += '\t'; break;
+                case '\"': value += '\"'; break;
+                case '\\': value += '\\'; break;
+                default: value += json[pos]; break;
             }
         } else {
-            sql += json[pos];
+            value += json[pos];
         }
         pos++;
     }
-    return sql;
+    return value;
+}
+
+std::string extract_sql(const std::string& json)
+{
+    return extract_field(json, "sql");
+}
+
+std::string extract_token(const std::string& json)
+{
+    return extract_field(json, "token");
 }
 
 } // anonymous namespace
@@ -188,6 +211,7 @@ private:
     socket_t listen_sock_ = SOCKET_INVALID;
     int port_ = 0;
     query_func_t query_func_;
+    std::string auth_token_;
 
     // Poll mode state
     bool poll_mode_ = false;
@@ -197,13 +221,17 @@ private:
 
 public:
     void set_engine(idasql::QueryEngine* e) { engine_ = e; }
-    void set_query_func(query_func_t func) { query_func_ = std::move(func); }
+    void set_query_func(query_func_t func) { query_func_ = std::move(func); }   
     void set_poll_mode(bool poll) { poll_mode_ = poll; }
+    void set_auth_token(std::string token) { auth_token_ = std::move(token); }
 
     bool start(int port)
     {
         if (running_) return false;
         port_ = port;
+        if (!auth_token_.empty()) {
+            msg("IDASQL: Auth token enabled (set via IDASQL_TOKEN)\n");
+        }
         running_ = true;
         thread_ = std::thread(&idasql_server_t::run_server, this);
         return true;
@@ -257,27 +285,46 @@ public:
 private:
     bool send_message(socket_t sock, const std::string& payload)
     {
+        if (payload.size() > 10 * 1024 * 1024) return false;
+        if (payload.size() > static_cast<size_t>((std::numeric_limits<uint32_t>::max)())) return false;
+
+        auto send_all = [&](const char* data, size_t len) -> bool {
+            size_t total = 0;
+            while (total < len) {
+                int n = send(sock, data + total, static_cast<int>(len - total), 0);
+                if (n <= 0) return false;
+                total += static_cast<size_t>(n);
+            }
+            return true;
+        };
+
         uint32_t len = static_cast<uint32_t>(payload.size());
-        if (send(sock, reinterpret_cast<char*>(&len), 4, 0) != 4) return false;
-        if (send(sock, payload.c_str(), static_cast<int>(len), 0) != static_cast<int>(len)) return false;
-        return true;
+        uint32_t len_net = htonl(len);
+
+        if (!send_all(reinterpret_cast<const char*>(&len_net), sizeof(len_net))) return false;
+        return send_all(payload.data(), payload.size());
     }
 
     bool recv_message(socket_t sock, std::string& payload)
     {
-        uint32_t len = 0;
-        int received = recv(sock, reinterpret_cast<char*>(&len), 4, 0);
-        if (received != 4) return false;
+        auto recv_all = [&](char* data, size_t len) -> bool {
+            size_t total = 0;
+            while (total < len) {
+                int n = recv(sock, data + total, static_cast<int>(len - total), 0);
+                if (n <= 0) return false;
+                total += static_cast<size_t>(n);
+            }
+            return true;
+        };
+
+        uint32_t len_net = 0;
+        if (!recv_all(reinterpret_cast<char*>(&len_net), sizeof(len_net))) return false;
+
+        uint32_t len = ntohl(len_net);
         if (len > 10 * 1024 * 1024) return false;
 
         payload.resize(len);
-        size_t total = 0;
-        while (total < len) {
-            int n = recv(sock, payload.data() + total, static_cast<int>(len - total), 0);
-            if (n <= 0) return false;
-            total += n;
-        }
-        return true;
+        return recv_all(payload.data(), payload.size());
     }
 
     // Execute query - either via callback (execute_sync) or poll queue
@@ -314,6 +361,14 @@ private:
             if (sql.empty()) {
                 send_message(client, "{\"success\":false,\"error\":\"Invalid request: missing sql field\"}");
                 continue;
+            }
+
+            if (!auth_token_.empty()) {
+                std::string token = extract_token(request);
+                if (token != auth_token_) {
+                    send_message(client, "{\"success\":false,\"error\":\"Unauthorized\"}");
+                    continue;
+                }
             }
 
             auto result = execute_query(sql);
@@ -425,6 +480,12 @@ struct idasql_plugmod_t : public plugmod_t
         if (engine_->is_valid()) {
             msg("IDASQL: Query engine initialized\n");
             server_.set_engine(engine_.get());
+
+            if (const char* tok = std::getenv("IDASQL_TOKEN")) {
+                if (*tok) {
+                    server_.set_auth_token(tok);
+                }
+            }
 
             // Setup execute_sync callback for GUI mode
             server_.set_query_func([this](const std::string& sql) {
