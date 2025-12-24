@@ -114,16 +114,29 @@ struct TablePrinter {
 
 static TablePrinter* g_printer = nullptr;
 
-static int table_callback(void*, int argc, char** argv, char** colNames) {
+static int table_callback(void*, int argc, char** argv, char** colNames) {      
     if (g_printer) {
         g_printer->add_row(argc, argv, colNames);
     }
     return 0;
 }
 
-// ============================================================================
+static bool parse_port(const std::string& s, int& port) {
+    try {
+        size_t idx = 0;
+        int v = std::stoi(s, &idx, 10);
+        if (idx != s.size()) return false;
+        if (v < 1 || v > 65535) return false;
+        port = v;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// ============================================================================ 
 // Remote Mode - Pure socket client (NO IDA DEPENDENCIES)
-// ============================================================================
+// ============================================================================ 
 // This entire section uses only standard C++ and sockets.
 // On Windows with delayed loading, ida.dll/idalib.dll are never loaded
 // when running in remote mode.
@@ -669,7 +682,11 @@ int main(int argc, char* argv[]) {
         auto colon = remote_spec.find(':');
         if (colon != std::string::npos) {
             host = remote_spec.substr(0, colon);
-            port = std::stoi(remote_spec.substr(colon + 1));
+            std::string port_str = remote_spec.substr(colon + 1);
+            if (!parse_port(port_str, port)) {
+                std::cerr << "Error: Invalid port in --remote: " << port_str << "\n";
+                return 1;
+            }
         } else {
             host = remote_spec;
         }
