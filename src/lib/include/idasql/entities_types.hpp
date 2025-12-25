@@ -27,6 +27,8 @@
 namespace idasql {
 namespace types {
 
+inline void ida_undo_hook(const std::string&) {}
+
 // ============================================================================
 // Type Kind Classification
 // ============================================================================

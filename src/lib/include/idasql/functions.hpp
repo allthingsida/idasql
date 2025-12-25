@@ -95,7 +95,7 @@ static void sql_disasm(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
     std::ostringstream result;
     for (int i = 0; i < count && ea != BADADDR; i++) {
         qstring line;
-        if (generate_disasm_line(&line, ea, GENDSM_FORCE_CODE) > 0) {
+        if (generate_disasm_line(&line, ea, GENDSM_FORCE_CODE)) {
             // Strip color codes
             tag_remove(&line);
             if (i > 0) result << "\n";
