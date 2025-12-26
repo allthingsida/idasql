@@ -1,0 +1,76 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Linux
+            runner: ubuntu-latest
+          - os: macOS
+            runner: macos-latest
+          - os: Windows
+            runner: windows-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk/src
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+          submodules: recursive
+
+      - name: Setup IDA SDK
+        shell: bash
+        run: |
+          git clone --depth 1 --recurse-submodules https://${{ secrets.GH_PAT }}@github.com/HexRaysSA/ida-sdk ida-sdk
+          ln -s cmake "${IDASDK}/ida-cmake"
+          git clone --depth 1 https://${{ secrets.GH_PAT }}@github.com/allthingsida/idacpp.git "${IDASDK}/include/idacpp"
+
+      - name: Configure (tests)
+        shell: bash
+        working-directory: tests
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build (tests)
+        shell: bash
+        working-directory: tests
+        run: cmake --build build --config Release
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        working-directory: tests
+        run: |
+          export PATH="${IDASDK}/bin:$PATH"
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Test (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: tests
+        run: |
+          export LD_LIBRARY_PATH="${IDASDK}/bin:$LD_LIBRARY_PATH"
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Test (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: tests
+        run: |
+          export DYLD_LIBRARY_PATH="${IDASDK}/bin:$DYLD_LIBRARY_PATH"
+          ctest --test-dir build -C Release --output-on-failure
