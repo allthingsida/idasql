@@ -252,8 +252,9 @@ protected:
         }
 
         // Verify CLI can open the database (may fail if idalib not on PATH)
-        auto result = run_cli("-s \"" + get_db_path() + "\" -q \"SELECT 1\"");
-        if (result.stdout_output.find("1") == std::string::npos) {
+        // Check for "Database opened successfully" message which CLI outputs on success
+        auto result = run_cli("-s \"" + get_db_path() + "\" -q \"SELECT 'CLI_TEST_OK' as status\"");
+        if (result.stdout_output.find("Database opened successfully") == std::string::npos) {
             GTEST_SKIP() << "CLI cannot open database (idalib may not be on library path)";
         }
     }
