@@ -57,11 +57,10 @@ jobs:
 
       - name: Test (Windows)
         if: runner.os == 'Windows'
-        shell: cmd
+        shell: bash
         working-directory: tests
-        run: |
-          set "PATH=%IDASDK%\bin;%PATH%"
-          ctest --test-dir build -C Release --output-on-failure
+        # DLLs are copied to build/Release by CMake during configure
+        run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Test (Linux)
         if: runner.os == 'Linux'
