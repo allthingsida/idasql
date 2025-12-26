@@ -57,10 +57,17 @@ jobs:
 
       - name: Test (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         working-directory: tests
-        # DLLs are copied to build/Release by CMake during configure
-        run: ctest --test-dir build -C Release --output-on-failure
+        env:
+          # Add IDA SDK bin to PATH for Qt6 and other DLL dependencies
+          PATH: ${{ github.workspace }}/ida-sdk/src/bin;${{ env.PATH }}
+        run: |
+          # Verify DLLs are in Release directory
+          Write-Host "DLLs in build/Release:"
+          Get-ChildItem -Path build/Release -Filter *.dll | Select-Object Name
+          # Run tests
+          ctest --test-dir build -C Release --output-on-failure
 
       - name: Test (Linux)
         if: runner.os == 'Linux'
