@@ -57,12 +57,10 @@ jobs:
 
       - name: Test (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: cmd
         working-directory: tests
         run: |
-          $sdkBin = (Join-Path $env:IDASDK "bin")
-          $env:PATH = "$sdkBin;$env:PATH"
-          Write-Host "IDA SDK bin: $sdkBin"
+          set "PATH=%IDASDK%\bin;%PATH%"
           ctest --test-dir build -C Release --output-on-failure
 
       - name: Test (Linux)
