@@ -55,18 +55,18 @@ jobs:
         working-directory: tests
         run: cmake --build build --config Release
 
+      - name: Add IDA SDK to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "${IDASDK}/bin" >> $GITHUB_PATH
+
       - name: Test (Windows)
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: bash
         working-directory: tests
-        env:
-          # Add IDA SDK bin to PATH for Qt6 and other DLL dependencies
-          PATH: ${{ github.workspace }}/ida-sdk/src/bin;${{ env.PATH }}
         run: |
-          # Verify DLLs are in Release directory
-          Write-Host "DLLs in build/Release:"
-          Get-ChildItem -Path build/Release -Filter *.dll | Select-Object Name
-          # Run tests
+          echo "IDA SDK bin in PATH: ${IDASDK}/bin"
+          ls -la "${IDASDK}/bin"/*.dll | head -5
           ctest --test-dir build -C Release --output-on-failure
 
       - name: Test (Linux)
