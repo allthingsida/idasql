@@ -60,7 +60,9 @@ jobs:
         shell: pwsh
         working-directory: tests
         run: |
-          $env:PATH = "$env:IDASDK\bin;$env:PATH"
+          $sdkBin = (Join-Path $env:IDASDK "bin")
+          $env:PATH = "$sdkBin;$env:PATH"
+          Write-Host "IDA SDK bin: $sdkBin"
           ctest --test-dir build -C Release --output-on-failure
 
       - name: Test (Linux)
