@@ -8,7 +8,7 @@ project(idasql_tests VERSION 1.0)
 set(CMAKE_CXX_STANDARD 17)
 
 # Include IDA SDK bootstrap
-include($ENV{IDASDK}/ida-cmake/bootstrap.cmake)
+include($ENV{IDASDK}/cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
 # Fetch GoogleTest
