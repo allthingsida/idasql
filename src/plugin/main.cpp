@@ -404,7 +404,13 @@ private:
         {
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
-            addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+            if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1) {
+                msg("IDASQL: inet_pton() failed for 127.0.0.1\n");
+                CLOSE_SOCKET(listen_sock_);
+                listen_sock_ = SOCKET_INVALID;
+                running_ = false;
+                goto cleanup;
+            }
             addr.sin_port = htons(static_cast<uint16_t>(port_));
 
             if (bind(listen_sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
