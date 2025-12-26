@@ -1,0 +1,3 @@
+[submodule "libxsql"]
+	path = libxsql
+	url = https://github.com/0xeb/libxsql.git
