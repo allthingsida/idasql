@@ -16,6 +16,7 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <memory>
 
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -28,6 +29,7 @@
 #include <idalib.hpp>
 
 // IDASQL headers (new namespace)
+#include <xsql/database.hpp>
 #include <idasql/vtable.hpp>
 #include <idasql/entities.hpp>
 #include <idasql/entities_types.hpp>
@@ -95,7 +97,7 @@ protected:
 
 class IDADatabaseTest : public ::testing::Test {
 protected:
-    sqlite3* db_ = nullptr;
+    std::unique_ptr<xsql::Database> db_;
     entities::TableRegistry* entities_ = nullptr;
     metadata::MetadataRegistry* metadata_ = nullptr;
     types::TypesRegistry* types_ = nullptr;
@@ -126,24 +128,24 @@ protected:
     }
 
     void SetUp() override {
-        // Open in-memory SQLite
-        int rc = sqlite3_open(":memory:", &db_);
-        ASSERT_EQ(rc, SQLITE_OK) << "Failed to open SQLite database";
+        // Open in-memory SQLite via xsql::Database
+        db_ = std::make_unique<xsql::Database>();
+        ASSERT_TRUE(db_->is_open()) << "Failed to open SQLite database";
 
         // Register entity tables
         entities_ = new entities::TableRegistry();
-        entities_->register_all(db_);
+        entities_->register_all(*db_);
 
         // Register metadata tables
         metadata_ = new metadata::MetadataRegistry();
-        metadata_->register_all(db_);
+        metadata_->register_all(*db_);
 
         // Register types tables
         types_ = new types::TypesRegistry();
-        types_->register_all(db_);
+        types_->register_all(*db_);
 
         // Register SQL functions (for jump_search, etc.)
-        functions::register_sql_functions(db_);
+        functions::register_sql_functions(*db_);
     }
 
     void TearDown() override {
@@ -153,26 +155,22 @@ protected:
         entities_ = nullptr;
         metadata_ = nullptr;
         types_ = nullptr;
-
-        if (db_) {
-            sqlite3_close(db_);
-            db_ = nullptr;
-        }
+        db_.reset();
     }
 
     // Helper to execute SQL
     QueryResult query(const std::string& sql) {
-        return exec_query(db_, sql);
+        return exec_query(db_->handle(), sql);
     }
 
     // Helper to execute SQL from file
     QueryResult query_file(const std::string& filename) {
-        return exec_sql_file(db_, filename);
+        return exec_sql_file(db_->handle(), filename);
     }
 
     QueryResult query_file(const std::string& filename,
                            const std::map<std::string, std::string>& params) {
-        return exec_sql_file(db_, filename, params);
+        return exec_sql_file(db_->handle(), filename, params);
     }
 
     // Expect query to return at least N rows
