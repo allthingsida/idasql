@@ -37,9 +37,9 @@ jobs:
       - name: Setup IDA SDK
         shell: bash
         run: |
-          git clone --depth 1 --recurse-submodules https://${{ secrets.GH_PAT }}@github.com/HexRaysSA/ida-sdk ida-sdk
+          git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
           ln -s cmake "${IDASDK}/ida-cmake"
-          git clone --depth 1 https://${{ secrets.GH_PAT }}@github.com/allthingsida/idacpp.git "${IDASDK}/include/idacpp"
+          git clone --depth 1 https://github.com/allthingsida/idacpp.git "${IDASDK}/include/idacpp"
 
       - name: Configure (tests)
         shell: bash
