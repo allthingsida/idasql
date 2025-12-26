@@ -125,19 +125,28 @@ gtest_add_tests(TARGET idasql_tests
     TEST_LIST IDASQL_GTESTS
 )
 
-set_tests_properties(${IDASQL_GTESTS} PROPERTIES TIMEOUT 20)
+# Set test properties including IDADIR and PATH for idalib
+if(DEFINED ENV{IDASDK})
+    set(IDASDK_BIN "$ENV{IDASDK}/bin")
+    set_tests_properties(${IDASQL_GTESTS} PROPERTIES
+        TIMEOUT 20
+        ENVIRONMENT "IDADIR=${IDASDK_BIN}"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${IDASDK_BIN}"
+    )
+else()
+    set_tests_properties(${IDASQL_GTESTS} PROPERTIES TIMEOUT 20)
+endif()
 
 # Windows: Copy IDA SDK DLLs to test build directory
 # This is more reliable than PATH manipulation in ctest subprocesses
 if(WIN32 AND DEFINED ENV{IDASDK})
     set(IDASDK_BIN "$ENV{IDASDK}/bin")
     file(GLOB IDA_DLLS "${IDASDK_BIN}/*.dll")
-    foreach(DLL ${IDA_DLLS})
-        get_filename_component(DLL_NAME ${DLL} NAME)
-        # Copy to each config directory (Release, Debug, etc.)
-        foreach(CONFIG Release Debug RelWithDebInfo MinSizeRel)
-            set(DEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/${CONFIG}")
-            file(MAKE_DIRECTORY ${DEST_DIR})
+    foreach(CONFIG Release Debug RelWithDebInfo MinSizeRel)
+        set(DEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/${CONFIG}")
+        file(MAKE_DIRECTORY ${DEST_DIR})
+        foreach(DLL ${IDA_DLLS})
+            get_filename_component(DLL_NAME ${DLL} NAME)
             configure_file(${DLL} "${DEST_DIR}/${DLL_NAME}" COPYONLY)
         endforeach()
     endforeach()

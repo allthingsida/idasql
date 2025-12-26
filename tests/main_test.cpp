@@ -65,6 +65,17 @@ void print_usage(const char* prog) {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Set IDADIR from IDASDK if not already set (required for idalib)
+    // Note: Use qgetenv/qsetenv since IDA SDK redefines standard getenv
+    qstring idadir_val;
+    if (!qgetenv("IDADIR", &idadir_val)) {
+        qstring idasdk;
+        if (qgetenv("IDASDK", &idasdk)) {
+            qstring idadir = idasdk + "/bin";
+            qsetenv("IDADIR", idadir.c_str());
+        }
+    }
+
     // Initialize GTest
     ::testing::InitGoogleTest(&argc, argv);
 
