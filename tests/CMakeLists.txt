@@ -137,22 +137,6 @@ else()
     set_tests_properties(${IDASQL_GTESTS} PROPERTIES TIMEOUT 20)
 endif()
 
-# Windows: Copy IDA SDK DLLs to test build directory
-# This is more reliable than PATH manipulation in ctest subprocesses
-if(WIN32 AND DEFINED ENV{IDASDK})
-    set(IDASDK_BIN "$ENV{IDASDK}/bin")
-    file(GLOB IDA_DLLS "${IDASDK_BIN}/*.dll")
-    foreach(CONFIG Release Debug RelWithDebInfo MinSizeRel)
-        set(DEST_DIR "${CMAKE_CURRENT_BINARY_DIR}/${CONFIG}")
-        file(MAKE_DIRECTORY ${DEST_DIR})
-        foreach(DLL ${IDA_DLLS})
-            get_filename_component(DLL_NAME ${DLL} NAME)
-            configure_file(${DLL} "${DEST_DIR}/${DLL_NAME}" COPYONLY)
-        endforeach()
-    endforeach()
-    message(STATUS "Copied IDA SDK DLLs from ${IDASDK_BIN} to test build directories")
-endif()
-
 # Copy SQL test files to build directory
 file(GLOB SQL_FILES ${CMAKE_CURRENT_SOURCE_DIR}/sql/*.sql)
 foreach(SQL_FILE ${SQL_FILES})
