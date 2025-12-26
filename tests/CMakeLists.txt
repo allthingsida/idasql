@@ -7,20 +7,26 @@ cmake_minimum_required(VERSION 3.27)
 project(idasql_tests VERSION 1.0)
 set(CMAKE_CXX_STANDARD 17)
 
-# Include IDA SDK bootstrap
-include($ENV{IDASDK}/cmake/bootstrap.cmake)
-find_package(idasdk REQUIRED)
+# For Windows: Use static CRT (/MT) to match IDA SDK's runtime library
+# Must be set before fetching GoogleTest
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "" FORCE)
+endif()
 
-# Fetch GoogleTest
+# Fetch GoogleTest BEFORE IDA SDK bootstrap to avoid include path conflicts
+# (IDA SDK has a regex.h that shadows the system one)
 include(FetchContent)
 FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
     GIT_TAG        v1.14.0
 )
-# For Windows: Prevent overriding the parent project's compiler/linker settings
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
+
+# Include IDA SDK bootstrap
+include($ENV{IDASDK}/cmake/bootstrap.cmake)
+find_package(idasdk REQUIRED)
 
 enable_testing()
 

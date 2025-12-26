@@ -42,6 +42,8 @@ jobs:
         run: |
           git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
           git clone --depth 1 https://github.com/allthingsida/idacpp.git "${IDASDK}/include/idacpp"
+          # Rename IDA SDK's regex.h to avoid conflicting with system regex.h when using GoogleTest
+          mv "${IDASDK}/include/regex.h" "${IDASDK}/include/ida_regex.h"
 
       - name: Configure (tests)
         shell: bash
