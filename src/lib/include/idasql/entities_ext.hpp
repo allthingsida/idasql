@@ -19,6 +19,7 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
+#include <xsql/database.hpp>
 
 // IDA SDK headers
 #include <ida.hpp>
@@ -511,30 +512,30 @@ struct ExtendedRegistry {
         , mappings(define_mappings())
     {}
 
-    void register_all(sqlite3* db) {
-        register_vtable(db, "ida_fixups", &fixups);
-        create_vtable(db, "fixups", "ida_fixups");
+    void register_all(xsql::Database& db) {
+        db.register_table("ida_fixups", &fixups);
+        db.create_table("fixups", "ida_fixups");
 
-        register_vtable(db, "ida_hidden_ranges", &hidden_ranges);
-        create_vtable(db, "hidden_ranges", "ida_hidden_ranges");
+        db.register_table("ida_hidden_ranges", &hidden_ranges);
+        db.create_table("hidden_ranges", "ida_hidden_ranges");
 
-        register_vtable(db, "ida_problems", &problems);
-        create_vtable(db, "problems", "ida_problems");
+        db.register_table("ida_problems", &problems);
+        db.create_table("problems", "ida_problems");
 
-        register_vtable(db, "ida_fchunks", &fchunks);
-        create_vtable(db, "fchunks", "ida_fchunks");
+        db.register_table("ida_fchunks", &fchunks);
+        db.create_table("fchunks", "ida_fchunks");
 
-        register_vtable(db, "ida_signatures", &signatures);
-        create_vtable(db, "signatures", "ida_signatures");
+        db.register_table("ida_signatures", &signatures);
+        db.create_table("signatures", "ida_signatures");
 
-        register_vtable(db, "ida_local_types", &local_types);
-        create_vtable(db, "local_types", "ida_local_types");
+        db.register_table("ida_local_types", &local_types);
+        db.create_table("local_types", "ida_local_types");
 
-        register_vtable(db, "ida_comments", &comments);
-        create_vtable(db, "comments", "ida_comments");
+        db.register_table("ida_comments", &comments);
+        db.create_table("comments", "ida_comments");
 
-        register_vtable(db, "ida_mappings", &mappings);
-        create_vtable(db, "mappings", "ida_mappings");
+        db.register_table("ida_mappings", &mappings);
+        db.create_table("mappings", "ida_mappings");
     }
 };
 

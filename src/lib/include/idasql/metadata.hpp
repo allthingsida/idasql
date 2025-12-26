@@ -12,6 +12,7 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
+#include <xsql/database.hpp>
 
 // IDA SDK headers
 #include <ida.hpp>
@@ -173,12 +174,12 @@ struct MetadataRegistry {
         , ida_info(define_ida_info())
     {}
 
-    void register_all(sqlite3* db) {
-        register_vtable(db, "ida_db_info", &db_info);
-        create_vtable(db, "db_info", "ida_db_info");
+    void register_all(xsql::Database& db) {
+        db.register_table("ida_db_info", &db_info);
+        db.create_table("db_info", "ida_db_info");
 
-        register_vtable(db, "ida_ida_info", &ida_info);
-        create_vtable(db, "ida_info", "ida_ida_info");
+        db.register_table("ida_ida_info", &ida_info);
+        db.create_table("ida_info", "ida_ida_info");
     }
 };
 

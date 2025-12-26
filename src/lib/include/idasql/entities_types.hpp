@@ -19,6 +19,7 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
+#include <xsql/database.hpp>
 
 // IDA SDK headers
 #include <ida.hpp>
@@ -1100,42 +1101,36 @@ struct TypesRegistry {
         , types_func_args(define_types_func_args())
     {}
 
-    void register_all(sqlite3* db) {
+    void register_all(xsql::Database& db) {
         // Register tables
-        register_vtable(db, "ida_types", &types);
-        create_vtable(db, "types", "ida_types");
+        db.register_table("ida_types", &types);
+        db.create_table("types", "ida_types");
 
-        register_vtable(db, "ida_types_members", &types_members);
-        create_vtable(db, "types_members", "ida_types_members");
+        db.register_table("ida_types_members", &types_members);
+        db.create_table("types_members", "ida_types_members");
 
-        register_vtable(db, "ida_types_enum_values", &types_enum_values);
-        create_vtable(db, "types_enum_values", "ida_types_enum_values");
+        db.register_table("ida_types_enum_values", &types_enum_values);
+        db.create_table("types_enum_values", "ida_types_enum_values");
 
-        register_vtable(db, "ida_types_func_args", &types_func_args);
-        create_vtable(db, "types_func_args", "ida_types_func_args");
+        db.register_table("ida_types_func_args", &types_func_args);
+        db.create_table("types_func_args", "ida_types_func_args");
 
         // Create views
         create_views(db);
     }
 
 private:
-    void create_views(sqlite3* db) {
+    void create_views(xsql::Database& db) {
         // Filtering views
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_structs AS SELECT * FROM types WHERE is_struct = 1");
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_unions AS SELECT * FROM types WHERE is_union = 1");
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_enums AS SELECT * FROM types WHERE is_enum = 1");
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_typedefs AS SELECT * FROM types WHERE is_typedef = 1");
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS types_v_funcs AS SELECT * FROM types WHERE is_func = 1");
+        db.exec("CREATE VIEW IF NOT EXISTS types_v_structs AS SELECT * FROM types WHERE is_struct = 1");
+        db.exec("CREATE VIEW IF NOT EXISTS types_v_unions AS SELECT * FROM types WHERE is_union = 1");
+        db.exec("CREATE VIEW IF NOT EXISTS types_v_enums AS SELECT * FROM types WHERE is_enum = 1");
+        db.exec("CREATE VIEW IF NOT EXISTS types_v_typedefs AS SELECT * FROM types WHERE is_typedef = 1");
+        db.exec("CREATE VIEW IF NOT EXISTS types_v_funcs AS SELECT * FROM types WHERE is_func = 1");
 
         // Backward compatibility - alias for old local_types table
-        exec_sql(db, "CREATE VIEW IF NOT EXISTS local_types AS SELECT ordinal, name, definition AS type, "
-                     "is_struct, is_enum, is_typedef FROM types");
-    }
-
-    void exec_sql(sqlite3* db, const char* sql) {
-        char* err = nullptr;
-        sqlite3_exec(db, sql, nullptr, nullptr, &err);
-        if (err) sqlite3_free(err);
+        db.exec("CREATE VIEW IF NOT EXISTS local_types AS SELECT ordinal, name, definition AS type, "
+                "is_struct, is_enum, is_typedef FROM types");
     }
 };
 

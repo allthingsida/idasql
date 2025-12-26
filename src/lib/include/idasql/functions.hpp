@@ -47,6 +47,7 @@
 #pragma once
 
 #include <sqlite3.h>
+#include <xsql/database.hpp>
 #include <string>
 #include <sstream>
 #include <iomanip>
@@ -1434,78 +1435,78 @@ static void sql_jump_query(sqlite3_context* ctx, int argc, sqlite3_value** argv)
 // Registration
 // ============================================================================
 
-inline bool register_sql_functions(sqlite3* db) {
+inline bool register_sql_functions(xsql::Database& db) {
     // Disassembly
-    sqlite3_create_function(db, "disasm", 1, SQLITE_UTF8, nullptr, sql_disasm, nullptr, nullptr);
-    sqlite3_create_function(db, "disasm", 2, SQLITE_UTF8, nullptr, sql_disasm, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "disasm", 1, SQLITE_UTF8, nullptr, sql_disasm, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "disasm", 2, SQLITE_UTF8, nullptr, sql_disasm, nullptr, nullptr);
 
     // Bytes
-    sqlite3_create_function(db, "bytes", 2, SQLITE_UTF8, nullptr, sql_bytes_hex, nullptr, nullptr);
-    sqlite3_create_function(db, "bytes_raw", 2, SQLITE_UTF8, nullptr, sql_bytes_raw, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "bytes", 2, SQLITE_UTF8, nullptr, sql_bytes_hex, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "bytes_raw", 2, SQLITE_UTF8, nullptr, sql_bytes_raw, nullptr, nullptr);
 
     // Names
-    sqlite3_create_function(db, "name_at", 1, SQLITE_UTF8, nullptr, sql_name_at, nullptr, nullptr);
-    sqlite3_create_function(db, "func_at", 1, SQLITE_UTF8, nullptr, sql_func_at, nullptr, nullptr);
-    sqlite3_create_function(db, "func_start", 1, SQLITE_UTF8, nullptr, sql_func_start, nullptr, nullptr);
-    sqlite3_create_function(db, "func_end", 1, SQLITE_UTF8, nullptr, sql_func_end, nullptr, nullptr);
-    sqlite3_create_function(db, "set_name", 2, SQLITE_UTF8, nullptr, sql_set_name, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "name_at", 1, SQLITE_UTF8, nullptr, sql_name_at, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "func_at", 1, SQLITE_UTF8, nullptr, sql_func_at, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "func_start", 1, SQLITE_UTF8, nullptr, sql_func_start, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "func_end", 1, SQLITE_UTF8, nullptr, sql_func_end, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "set_name", 2, SQLITE_UTF8, nullptr, sql_set_name, nullptr, nullptr);
 
     // Function index (O(1) access)
-    sqlite3_create_function(db, "func_qty", 0, SQLITE_UTF8, nullptr, sql_func_qty, nullptr, nullptr);
-    sqlite3_create_function(db, "func_at_index", 1, SQLITE_UTF8, nullptr, sql_func_at_index, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "func_qty", 0, SQLITE_UTF8, nullptr, sql_func_qty, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "func_at_index", 1, SQLITE_UTF8, nullptr, sql_func_at_index, nullptr, nullptr);
 
     // Segments
-    sqlite3_create_function(db, "segment_at", 1, SQLITE_UTF8, nullptr, sql_segment_at, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "segment_at", 1, SQLITE_UTF8, nullptr, sql_segment_at, nullptr, nullptr);
 
     // Comments
-    sqlite3_create_function(db, "comment_at", 1, SQLITE_UTF8, nullptr, sql_comment_at, nullptr, nullptr);
-    sqlite3_create_function(db, "set_comment", 2, SQLITE_UTF8, nullptr, sql_set_comment, nullptr, nullptr);
-    sqlite3_create_function(db, "set_comment", 3, SQLITE_UTF8, nullptr, sql_set_comment, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "comment_at", 1, SQLITE_UTF8, nullptr, sql_comment_at, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "set_comment", 2, SQLITE_UTF8, nullptr, sql_set_comment, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "set_comment", 3, SQLITE_UTF8, nullptr, sql_set_comment, nullptr, nullptr);
 
     // Cross-references
-    sqlite3_create_function(db, "xrefs_to", 1, SQLITE_UTF8, nullptr, sql_xrefs_to, nullptr, nullptr);
-    sqlite3_create_function(db, "xrefs_from", 1, SQLITE_UTF8, nullptr, sql_xrefs_from, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "xrefs_to", 1, SQLITE_UTF8, nullptr, sql_xrefs_to, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "xrefs_from", 1, SQLITE_UTF8, nullptr, sql_xrefs_from, nullptr, nullptr);
 
     // Decompiler
-    sqlite3_create_function(db, "decompile", 1, SQLITE_UTF8, nullptr, sql_decompile, nullptr, nullptr);
-    sqlite3_create_function(db, "list_lvars", 1, SQLITE_UTF8, nullptr, sql_list_lvars, nullptr, nullptr);
-    sqlite3_create_function(db, "rename_lvar", 3, SQLITE_UTF8, nullptr, sql_rename_lvar, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "decompile", 1, SQLITE_UTF8, nullptr, sql_decompile, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "list_lvars", 1, SQLITE_UTF8, nullptr, sql_list_lvars, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "rename_lvar", 3, SQLITE_UTF8, nullptr, sql_rename_lvar, nullptr, nullptr);
 
     // Address utilities
-    sqlite3_create_function(db, "next_head", 1, SQLITE_UTF8, nullptr, sql_next_head, nullptr, nullptr);
-    sqlite3_create_function(db, "prev_head", 1, SQLITE_UTF8, nullptr, sql_prev_head, nullptr, nullptr);
-    sqlite3_create_function(db, "hex", 1, SQLITE_UTF8, nullptr, sql_hex, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "next_head", 1, SQLITE_UTF8, nullptr, sql_next_head, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "prev_head", 1, SQLITE_UTF8, nullptr, sql_prev_head, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "hex", 1, SQLITE_UTF8, nullptr, sql_hex, nullptr, nullptr);
 
     // Item query functions
-    sqlite3_create_function(db, "item_type", 1, SQLITE_UTF8, nullptr, sql_item_type, nullptr, nullptr);
-    sqlite3_create_function(db, "item_size", 1, SQLITE_UTF8, nullptr, sql_item_size, nullptr, nullptr);
-    sqlite3_create_function(db, "is_code", 1, SQLITE_UTF8, nullptr, sql_is_code, nullptr, nullptr);
-    sqlite3_create_function(db, "is_data", 1, SQLITE_UTF8, nullptr, sql_is_data, nullptr, nullptr);
-    sqlite3_create_function(db, "mnemonic", 1, SQLITE_UTF8, nullptr, sql_mnemonic, nullptr, nullptr);
-    sqlite3_create_function(db, "operand", 2, SQLITE_UTF8, nullptr, sql_operand, nullptr, nullptr);
-    sqlite3_create_function(db, "flags_at", 1, SQLITE_UTF8, nullptr, sql_flags_at, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "item_type", 1, SQLITE_UTF8, nullptr, sql_item_type, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "item_size", 1, SQLITE_UTF8, nullptr, sql_item_size, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "is_code", 1, SQLITE_UTF8, nullptr, sql_is_code, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "is_data", 1, SQLITE_UTF8, nullptr, sql_is_data, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "mnemonic", 1, SQLITE_UTF8, nullptr, sql_mnemonic, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "operand", 2, SQLITE_UTF8, nullptr, sql_operand, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "flags_at", 1, SQLITE_UTF8, nullptr, sql_flags_at, nullptr, nullptr);
 
     // Instruction decoding
-    sqlite3_create_function(db, "itype", 1, SQLITE_UTF8, nullptr, sql_itype, nullptr, nullptr);
-    sqlite3_create_function(db, "decode_insn", 1, SQLITE_UTF8, nullptr, sql_decode_insn, nullptr, nullptr);
-    sqlite3_create_function(db, "operand_type", 2, SQLITE_UTF8, nullptr, sql_operand_type, nullptr, nullptr);
-    sqlite3_create_function(db, "operand_value", 2, SQLITE_UTF8, nullptr, sql_operand_value, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "itype", 1, SQLITE_UTF8, nullptr, sql_itype, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "decode_insn", 1, SQLITE_UTF8, nullptr, sql_decode_insn, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "operand_type", 2, SQLITE_UTF8, nullptr, sql_operand_type, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "operand_value", 2, SQLITE_UTF8, nullptr, sql_operand_value, nullptr, nullptr);
 
     // File generation
-    sqlite3_create_function(db, "gen_asm_file", 3, SQLITE_UTF8, nullptr, sql_gen_asm_file, nullptr, nullptr);
-    sqlite3_create_function(db, "gen_lst_file", 3, SQLITE_UTF8, nullptr, sql_gen_lst_file, nullptr, nullptr);
-    sqlite3_create_function(db, "gen_map_file", 1, SQLITE_UTF8, nullptr, sql_gen_map_file, nullptr, nullptr);
-    sqlite3_create_function(db, "gen_idc_file", 3, SQLITE_UTF8, nullptr, sql_gen_idc_file, nullptr, nullptr);
-    sqlite3_create_function(db, "gen_html_file", 3, SQLITE_UTF8, nullptr, sql_gen_html_file, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "gen_asm_file", 3, SQLITE_UTF8, nullptr, sql_gen_asm_file, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "gen_lst_file", 3, SQLITE_UTF8, nullptr, sql_gen_lst_file, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "gen_map_file", 1, SQLITE_UTF8, nullptr, sql_gen_map_file, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "gen_idc_file", 3, SQLITE_UTF8, nullptr, sql_gen_idc_file, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "gen_html_file", 3, SQLITE_UTF8, nullptr, sql_gen_html_file, nullptr, nullptr);
 
     // Graph generation
-    sqlite3_create_function(db, "gen_cfg_dot", 1, SQLITE_UTF8, nullptr, sql_gen_cfg_dot, nullptr, nullptr);
-    sqlite3_create_function(db, "gen_cfg_dot_file", 2, SQLITE_UTF8, nullptr, sql_gen_cfg_dot_file, nullptr, nullptr);
-    sqlite3_create_function(db, "gen_schema_dot", 0, SQLITE_UTF8, nullptr, sql_gen_schema_dot, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "gen_cfg_dot", 1, SQLITE_UTF8, nullptr, sql_gen_cfg_dot, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "gen_cfg_dot_file", 2, SQLITE_UTF8, nullptr, sql_gen_cfg_dot_file, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "gen_schema_dot", 0, SQLITE_UTF8, nullptr, sql_gen_schema_dot, nullptr, nullptr);
 
     // Jump search
-    sqlite3_create_function(db, "jump_search", 4, SQLITE_UTF8, nullptr, sql_jump_search, nullptr, nullptr);
-    sqlite3_create_function(db, "jump_query", 4, SQLITE_UTF8, nullptr, sql_jump_query, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "jump_search", 4, SQLITE_UTF8, nullptr, sql_jump_search, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "jump_query", 4, SQLITE_UTF8, nullptr, sql_jump_query, nullptr, nullptr);
 
     return true;
 }

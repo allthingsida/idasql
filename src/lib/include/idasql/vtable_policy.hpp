@@ -15,6 +15,7 @@
 #pragma once
 
 #include <sqlite3.h>
+#include <xsql/database.hpp>
 #include <string>
 #include <unordered_map>
 #include <mutex>
@@ -178,8 +179,8 @@ inline void idasql_config_func(sqlite3_context* ctx, int argc, sqlite3_value** a
 }
 
 // Register the config function with SQLite
-inline bool register_config_function(sqlite3* db) {
-    return sqlite3_create_function(db, "idasql_config", -1,
+inline bool register_config_function(xsql::Database& db) {
+    return sqlite3_create_function(db.handle(), "idasql_config", -1,
                                     SQLITE_UTF8,
                                     nullptr, idasql_config_func,
                                     nullptr, nullptr) == SQLITE_OK;
@@ -189,7 +190,7 @@ inline bool register_config_function(sqlite3* db) {
 // Configuration Table (Alternative approach)
 // ============================================================================
 
-inline bool create_config_table(sqlite3* db) {
+inline bool create_config_table(xsql::Database& db) {
     const char* sql = R"(
         CREATE TABLE IF NOT EXISTS idasql_settings (
             key TEXT PRIMARY KEY,
@@ -204,7 +205,7 @@ inline bool create_config_table(sqlite3* db) {
     )";
 
     char* err = nullptr;
-    int rc = sqlite3_exec(db, sql, nullptr, nullptr, &err);
+    int rc = sqlite3_exec(db.handle(), sql, nullptr, nullptr, &err);
     if (err) {
         sqlite3_free(err);
         return false;
@@ -213,11 +214,11 @@ inline bool create_config_table(sqlite3* db) {
 }
 
 // Sync config from table to memory
-inline bool load_config_from_table(sqlite3* db) {
+inline bool load_config_from_table(xsql::Database& db) {
     auto& config = IdasqlConfig::instance();
 
     sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db, "SELECT key, value FROM idasql_settings", -1, &stmt, nullptr) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(db.handle(), "SELECT key, value FROM idasql_settings", -1, &stmt, nullptr) != SQLITE_OK) {
         return false;
     }
 
@@ -247,7 +248,7 @@ inline bool load_config_from_table(sqlite3* db) {
 // Initialization Helper
 // ============================================================================
 
-inline bool init_policy_system(sqlite3* db) {
+inline bool init_policy_system(xsql::Database& db) {
     bool ok = true;
     ok = ok && register_config_function(db);
     ok = ok && create_config_table(db);

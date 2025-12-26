@@ -17,6 +17,7 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
+#include <xsql/database.hpp>
 
 #include <string>
 #include <vector>
@@ -1087,8 +1088,7 @@ inline GeneratorTableDef<CallArgInfo> define_ctree_call_args() {
 // Views Registration
 // ============================================================================
 
-inline bool register_ctree_views(sqlite3* db) {
-    char* err = nullptr;
+inline bool register_ctree_views(xsql::Database& db) {
 
     const char* v_calls = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_calls AS
@@ -1104,23 +1104,20 @@ inline bool register_ctree_views(sqlite3* db) {
         LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
         WHERE c.op_name = 'cot_call'
     )";
-    sqlite3_exec(db, v_calls, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_calls);
 
     const char* v_loops = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_loops AS
         SELECT * FROM ctree
         WHERE op_name IN ('cit_for', 'cit_while', 'cit_do')
     )";
-    sqlite3_exec(db, v_loops, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_loops);
 
     const char* v_ifs = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_ifs AS
         SELECT * FROM ctree WHERE op_name = 'cit_if'
     )";
-    sqlite3_exec(db, v_ifs, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_ifs);
 
     const char* v_signed = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_signed_ops AS
@@ -1130,8 +1127,7 @@ inline bool register_ctree_views(sqlite3* db) {
             'cot_asgsshr', 'cot_asgsdiv', 'cot_asgsmod'
         )
     )";
-    sqlite3_exec(db, v_signed, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_signed);
 
     const char* v_cmp = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_comparisons AS
@@ -1148,8 +1144,7 @@ inline bool register_ctree_views(sqlite3* db) {
             'cot_sgt', 'cot_ugt', 'cot_slt', 'cot_ult'
         )
     )";
-    sqlite3_exec(db, v_cmp, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_cmp);
 
     const char* v_asg = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_assignments AS
@@ -1163,8 +1158,7 @@ inline bool register_ctree_views(sqlite3* db) {
         LEFT JOIN ctree rhs ON rhs.func_addr = c.func_addr AND rhs.item_id = c.y_id
         WHERE c.op_name LIKE 'cot_asg%'
     )";
-    sqlite3_exec(db, v_asg, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_asg);
 
     const char* v_deref = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_derefs AS
@@ -1176,8 +1170,7 @@ inline bool register_ctree_views(sqlite3* db) {
         LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
         WHERE c.op_name IN ('cot_ptr', 'cot_memptr')
     )";
-    sqlite3_exec(db, v_deref, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_deref);
 
     const char* v_calls_in_loops = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_calls_in_loops AS
@@ -1200,8 +1193,7 @@ inline bool register_ctree_views(sqlite3* db) {
         LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
         WHERE c.op_name = 'cot_call'
     )";
-    sqlite3_exec(db, v_calls_in_loops, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_calls_in_loops);
 
     const char* v_calls_in_ifs = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_calls_in_ifs AS
@@ -1230,8 +1222,7 @@ inline bool register_ctree_views(sqlite3* db) {
         LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
         WHERE c.op_name = 'cot_call'
     )";
-    sqlite3_exec(db, v_calls_in_ifs, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_calls_in_ifs);
 
     const char* v_leaf_funcs = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_leaf_funcs AS
@@ -1251,8 +1242,7 @@ inline bool register_ctree_views(sqlite3* db) {
                 LIMIT 1
             )
     )";
-    sqlite3_exec(db, v_leaf_funcs, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_leaf_funcs);
 
     const char* v_call_chains = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_call_chains AS
@@ -1268,8 +1258,7 @@ inline bool register_ctree_views(sqlite3* db) {
         )
         SELECT root_func, current_func, depth FROM call_chain
     )";
-    sqlite3_exec(db, v_call_chains, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_call_chains);
 
     return true;
 }
@@ -1293,24 +1282,24 @@ struct DecompilerRegistry {
         , ctree_call_args(define_ctree_call_args())
     {}
 
-    void register_all(sqlite3* db) {
+    void register_all(xsql::Database& db) {
         // Initialize Hex-Rays decompiler ONCE at startup
         // If unavailable, tables will return empty results (no crash)
         init_hexrays();
 
         // Index-based tables
-        register_vtable(db, "ida_pseudocode", &pseudocode);
-        create_vtable(db, "pseudocode", "ida_pseudocode");
+        db.register_table("ida_pseudocode", &pseudocode);
+        db.create_table("pseudocode", "ida_pseudocode");
 
-        register_vtable(db, "ida_ctree_lvars", &ctree_lvars);
-        create_vtable(db, "ctree_lvars", "ida_ctree_lvars");
+        db.register_table("ida_ctree_lvars", &ctree_lvars);
+        db.create_table("ctree_lvars", "ida_ctree_lvars");
 
         // Generator tables (lazy full scans, stop work early with LIMIT)
-        xsql::register_generator_vtable(db, "ida_ctree", &ctree);
-        create_vtable(db, "ctree", "ida_ctree");
+        db.register_generator_table("ida_ctree", &ctree);
+        db.create_table("ctree", "ida_ctree");
 
-        xsql::register_generator_vtable(db, "ida_ctree_call_args", &ctree_call_args);
-        create_vtable(db, "ctree_call_args", "ida_ctree_call_args");
+        db.register_generator_table("ida_ctree_call_args", &ctree_call_args);
+        db.create_table("ctree_call_args", "ida_ctree_call_args");
 
         register_ctree_views(db);
     }

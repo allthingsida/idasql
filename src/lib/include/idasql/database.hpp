@@ -240,25 +240,25 @@ private:
 
         // Register all virtual tables
         entities_ = std::make_unique<entities::TableRegistry>();
-        entities_->register_all(db_.handle());
+        entities_->register_all(db_);
 
         metadata_ = std::make_unique<metadata::MetadataRegistry>();
-        metadata_->register_all(db_.handle());
+        metadata_->register_all(db_);
 
         extended_ = std::make_unique<extended::ExtendedRegistry>();
-        extended_->register_all(db_.handle());
+        extended_->register_all(db_);
 
         disassembly_ = std::make_unique<disassembly::DisassemblyRegistry>();
-        disassembly_->register_all(db_.handle());
+        disassembly_->register_all(db_);
 
         types_ = std::make_unique<types::TypesRegistry>();
-        types_->register_all(db_.handle());
+        types_->register_all(db_);
 
-        functions::register_sql_functions(db_.handle());
+        functions::register_sql_functions(db_);
 
 #ifdef USE_HEXRAYS
         decompiler_ = std::make_unique<decompiler::DecompilerRegistry>();
-        decompiler_->register_all(db_.handle());
+        decompiler_->register_all(db_);
 #endif
     }
 };

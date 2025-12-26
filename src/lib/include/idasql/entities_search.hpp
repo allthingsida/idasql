@@ -28,6 +28,7 @@
 #pragma once
 
 #include <sqlite3.h>
+#include <xsql/database.hpp>
 #include <string>
 #include <cstring>
 #include <cctype>
@@ -619,8 +620,8 @@ inline sqlite3_module& get_jump_entities_module() {
  *   SELECT * FROM jump_entities('main', 'contains');
  *   SELECT * FROM jump_entities WHERE pattern = 'sub' AND mode = 'prefix' LIMIT 20;
  */
-inline bool register_jump_entities(sqlite3* db) {
-    int rc = sqlite3_create_module(db, "jump_entities", &get_jump_entities_module(), nullptr);
+inline bool register_jump_entities(xsql::Database& db) {
+    int rc = sqlite3_create_module(db.handle(), "jump_entities", &get_jump_entities_module(), nullptr);
     return rc == SQLITE_OK;
 }
 

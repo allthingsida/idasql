@@ -16,6 +16,7 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
+#include <xsql/database.hpp>
 #include <idasql/entities_search.hpp>
 
 // IDA SDK headers
@@ -1106,7 +1107,7 @@ struct TableRegistry {
         , strings(define_strings())
     {}
 
-    void register_all(sqlite3* db) {
+    void register_all(xsql::Database& db) {
         // Index-based tables (use IDA's indexed access)
         register_index_table(db, "funcs", &funcs);
         register_index_table(db, "segments", &segments);
@@ -1128,17 +1129,17 @@ struct TableRegistry {
     }
 
 private:
-    void register_index_table(sqlite3* db, const char* name, const VTableDef* def) {
+    void register_index_table(xsql::Database& db, const char* name, const VTableDef* def) {
         std::string module_name = std::string("ida_") + name;
-        register_vtable(db, module_name.c_str(), def);
-        create_vtable(db, name, module_name.c_str());
+        db.register_table(module_name.c_str(), def);
+        db.create_table(name, module_name.c_str());
     }
 
     template<typename RowData>
-    void register_cached_table(sqlite3* db, const char* name, const CachedTableDef<RowData>* def) {
+    void register_cached_table(xsql::Database& db, const char* name, const CachedTableDef<RowData>* def) {
         std::string module_name = std::string("ida_") + name;
-        xsql::register_cached_vtable(db, module_name.c_str(), def);
-        create_vtable(db, name, module_name.c_str());
+        db.register_cached_table(module_name.c_str(), def);
+        db.create_table(name, module_name.c_str());
     }
 };
 

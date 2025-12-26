@@ -20,6 +20,7 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
+#include <xsql/database.hpp>
 
 // IDA SDK headers
 #include <ida.hpp>
@@ -417,8 +418,7 @@ inline GeneratorTableDef<LoopInfo> define_disasm_loops() {
 // View Registration
 // ============================================================================
 
-inline bool register_disasm_views(sqlite3* db) {
-    char* err = nullptr;
+inline bool register_disasm_views(xsql::Database& db) {
 
     // disasm_v_leaf_funcs - Functions with no outgoing calls (terminal/leaf functions)
     // Uses disasm_calls to detect calls at the disassembly level
@@ -430,8 +430,7 @@ inline bool register_disasm_views(sqlite3* db) {
         GROUP BY f.address
         HAVING COUNT(c.callee_addr) = 0
     )";
-    sqlite3_exec(db, v_leaf_funcs, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_leaf_funcs);
 
     // disasm_v_call_chains - All call chain paths (root_func -> current_func at depth N)
     // Enables queries like "find functions with call chains reaching depth 6"
@@ -459,8 +458,7 @@ inline bool register_disasm_views(sqlite3* db) {
             depth
         FROM call_chain
     )";
-    sqlite3_exec(db, v_call_chains, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_call_chains);
 
     // disasm_v_calls_in_loops - Calls that occur inside detected loops
     // A call is considered "in a loop" if its address is between the loop header
@@ -480,8 +478,7 @@ inline bool register_disasm_views(sqlite3* db) {
         JOIN disasm_loops l ON l.func_addr = c.func_addr
         WHERE c.ea >= l.header_ea AND c.ea < l.back_edge_block_end
     )";
-    sqlite3_exec(db, v_calls_in_loops, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_calls_in_loops);
 
     // disasm_v_funcs_with_loops - Functions that contain loops
     const char* v_funcs_with_loops = R"(
@@ -494,8 +491,7 @@ inline bool register_disasm_views(sqlite3* db) {
         JOIN disasm_loops l ON l.func_addr = f.address
         GROUP BY f.address
     )";
-    sqlite3_exec(db, v_funcs_with_loops, nullptr, nullptr, &err);
-    if (err) { sqlite3_free(err); err = nullptr; }
+    db.exec(v_funcs_with_loops);
 
     return true;
 }
@@ -513,12 +509,12 @@ struct DisassemblyRegistry {
         , disasm_loops(define_disasm_loops())
     {}
 
-    void register_all(sqlite3* db) {
-        xsql::register_generator_vtable(db, "ida_disasm_calls", &disasm_calls);
-        create_vtable(db, "disasm_calls", "ida_disasm_calls");
+    void register_all(xsql::Database& db) {
+        db.register_generator_table("ida_disasm_calls", &disasm_calls);
+        db.create_table("disasm_calls", "ida_disasm_calls");
 
-        xsql::register_generator_vtable(db, "ida_disasm_loops", &disasm_loops);
-        create_vtable(db, "disasm_loops", "ida_disasm_loops");
+        db.register_generator_table("ida_disasm_loops", &disasm_loops);
+        db.create_table("disasm_loops", "ida_disasm_loops");
 
         // Register views on top
         register_disasm_views(db);
