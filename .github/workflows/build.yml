@@ -57,10 +57,10 @@ jobs:
 
       - name: Test (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         working-directory: tests
         run: |
-          export PATH="${IDASDK}/bin:$PATH"
+          $env:PATH = "$env:IDASDK\bin;$env:PATH"
           ctest --test-dir build -C Release --output-on-failure
 
       - name: Test (Linux)
