@@ -499,14 +499,13 @@ struct idasql_plugmod_t : public plugmod_t
             msg("IDASQL: Query engine initialized\n");
             server_.set_engine(engine_.get());
 
-            if (const char* tok = std::getenv("IDASQL_TOKEN")) {
-                if (*tok) {
-                    server_.set_auth_token(tok);
-                }
+            qstring tok;
+            if (qgetenv("IDASQL_TOKEN", &tok) && !tok.empty()) {
+                server_.set_auth_token(tok.c_str());
             }
 
             // Setup execute_sync callback for GUI mode
-            server_.set_query_func([this](const std::string& sql) {
+            server_.set_query_func([this](const std::string& sql) {       
                 query_request_t req(engine_.get(), sql);
                 execute_sync(req, MFF_READ);
                 return std::move(req.result);
