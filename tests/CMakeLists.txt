@@ -7,11 +7,8 @@ cmake_minimum_required(VERSION 3.27)
 project(idasql_tests VERSION 1.0)
 set(CMAKE_CXX_STANDARD 17)
 
-# Include IDA SDK bootstrap
-include($ENV{IDASDK}/cmake/bootstrap.cmake)
-find_package(idasdk REQUIRED)
-
-# Fetch GoogleTest
+# Fetch GoogleTest BEFORE IDA SDK bootstrap to avoid include path conflicts
+# (IDA SDK has a regex.h that shadows the system one)
 include(FetchContent)
 FetchContent_Declare(
     googletest
@@ -21,6 +18,10 @@ FetchContent_Declare(
 # For Windows: Prevent overriding the parent project's compiler/linker settings
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
+
+# Include IDA SDK bootstrap
+include($ENV{IDASDK}/cmake/bootstrap.cmake)
+find_package(idasdk REQUIRED)
 
 enable_testing()
 
