@@ -31,14 +31,18 @@ enable_testing()
 if(TARGET xsql::xsql)
     # Part of monorepo - already available
     message(STATUS "idasql_tests: Using xsql::xsql from parent project")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../libxsql/CMakeLists.txt")
+    # Standalone build with libxsql submodule
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
+    message(STATUS "idasql_tests: Added libxsql from ../libxsql (submodule)")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../libxsql/CMakeLists.txt")
+    # Monorepo layout
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
+    message(STATUS "idasql_tests: Added libxsql from ../../libxsql (monorepo)")
 else()
-    # Standalone build - add libxsql as subdirectory
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../libxsql/CMakeLists.txt")
-        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
-        message(STATUS "idasql_tests: Added libxsql from ../../libxsql")
-    else()
-        message(FATAL_ERROR "libxsql not found. Build as part of xsql monorepo or ensure ../../libxsql exists.")
-    endif()
+    message(FATAL_ERROR "libxsql not found. Either:\n"
+        "  1. Build as part of xsql monorepo\n"
+        "  2. Ensure libxsql submodule is initialized (git submodule update --init)")
 endif()
 
 # Test utility library
