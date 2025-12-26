@@ -28,7 +28,7 @@ protected:
         IDADatabaseTest::SetUp();
         // Register disassembly tables (keep registry alive for test lifetime)
         disasm_ = new idasql::disassembly::DisassemblyRegistry();
-        disasm_->register_all(db_);
+        disasm_->register_all(*db_);
     }
 
     void TearDown() override {

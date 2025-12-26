@@ -28,7 +28,7 @@ protected:
         IDADatabaseTest::SetUp();
         // Register decompiler tables - keep registry alive!
         decompiler_ = new idasql::decompiler::DecompilerRegistry();
-        decompiler_->register_all(db_);
+        decompiler_->register_all(*db_);
     }
 
     void TearDown() override {
