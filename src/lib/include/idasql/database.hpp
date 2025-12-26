@@ -23,6 +23,7 @@
 #pragma once
 
 #include <sqlite3.h>
+#include <xsql/database.hpp>
 #include <string>
 #include <vector>
 #include <functional>
@@ -107,28 +108,11 @@ public:
         init();
     }
 
-    ~QueryEngine() {
-        if (db_) {
-            sqlite3_close(db_);
-            db_ = nullptr;
-        }
-    }
+    ~QueryEngine() = default;
 
     // Moveable but not copyable
-    QueryEngine(QueryEngine&& other) noexcept
-        : db_(other.db_), error_(std::move(other.error_)) {
-        other.db_ = nullptr;
-    }
-
-    QueryEngine& operator=(QueryEngine&& other) noexcept {
-        if (this != &other) {
-            if (db_) sqlite3_close(db_);
-            db_ = other.db_;
-            error_ = std::move(other.error_);
-            other.db_ = nullptr;
-        }
-        return *this;
-    }
+    QueryEngine(QueryEngine&&) noexcept = default;
+    QueryEngine& operator=(QueryEngine&&) noexcept = default;
 
     QueryEngine(const QueryEngine&) = delete;
     QueryEngine& operator=(const QueryEngine&) = delete;
@@ -143,7 +127,7 @@ public:
     QueryResult query(const char* sql) {
         QueryResult result;
 
-        if (!db_) {
+        if (!db_.is_open()) {
             result.error = "QueryEngine not initialized";
             return result;
         }
@@ -176,7 +160,7 @@ public:
         int rc = exec(sql, callback, &qd);
         result.success = (rc == SQLITE_OK);
         if (!result.success && result.error.empty()) {
-            result.error = sqlite3_errmsg(db_);
+            result.error = sqlite3_errmsg(db_.handle());
         }
 
         return result;
@@ -186,13 +170,13 @@ public:
      * Execute SQL with callback (for streaming large results)
      */
     int exec(const char* sql, sqlite3_callback callback, void* data) {
-        if (!db_) {
+        if (!db_.is_open()) {
             error_ = "QueryEngine not initialized";
             return SQLITE_ERROR;
         }
 
         char* err_msg = nullptr;
-        int rc = sqlite3_exec(db_, sql, callback, data, &err_msg);
+        int rc = sqlite3_exec(db_.handle(), sql, callback, data, &err_msg);
         if (err_msg) {
             error_ = err_msg;
             sqlite3_free(err_msg);
@@ -230,15 +214,15 @@ public:
     /**
      * Check if initialized
      */
-    bool is_valid() const { return db_ != nullptr; }
+    bool is_valid() const { return db_.is_open(); }
 
     /**
      * Get raw SQLite handle (for advanced use)
      */
-    sqlite3* handle() { return db_; }
+    sqlite3* handle() { return db_.handle(); }
 
 private:
-    sqlite3* db_ = nullptr;
+    xsql::Database db_;
     std::string error_;
 
     // Table registries (prevent dangling virtual table pointers)
@@ -252,33 +236,29 @@ private:
 #endif
 
     void init() {
-        int rc = sqlite3_open(":memory:", &db_);
-        if (rc != SQLITE_OK) {
-            error_ = "Failed to open SQLite: " + std::string(sqlite3_errmsg(db_));
-            return;
-        }
+        // db_ auto-opens :memory: via xsql::Database constructor
 
         // Register all virtual tables
         entities_ = std::make_unique<entities::TableRegistry>();
-        entities_->register_all(db_);
+        entities_->register_all(db_.handle());
 
         metadata_ = std::make_unique<metadata::MetadataRegistry>();
-        metadata_->register_all(db_);
+        metadata_->register_all(db_.handle());
 
         extended_ = std::make_unique<extended::ExtendedRegistry>();
-        extended_->register_all(db_);
+        extended_->register_all(db_.handle());
 
         disassembly_ = std::make_unique<disassembly::DisassemblyRegistry>();
-        disassembly_->register_all(db_);
+        disassembly_->register_all(db_.handle());
 
         types_ = std::make_unique<types::TypesRegistry>();
-        types_->register_all(db_);
+        types_->register_all(db_.handle());
 
-        functions::register_sql_functions(db_);
+        functions::register_sql_functions(db_.handle());
 
 #ifdef USE_HEXRAYS
         decompiler_ = std::make_unique<decompiler::DecompilerRegistry>();
-        decompiler_->register_all(db_);
+        decompiler_->register_all(db_.handle());
 #endif
     }
 };
