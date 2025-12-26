@@ -77,11 +77,31 @@ target_include_directories(idasql_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/lib/include
 )
 
+# Build a CLI binary as part of the tests so CLI tests don't rely on an in-tree
+# `idasql/src/cli/build` directory existing. This avoids including the separate
+# CLI CMake project (which would re-bootstrap ida-cmake and collide targets).
+ida_add_idalib(idasql_cli_test
+    TYPE EXECUTABLE
+    SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src/cli/main.cpp
+)
+target_link_libraries(idasql_cli_test PRIVATE xsql::xsql)
+target_include_directories(idasql_cli_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/lib/include
+)
+target_compile_definitions(idasql_cli_test PRIVATE USE_IDA_SDK USE_HEXRAYS)
+set_target_properties(idasql_cli_test PROPERTIES OUTPUT_NAME "idasql")
+
+if(WIN32)
+    target_link_libraries(idasql_cli_test PRIVATE ws2_32)
+endif()
+
+add_dependencies(idasql_tests idasql_cli_test)
+
 # Define paths for tests
 target_compile_definitions(idasql_tests PRIVATE
     IDASQL_TEST_DB_PATH="${CMAKE_CURRENT_SOURCE_DIR}/testdb.i64"
-    IDASQL_CLI_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../src/cli/build"
-    IDASQL_CLI_CONFIG="$<CONFIG>"
+    IDASQL_CLI_EXE="$<TARGET_FILE:idasql_cli_test>"
 )
 
 # Register with CTest

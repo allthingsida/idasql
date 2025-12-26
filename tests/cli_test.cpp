@@ -84,7 +84,11 @@ class CLITest : public ::testing::Test {
         if (env_path && *env_path) {
             idasql_path = env_path;
         }
-#if defined(IDASQL_CLI_DIR) && defined(IDASQL_CLI_CONFIG)
+#if defined(IDASQL_CLI_EXE)
+        else {
+            idasql_path = IDASQL_CLI_EXE;
+        }
+#elif defined(IDASQL_CLI_DIR) && defined(IDASQL_CLI_CONFIG)
         // Use CMake-provided path (matches build configuration)
         else {
             idasql_path =
