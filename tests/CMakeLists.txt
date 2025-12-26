@@ -81,6 +81,10 @@ target_include_directories(idasql_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/lib/include
 )
+# Mark IDA SDK includes as SYSTEM to avoid shadowing system headers like regex.h
+get_target_property(IDA_INCLUDES idasql_tests INCLUDE_DIRECTORIES)
+set_target_properties(idasql_tests PROPERTIES INCLUDE_DIRECTORIES "")
+target_include_directories(idasql_tests SYSTEM PRIVATE ${IDA_INCLUDES})
 
 # Build a CLI binary as part of the tests so CLI tests don't rely on an in-tree
 # `idasql/src/cli/build` directory existing. This avoids including the separate
