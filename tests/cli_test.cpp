@@ -250,6 +250,12 @@ protected:
         if (get_db_path().empty()) {
             GTEST_SKIP() << "No test database specified";
         }
+
+        // Verify CLI can open the database (may fail if idalib not on PATH)
+        auto result = run_cli("-s \"" + get_db_path() + "\" -q \"SELECT 1\"");
+        if (result.stdout_output.find("1") == std::string::npos) {
+            GTEST_SKIP() << "CLI cannot open database (idalib may not be on library path)";
+        }
     }
 };
 
