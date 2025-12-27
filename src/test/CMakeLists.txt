@@ -17,7 +17,7 @@ cmake_minimum_required(VERSION 3.20)
 project(idalib_driver)
 set(CMAKE_CXX_STANDARD 20)
 
-include($ENV{IDASDK}/ida-cmake/bootstrap.cmake)
+include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
 ida_add_idalib(idalib_driver

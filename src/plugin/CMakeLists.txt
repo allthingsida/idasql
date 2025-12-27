@@ -3,7 +3,7 @@ project(idasql_plugin)
 set(CMAKE_CXX_STANDARD 20)
 
 # IDA SDK
-include($ENV{IDASDK}/ida-cmake/bootstrap.cmake)
+include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
 # Find libxsql (sibling directory)

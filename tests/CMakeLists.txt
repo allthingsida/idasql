@@ -25,7 +25,7 @@ set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 # Include IDA SDK bootstrap
-include($ENV{IDASDK}/cmake/bootstrap.cmake)
+include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
 enable_testing()

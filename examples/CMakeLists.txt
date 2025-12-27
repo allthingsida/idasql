@@ -14,7 +14,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Include IDA SDK bootstrap
-include($ENV{IDASDK}/ida-cmake/bootstrap.cmake)
+include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
 # SQLite library
