@@ -82,6 +82,36 @@ struct QueryResult {
     auto end() { return rows.end(); }
     auto begin() const { return rows.begin(); }
     auto end() const { return rows.end(); }
+
+    // Format as string for display
+    std::string to_string() const {
+        if (!success) return error;
+        if (empty()) return "(0 rows)";
+
+        std::string result;
+        // Header
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (i > 0) result += " | ";
+            result += columns[i];
+        }
+        result += "\n";
+        // Separator
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (i > 0) result += "-+-";
+            result += std::string(columns[i].size(), '-');
+        }
+        result += "\n";
+        // Rows
+        for (const auto& row : rows) {
+            for (size_t i = 0; i < row.size(); ++i) {
+                if (i > 0) result += " | ";
+                result += row[i];
+            }
+            result += "\n";
+        }
+        result += "(" + std::to_string(row_count()) + " rows)";
+        return result;
+    }
 };
 
 // ============================================================================

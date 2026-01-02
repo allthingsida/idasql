@@ -34,9 +34,36 @@
 #include <string>
 #include <cstring>
 #include <vector>
+#include <csignal>
+#include <atomic>
+
+// Windows UTF-8 console support
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 // Socket client for remote mode (shared library, no IDA dependency)
 #include <xsql/socket/client.hpp>
+
+// Claude integration (optional, enabled via IDASQL_WITH_CLAUDE_AGENT)
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+#include "../common/claude_agent.hpp"
+
+// Global signal handler state
+namespace {
+    std::atomic<bool> g_quit_requested{false};
+    idasql::ClaudeAgent* g_agent = nullptr;
+}
+
+extern "C" void signal_handler(int sig) {
+    (void)sig;
+    g_quit_requested.store(true);
+    if (g_agent) {
+        g_agent->request_quit();
+    }
+}
+#endif
 
 // ============================================================================
 // Table Printing (shared between remote and local modes)
@@ -244,11 +271,16 @@ static int run_remote_mode(const std::string& host, int port,
                     std::cout << R"(
 Commands:
   .tables             List all tables
+  .clear              Clear session
   .quit / .exit       Exit interactive mode
   .help               Show this help
 
 SQL queries end with semicolon (;)
 )" << std::endl;
+                    continue;
+                }
+                if (line == ".clear") {
+                    std::cout << "Session cleared\n";
                     continue;
                 }
                 std::cerr << "Unknown command: " << line << "\n";
@@ -291,6 +323,7 @@ Commands:
   .tables             List all tables
   .schema [table]     Show table schema
   .info               Show database info
+  .clear              Clear session (reset conversation)
   .quit / .exit       Exit interactive mode
   .help               Show this help
 
@@ -322,14 +355,72 @@ static void show_schema(idasql::Database& db, const std::string& table) {
     );
 }
 
+// Helper to execute SQL and format results as string (for Claude agent)
+static std::string execute_sql_to_string(idasql::Database& db, const std::string& sql) {
+    std::stringstream ss;
+    TablePrinter printer;
+    g_printer = &printer;
+    int rc = db.exec(sql.c_str(), table_callback, nullptr);
+    g_printer = nullptr;
+
+    if (rc == SQLITE_OK) {
+        // Capture to string instead of stdout
+        std::streambuf* old_cout = std::cout.rdbuf(ss.rdbuf());
+        printer.print();
+        std::cout.rdbuf(old_cout);
+        return ss.str();
+    } else {
+        return "Error: " + std::string(db.error());
+    }
+}
+
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+static void run_repl(idasql::Database& db, bool claude_code_mode, bool verbose) {
+#else
 static void run_repl(idasql::Database& db) {
+    [[maybe_unused]] bool claude_code_mode = false;
+#endif
     std::string line;
     std::string query;
 
-    std::cout << "IDASQL Interactive Mode\n"
-              << "Type .help for commands, .quit to exit\n\n";
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+    std::unique_ptr<idasql::ClaudeAgent> agent;
+    if (claude_code_mode) {
+        auto executor = [&db](const std::string& sql) -> std::string {
+            return execute_sql_to_string(db, sql);
+        };
+        agent = std::make_unique<idasql::ClaudeAgent>(executor, verbose);
+
+        // Register signal handler for clean Ctrl-C handling
+        g_agent = agent.get();
+        std::signal(SIGINT, signal_handler);
+#ifdef _WIN32
+        // Windows also needs SIGBREAK for Ctrl-Break
+        std::signal(SIGBREAK, signal_handler);
+#endif
+
+        agent->start();  // Start client thread
+
+        std::cout << "IDASQL Claude Code Mode\n"
+                  << "Ask questions in natural language or use SQL directly.\n"
+                  << "Type .help for commands, .quit to exit, Ctrl-C to interrupt\n\n";
+    } else {
+#endif
+        std::cout << "IDASQL Interactive Mode\n"
+                  << "Type .help for commands, .quit to exit\n\n";
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+    }
+#endif
 
     while (true) {
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+        // Check for quit request from signal handler
+        if (g_quit_requested.load()) {
+            std::cout << "\nInterrupted.\n";
+            break;
+        }
+#endif
+
         // Prompt
         std::cout << (query.empty() ? "idasql> " : "   ...> ");
         std::cout.flush();
@@ -343,6 +434,19 @@ static void run_repl(idasql::Database& db) {
             if (line == ".tables") { show_tables(db); continue; }
             if (line == ".info") { std::cout << db.info(); continue; }
             if (line == ".help") { show_help(); continue; }
+            if (line == ".clear") {
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+                if (claude_code_mode && agent) {
+                    agent->reset_session();
+                    std::cout << "Session cleared (conversation history reset)\n";
+                } else {
+                    std::cout << "Session cleared\n";
+                }
+#else
+                std::cout << "Session cleared\n";
+#endif
+                continue;
+            }
             if (line.substr(0, 7) == ".schema") {
                 std::string table = line.length() > 8 ? line.substr(8) : "";
                 // Trim whitespace
@@ -358,7 +462,34 @@ static void run_repl(idasql::Database& db) {
             continue;
         }
 
-        // Accumulate query
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+        // In Claude mode, use the thread-safe architecture
+        if (claude_code_mode && agent) {
+            // Send query (non-blocking - goes to client thread)
+            agent->send_query(line);
+
+            // Pump main queue until result (blocking, but handles MCP dispatches)
+            // This is where SQL gets executed on the main thread
+            std::string result = agent->pump_until_result([verbose](const claude::Message& msg) {
+                if (verbose && claude::is_assistant_message(msg)) {
+                    // Could show streaming progress here
+                }
+            });
+
+            if (!result.empty()) {
+                std::cout << result << "\n";
+            }
+
+            // Check if we were interrupted
+            if (agent->quit_requested()) {
+                std::cout << "Interrupted.\n";
+                break;
+            }
+            continue;
+        }
+#endif
+
+        // Standard SQL mode: accumulate query
         query += line + " ";
 
         // Execute if complete (ends with ;)
@@ -378,6 +509,15 @@ static void run_repl(idasql::Database& db) {
             query.clear();
         }
     }
+
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+    if (agent) {
+        agent->stop();
+        g_agent = nullptr;
+    }
+    // Restore default signal handler
+    std::signal(SIGINT, SIG_DFL);
+#endif
 }
 
 // ============================================================================
@@ -581,10 +721,10 @@ static bool execute_file(idasql::Database& db, const char* path) {
 // Main
 // ============================================================================
 
-static void print_usage(const char* prog) {
+static void print_usage() {
     std::cerr << "IDASQL - SQL interface to IDA databases\n\n"
-              << "Usage: " << prog << " -s <database> [-q|-c <query>] [-f <file>] [-i] [--export <file>]\n"
-              << "       " << prog << " --remote <host:port> [-q|-c <query>] [-f <file>] [-i]\n\n"
+              << "Usage: idasql -s <database> [-q|-c <query>] [-f <file>] [-i] [--export <file>]\n"
+              << "       idasql --remote <host:port> [-q|-c <query>] [-f <file>] [-i]\n\n"
               << "Options:\n"
               << "  -s <file>            IDA database file (.idb/.i64) for local mode\n"
               << "  --remote <host:port> Connect to IDASQL plugin server (e.g., localhost:13337)\n"
@@ -595,17 +735,39 @@ static void print_usage(const char* prog) {
               << "  -i                   Interactive REPL mode\n"
               << "  --export <file>      Export tables to SQL file (local mode only)\n"
               << "  --export-tables=X    Tables to export: * (all, default) or table1,table2,...\n"
-              << "  -h                   Show this help\n\n"
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+              << "  --prompt <text>      Natural language query (uses Claude)\n"
+              << "  --claude-code        Enable Claude Code mode in interactive REPL\n"
+              << "  -v, --verbose        Show Claude CLI logs (for debugging)\n"
+#endif
+              << "  -h, --help           Show this help\n\n"
               << "Examples:\n"
-              << "  " << prog << " -s test.i64 -q \"SELECT name, size FROM funcs LIMIT 10\"\n"
-              << "  " << prog << " -s test.i64 -f queries.sql\n"
-              << "  " << prog << " -s test.i64 -i\n"
-              << "  " << prog << " -s test.i64 --export dump.sql\n"
-              << "  " << prog << " --remote localhost:13337 -q \"SELECT * FROM funcs LIMIT 5\"\n"
-              << "  " << prog << " --remote localhost:13337 -i\n";
+              << "  idasql -s test.i64 -q \"SELECT name, size FROM funcs LIMIT 10\"\n"
+              << "  idasql -s test.i64 -f queries.sql\n"
+              << "  idasql -s test.i64 -i\n"
+              << "  idasql -s test.i64 --export dump.sql\n"
+              << "  idasql --remote localhost:13337 -q \"SELECT * FROM funcs LIMIT 5\"\n"
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+              << "  idasql -s test.i64 --prompt \"Find the largest functions\"\n"
+              << "  idasql -s test.i64 -i --claude-code\n"
+#endif
+              << "  idasql --remote localhost:13337 -i\n";
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    // Enable UTF-8 output on Windows console for proper Unicode display
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+
+    // Check for help first - before any IDA initialization
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage();
+            return 0;
+        }
+    }
+
     std::string db_path;
     std::string query;
     std::string sql_file;
@@ -614,18 +776,23 @@ int main(int argc, char* argv[]) {
     std::string remote_spec;          // host:port for remote mode
     std::string auth_token;           // --token for remote mode
     bool interactive = false;
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+    std::string nl_prompt;            // --prompt for natural language
+    bool claude_code_mode = false;    // --claude-code for interactive mode
+    bool verbose_mode = false;        // -v for verbose Claude output
+#endif
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
             db_path = argv[++i];
-        } else if (strcmp(argv[i], "--remote") == 0 && i + 1 < argc) {    
+        } else if (strcmp(argv[i], "--remote") == 0 && i + 1 < argc) {
             remote_spec = argv[++i];
         } else if (strcmp(argv[i], "--token") == 0 && i + 1 < argc) {
             auth_token = argv[++i];
         } else if ((strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "-c") == 0) && i + 1 < argc) {
             query = argv[++i];
-        } else if ((strcmp(argv[i], "-f") == 0) && i + 1 < argc) {        
+        } else if ((strcmp(argv[i], "-f") == 0) && i + 1 < argc) {
             sql_file = argv[++i];
         } else if (strcmp(argv[i], "-i") == 0) {
             interactive = true;
@@ -633,12 +800,20 @@ int main(int argc, char* argv[]) {
             export_file = argv[++i];
         } else if (strncmp(argv[i], "--export-tables=", 16) == 0) {
             export_tables = argv[i] + 16;
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+        } else if (strcmp(argv[i], "--prompt") == 0 && i + 1 < argc) {
+            nl_prompt = argv[++i];
+        } else if (strcmp(argv[i], "--claude-code") == 0) {
+            claude_code_mode = true;
+        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+            verbose_mode = true;
+#endif
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            print_usage(argv[0]);
-            return 0;
+            // Already handled above, but skip here to avoid "unknown option"
+            continue;
         } else {
             std::cerr << "Unknown option: " << argv[i] << "\n";
-            print_usage(argv[0]);
+            print_usage();
             return 1;
         }
     }
@@ -648,25 +823,33 @@ int main(int argc, char* argv[]) {
 
     if (!remote_mode && db_path.empty()) {
         std::cerr << "Error: Database path required (-s) or use --remote\n\n";
-        print_usage(argv[0]);
+        print_usage();
         return 1;
     }
 
     if (remote_mode && !db_path.empty()) {
         std::cerr << "Error: Cannot use both -s and --remote\n\n";
-        print_usage(argv[0]);
+        print_usage();
         return 1;
     }
 
-    if (query.empty() && sql_file.empty() && !interactive && export_file.empty()) {
-        std::cerr << "Error: Specify -q, -c, -f, -i, or --export\n\n";
-        print_usage(argv[0]);
+    bool has_action = !query.empty() || !sql_file.empty() || interactive || !export_file.empty();
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+    has_action = has_action || !nl_prompt.empty();
+#endif
+    if (!has_action) {
+        std::cerr << "Error: Specify -q, -c, -f, -i, --export"
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+                  << ", or --prompt"
+#endif
+                  << "\n\n";
+        print_usage();
         return 1;
     }
 
     if (remote_mode && !export_file.empty()) {
         std::cerr << "Error: --export not supported in remote mode\n\n";
-        print_usage(argv[0]);
+        print_usage();
         return 1;
     }
 
@@ -712,6 +895,28 @@ int main(int argc, char* argv[]) {
         if (!export_to_sql(db, export_file.c_str(), export_tables)) {
             result = 1;
         }
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+    } else if (!nl_prompt.empty()) {
+        // Natural language query mode (one-shot)
+        auto executor = [&db](const std::string& sql) -> std::string {
+            return execute_sql_to_string(db, sql);
+        };
+        idasql::ClaudeAgent agent(executor, verbose_mode);
+
+        // Register signal handler
+        g_agent = &agent;
+        std::signal(SIGINT, signal_handler);
+
+        agent.start();
+        agent.send_query(nl_prompt);
+        std::string response = agent.pump_until_result();
+        agent.stop();
+
+        g_agent = nullptr;
+        std::signal(SIGINT, SIG_DFL);
+
+        std::cout << response << "\n";
+#endif
     } else if (!query.empty()) {
         // Single query mode
         TablePrinter printer;
@@ -732,7 +937,11 @@ int main(int argc, char* argv[]) {
         }
     } else if (interactive) {
         // Interactive REPL
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+        run_repl(db, claude_code_mode, verbose_mode);
+#else
         run_repl(db);
+#endif
     }
 
     db.close();

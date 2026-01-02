@@ -35,6 +35,9 @@
 // IDASQL library
 #include <idasql/database.hpp>
 
+// IDASQL CLI (command line interface)
+#include "../common/idasql_cli.hpp"
+
 // Platform-specific socket includes
 #ifdef _WIN32
     #include <winsock2.h>
@@ -491,6 +494,7 @@ struct idasql_plugmod_t : public plugmod_t
 {
     std::unique_ptr<idasql::QueryEngine> engine_;
     idasql_server_t server_;
+    std::unique_ptr<idasql::IdasqlCLI> cli_;
 
     idasql_plugmod_t()
     {
@@ -505,11 +509,24 @@ struct idasql_plugmod_t : public plugmod_t
             }
 
             // Setup execute_sync callback for GUI mode
-            server_.set_query_func([this](const std::string& sql) {       
+            server_.set_query_func([this](const std::string& sql) {
                 query_request_t req(engine_.get(), sql);
                 execute_sync(req, MFF_READ);
                 return std::move(req.result);
             });
+
+            // Create CLI with execute_sync wrapper for thread safety
+            cli_ = std::make_unique<idasql::IdasqlCLI>(
+                [this](const std::string& sql) -> std::string {
+                    query_request_t req(engine_.get(), sql);
+                    execute_sync(req, MFF_READ);
+                    if (req.result.success) {
+                        return req.result.to_string();
+                    } else {
+                        return "Error: " + req.result.error;
+                    }
+                }
+            );
         } else {
             msg("IDASQL: Failed to init engine: %s\n", engine_->error().c_str());
         }
@@ -517,6 +534,7 @@ struct idasql_plugmod_t : public plugmod_t
 
     ~idasql_plugmod_t()
     {
+        if (cli_) cli_->uninstall();
         server_.stop();
         engine_.reset();
         msg("IDASQL: Plugin terminated\n");
@@ -530,7 +548,7 @@ struct idasql_plugmod_t : public plugmod_t
         }
 
         switch (arg) {
-            case 0:  // Toggle (GUI mode with execute_sync)
+            case 0:  // Toggle server (GUI mode with execute_sync)
                 if (server_.is_running()) {
                     server_.stop();
                     msg("IDASQL: Server stopped\n");
@@ -540,7 +558,7 @@ struct idasql_plugmod_t : public plugmod_t
                 }
                 return true;
 
-            case 1:  // Start in poll mode (idalib)
+            case 1:  // Start server in poll mode (idalib)
                 if (!server_.is_running()) {
                     server_.set_poll_mode(true);
                     server_.start(13337);
@@ -551,6 +569,16 @@ struct idasql_plugmod_t : public plugmod_t
                 if (server_.is_running()) {
                     server_.stop();
                     msg("IDASQL: Server stopped\n");
+                }
+                return true;
+
+            case 3:  // Toggle CLI
+                if (cli_) {
+                    if (cli_->is_installed()) {
+                        cli_->uninstall();
+                    } else {
+                        cli_->install();
+                    }
                 }
                 return true;
 
@@ -579,11 +607,17 @@ plugin_t PLUGIN =
     init,
     nullptr,
     nullptr,
-    "IDASQL - SQL server for IDA database",
+    "IDASQL - SQL interface for IDA database",
     "IDASQL Plugin\n"
-    "GUI: Press hotkey to toggle server on/off.\n"
-    "idalib: Use arg codes 1/4/2 for start/poll/stop.\n"
-    "Connect with: idasql --remote localhost:13337",
+    "\n"
+    "run(0): Toggle remote server on/off (GUI mode)\n"
+    "run(1): Start server in poll mode (idalib)\n"
+    "run(2): Stop server\n"
+    "run(3): Toggle CLI (command line interface)\n"
+    "run(4): Poll pending query (idalib)\n"
+    "\n"
+    "Remote: idasql --remote localhost:13337\n"
+    "CLI: Type SQL or natural language in IDA's command line",
     "IDASQL",
     "Ctrl-Shift-Q"
 };

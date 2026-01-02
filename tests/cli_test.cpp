@@ -369,5 +369,88 @@ TEST_F(CLIQueryTest, TableFormatOutput) {
         << "Output should show row count";
 }
 
+// ============================================================================
+// Claude Agent CLI Tests (--prompt, --claude-code)
+// ============================================================================
+
+#ifdef IDASQL_HAS_CLAUDE_AGENT
+
+TEST_F(CLITest, HelpShowsClaudeOptions) {
+    auto result = run_cli("-h");
+    if (result.exit_code == -1 ||
+        result.stdout_output.find("idasql") == std::string::npos) {
+        GTEST_SKIP() << "idasql CLI executable not found";
+    }
+
+    // Help should show Claude-specific options
+    EXPECT_NE(result.stdout_output.find("--prompt"), std::string::npos)
+        << "Help should mention --prompt option";
+    EXPECT_NE(result.stdout_output.find("--claude-code"), std::string::npos)
+        << "Help should mention --claude-code option";
+}
+
+class CLIClaudeTest : public CLIQueryTest {
+protected:
+    void SetUp() override {
+        CLIQueryTest::SetUp();
+
+        // Check if Claude is available by looking for API key
+        const char* api_key = getenv("ANTHROPIC_API_KEY");
+        if (!api_key || !*api_key) {
+            GTEST_SKIP() << "ANTHROPIC_API_KEY not set - skipping Claude CLI tests";
+        }
+    }
+};
+
+TEST_F(CLIClaudeTest, PromptSimpleQuery) {
+    // Test --prompt with a simple natural language query
+    auto result = run_cli("-s \"" + get_db_path() + "\" --prompt \"How many functions are in this database?\"");
+
+    // Should not show "Error: Claude CLI not found"
+    if (result.stdout_output.find("Claude CLI not found") != std::string::npos) {
+        GTEST_SKIP() << "Claude CLI not installed";
+    }
+
+    // Response should contain a number (the count)
+    bool has_digit = false;
+    for (char c : result.stdout_output) {
+        if (c >= '0' && c <= '9') {
+            has_digit = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(has_digit) << "Response should contain a number. Got: " << result.stdout_output;
+}
+
+TEST_F(CLIClaudeTest, PromptListTables) {
+    auto result = run_cli("-s \"" + get_db_path() + "\" --prompt \"What tables are available?\"");
+
+    if (result.stdout_output.find("Claude CLI not found") != std::string::npos) {
+        GTEST_SKIP() << "Claude CLI not installed";
+    }
+
+    // Response should mention tables
+    EXPECT_TRUE(result.stdout_output.find("funcs") != std::string::npos ||
+                result.stdout_output.find("table") != std::string::npos ||
+                result.stdout_output.find("Table") != std::string::npos)
+        << "Response should mention tables. Got: " << result.stdout_output;
+}
+
+TEST_F(CLIClaudeTest, PromptWithSQLPassthrough) {
+    // If user provides SQL-like input to --prompt, it should still work
+    // (ClaudeAgent detects SQL and executes directly)
+    auto result = run_cli("-s \"" + get_db_path() + "\" --prompt \"SELECT COUNT(*) FROM funcs\"");
+
+    if (result.stdout_output.find("Claude CLI not found") != std::string::npos) {
+        GTEST_SKIP() << "Claude CLI not installed";
+    }
+
+    // Should execute the SQL and return a result
+    EXPECT_FALSE(result.stdout_output.empty())
+        << "Should return SQL result";
+}
+
+#endif // IDASQL_HAS_CLAUDE_AGENT
+
 }  // namespace testing
 }  // namespace idasql

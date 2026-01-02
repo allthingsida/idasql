@@ -42,5 +42,37 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/lib/include)
 # Option to build idalib-based tests (requires IDASDK)
 option(BUILD_IDALIB "Build idalib-based tests (test3)" OFF)
 
+# ============================================================================
+# Claude Agent SDK (optional)
+# ============================================================================
+
+option(IDASQL_WITH_CLAUDE_AGENT "Build with Claude AI agent support" OFF)
+
+if(IDASQL_WITH_CLAUDE_AGENT)
+    message(STATUS "idasql: Building with Claude agent support")
+
+    # Add claude-agent-sdk-cpp as subdirectory
+    set(CLAUDE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(CLAUDE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    add_subdirectory(external/claude-agent-sdk-cpp)
+
+    # Generate prompt header if needed (conditional on source file age)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        set(PROMPT_MD "${CMAKE_CURRENT_SOURCE_DIR}/prompts/idasql_agent.md")
+        set(PROMPT_HPP "${CMAKE_CURRENT_SOURCE_DIR}/src/common/idasql_agent_prompt.hpp")
+
+        add_custom_command(
+            OUTPUT ${PROMPT_HPP}
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_prompt.py
+                ${PROMPT_MD} ${PROMPT_HPP}
+            DEPENDS ${PROMPT_MD}
+            COMMENT "Checking/regenerating idasql_agent_prompt.hpp"
+        )
+        add_custom_target(generate_prompt DEPENDS ${PROMPT_HPP})
+    endif()
+endif()
+
 # Add subdirectories
 add_subdirectory(src)

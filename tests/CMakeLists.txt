@@ -62,20 +62,36 @@ target_include_directories(test_utils PUBLIC
 target_link_libraries(test_utils PUBLIC xsql::xsql)
 
 # Main test executable (idalib-based)
+set(IDASQL_TEST_SOURCES
+    main_test.cpp
+    vtable_framework_test.cpp
+    funcs_table_test.cpp
+    segments_table_test.cpp
+    names_table_test.cpp
+    xrefs_table_test.cpp
+    complex_queries_test.cpp
+    cli_test.cpp
+    ctree_table_test.cpp
+    disasm_table_test.cpp
+    types_table_test.cpp
+)
+
+# Add Claude integration tests if enabled
+if(IDASQL_WITH_CLAUDE_AGENT)
+    list(APPEND IDASQL_TEST_SOURCES
+        claude_integration_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/claude_agent.cpp
+    )
+    # IDA SDK's fpro.h poisons fgetc/fputc macros which breaks nlohmann_json.
+    # USE_DANGEROUS_FUNCTIONS disables these poison macros for this file.
+    set_source_files_properties(claude_integration_test.cpp PROPERTIES
+        COMPILE_DEFINITIONS "USE_DANGEROUS_FUNCTIONS"
+    )
+endif()
+
 ida_add_idalib(idasql_tests
     TYPE EXECUTABLE
-    SOURCES
-        main_test.cpp
-        vtable_framework_test.cpp
-        funcs_table_test.cpp
-        segments_table_test.cpp
-        names_table_test.cpp
-        xrefs_table_test.cpp
-        complex_queries_test.cpp
-        cli_test.cpp
-        ctree_table_test.cpp
-        disasm_table_test.cpp
-        types_table_test.cpp
+    SOURCES ${IDASQL_TEST_SOURCES}
 )
 target_link_libraries(idasql_tests PRIVATE
     GTest::gtest
@@ -85,25 +101,52 @@ target_link_libraries(idasql_tests PRIVATE
 target_include_directories(idasql_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/lib/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common
 )
+
+# Add Claude SDK if enabled
+if(IDASQL_WITH_CLAUDE_AGENT)
+    # Add claude-agent-sdk-cpp if not already available
+    if(NOT TARGET claude_sdk)
+        set(CLAUDE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(CLAUDE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../external/claude-agent-sdk-cpp
+                         ${CMAKE_CURRENT_BINARY_DIR}/claude-agent-sdk-cpp)
+    endif()
+
+    target_link_libraries(idasql_tests PRIVATE claude_sdk)
+    target_compile_definitions(idasql_tests PRIVATE IDASQL_HAS_CLAUDE_AGENT)
+    message(STATUS "idasql_tests: Claude integration tests enabled")
+endif()
 
 # Build a CLI binary as part of the tests so CLI tests don't rely on an in-tree
 # `idasql/src/cli/build` directory existing. This avoids including the separate
 # CLI CMake project (which would re-bootstrap ida-cmake and collide targets).
+set(CLI_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/../src/cli/main.cpp)
+if(IDASQL_WITH_CLAUDE_AGENT)
+    list(APPEND CLI_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/claude_agent.cpp)
+endif()
+
 ida_add_idalib(idasql_cli_test
     TYPE EXECUTABLE
-    SOURCES
-        ${CMAKE_CURRENT_SOURCE_DIR}/../src/cli/main.cpp
+    SOURCES ${CLI_TEST_SOURCES}
 )
 target_link_libraries(idasql_cli_test PRIVATE xsql::xsql)
 target_include_directories(idasql_cli_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/lib/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/common
 )
 target_compile_definitions(idasql_cli_test PRIVATE USE_IDA_SDK USE_HEXRAYS)
 set_target_properties(idasql_cli_test PROPERTIES OUTPUT_NAME "idasql")
 
 if(WIN32)
     target_link_libraries(idasql_cli_test PRIVATE ws2_32)
+endif()
+
+# Add Claude support to CLI test executable
+if(IDASQL_WITH_CLAUDE_AGENT)
+    target_link_libraries(idasql_cli_test PRIVATE claude_sdk)
+    target_compile_definitions(idasql_cli_test PRIVATE IDASQL_HAS_CLAUDE_AGENT)
 endif()
 
 add_dependencies(idasql_tests idasql_cli_test)
@@ -137,6 +180,16 @@ else()
     set_tests_properties(${IDASQL_GTESTS} PROPERTIES TIMEOUT 20)
 endif()
 
+# Claude tests need longer timeout (API calls)
+if(IDASQL_WITH_CLAUDE_AGENT)
+    foreach(TEST_NAME ${IDASQL_GTESTS})
+        if(TEST_NAME MATCHES "ClaudeIntegration")
+            # Multi-turn tests can take 2+ minutes due to many API calls
+            set_tests_properties(${TEST_NAME} PROPERTIES TIMEOUT 240)
+        endif()
+    endforeach()
+endif()
+
 # Copy SQL test files to build directory
 file(GLOB SQL_FILES ${CMAKE_CURRENT_SOURCE_DIR}/sql/*.sql)
 foreach(SQL_FILE ${SQL_FILES})
@@ -151,3 +204,19 @@ if(MSVC)
         VS_DEBUGGER_ENVIRONMENT "PATH=${IDABIN_NATIVE};%PATH%"
     )
 endif()
+
+# ============================================================================
+# Claude Integration Tests - Usage Notes
+# ============================================================================
+# Claude integration tests are now part of the main idasql_tests executable.
+# They use the real IDA database via IDADatabaseTest fixture.
+#
+# Build with: cmake -DIDASQL_WITH_CLAUDE_AGENT=ON ...
+# Run with:   idasql_tests.exe testdb.i64 --gtest_filter=ClaudeIntegration*
+#
+# Claude tests require:
+#   - Claude CLI installed (npm install -g @anthropic-ai/claude-code)
+#   - ANTHROPIC_API_KEY environment variable set
+#   - Network access to Anthropic API
+#
+# Tests will be skipped automatically if Claude is not available.

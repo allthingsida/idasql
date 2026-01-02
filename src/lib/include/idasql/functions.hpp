@@ -67,6 +67,8 @@
 #include <loader.hpp>   // gen_file
 #include <fpro.h>       // qfile_t for file operations
 #include <gdl.hpp>      // FlowChart for CFG generation
+#include <strlist.hpp>  // String list functions
+#include <nalt.hpp>     // String type constants
 
 // Hex-Rays decompiler (optional)
 #ifdef HAS_HEXRAYS
@@ -1432,6 +1434,69 @@ static void sql_jump_query(sqlite3_context* ctx, int argc, sqlite3_value** argv)
 }
 
 // ============================================================================
+// String List Functions
+// ============================================================================
+
+// rebuild_strings() - Rebuild IDA's string list
+// Returns: number of strings found
+//
+// Args (all optional):
+//   min_len: minimum string length (default 5)
+//   types: string types bitmask (default 3 = ASCII + UTF-16)
+//          1 = ASCII (STRTYPE_C)
+//          2 = UTF-16 (STRTYPE_C_16)
+//          4 = UTF-32 (STRTYPE_C_32)
+//          3 = ASCII + UTF-16 (default)
+//          7 = all types
+//
+// Example:
+//   SELECT rebuild_strings();        -- Default: ASCII + UTF-16, minlen 5
+//   SELECT rebuild_strings(4);       -- ASCII + UTF-16, minlen 4
+//   SELECT rebuild_strings(5, 1);    -- ASCII only, minlen 5
+//   SELECT rebuild_strings(5, 7);    -- All types, minlen 5
+static void sql_rebuild_strings(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+    int min_len = 5;
+    int types_mask = 3;  // Default: ASCII + UTF-16
+
+    if (argc >= 1 && sqlite3_value_type(argv[0]) == SQLITE_INTEGER) {
+        min_len = sqlite3_value_int(argv[0]);
+        if (min_len < 1) min_len = 1;
+        if (min_len > 1000) min_len = 1000;
+    }
+    if (argc >= 2 && sqlite3_value_type(argv[1]) == SQLITE_INTEGER) {
+        types_mask = sqlite3_value_int(argv[1]);
+    }
+
+    // Get the options pointer - despite 'const', it IS modifiable (same as Python bindings)
+    strwinsetup_t* opts = const_cast<strwinsetup_t*>(get_strlist_options());
+
+    // Configure string types based on mask
+    opts->strtypes.clear();
+    if (types_mask & 1) opts->strtypes.push_back(STRTYPE_C);      // ASCII
+    if (types_mask & 2) opts->strtypes.push_back(STRTYPE_C_16);   // UTF-16
+    if (types_mask & 4) opts->strtypes.push_back(STRTYPE_C_32);   // UTF-32
+
+    // Set minimum length
+    opts->minlen = min_len;
+
+    // Allow extended ASCII
+    opts->only_7bit = 0;
+
+    // Clear and rebuild with new settings
+    clear_strlist();
+    build_strlist();
+
+    // Return the count
+    size_t count = get_strlist_qty();
+    sqlite3_result_int64(ctx, static_cast<int64_t>(count));
+}
+
+// string_count() - Get current count of strings in IDA's cached list (no rebuild)
+static void sql_string_count(sqlite3_context* ctx, int /*argc*/, sqlite3_value** /*argv*/) {
+    sqlite3_result_int64(ctx, static_cast<int64_t>(get_strlist_qty()));
+}
+
+// ============================================================================
 // Registration
 // ============================================================================
 
@@ -1507,6 +1572,12 @@ inline bool register_sql_functions(xsql::Database& db) {
     // Jump search
     sqlite3_create_function(db.handle(), "jump_search", 4, SQLITE_UTF8, nullptr, sql_jump_search, nullptr, nullptr);
     sqlite3_create_function(db.handle(), "jump_query", 4, SQLITE_UTF8, nullptr, sql_jump_query, nullptr, nullptr);
+
+    // String list functions
+    sqlite3_create_function(db.handle(), "rebuild_strings", 0, SQLITE_UTF8, nullptr, sql_rebuild_strings, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "rebuild_strings", 1, SQLITE_UTF8, nullptr, sql_rebuild_strings, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "rebuild_strings", 2, SQLITE_UTF8, nullptr, sql_rebuild_strings, nullptr, nullptr);
+    sqlite3_create_function(db.handle(), "string_count", 0, SQLITE_UTF8, nullptr, sql_string_count, nullptr, nullptr);
 
     return true;
 }
