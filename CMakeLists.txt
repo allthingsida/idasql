@@ -48,6 +48,12 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/lib/include)
 # Option to build idalib-based tests (requires IDASDK)
 option(BUILD_IDALIB "Build idalib-based tests (test3)" OFF)
 
+# Unit tests (no IDA dependency)
+option(IDASQL_BUILD_TESTS "Build IDASQL unit tests" ON)
+if(IDASQL_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
+
 # ============================================================================
 # Claude Agent SDK (optional)
 # ============================================================================

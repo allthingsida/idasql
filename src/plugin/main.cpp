@@ -30,6 +30,8 @@
 #include <functional>
 #include <limits>
 #include <cstdlib>
+#include <random>
+#include <iomanip>
 
 // IDA SDK headers
 #include <ida.hpp>
@@ -512,14 +514,38 @@ struct idasql_plugmod_t : public plugmod_t
             server_.set_engine(engine_.get());
 
             qstring tok;
+            bool allow_unauth = false;
+            qstring allow_env;
+            if (qgetenv("IDASQL_ALLOW_NO_AUTH", &allow_env) && !allow_env.empty()) {
+                allow_unauth = true;
+            }
+
             if (qgetenv("IDASQL_TOKEN", &tok) && !tok.empty()) {
                 server_.set_auth_token(tok.c_str());
+                msg("IDASQL: Auth token enabled via IDASQL_TOKEN\n");
+            } else if (!allow_unauth) {
+                // Generate a temporary token to avoid unauthenticated access by default
+                std::random_device rd;
+                std::mt19937_64 rng(rd());
+                std::uniform_int_distribution<uint64_t> dist;
+                uint64_t hi = dist(rng);
+                uint64_t lo = dist(rng);
+                std::ostringstream oss;
+                oss << std::hex << std::setfill('0') << std::setw(16) << hi
+                    << std::setw(16) << lo;
+                auto token = oss.str();
+                server_.set_auth_token(token);
+                msg("IDASQL: Auth token generated (set IDASQL_TOKEN to override). Token: %s\n",
+                    token.c_str());
+            } else {
+                msg("IDASQL: WARNING: Remote server starting without auth (IDASQL_ALLOW_NO_AUTH set)\n");
             }
 
             // Setup execute_sync callback for GUI mode
             server_.set_query_func([this](const std::string& sql) {
                 query_request_t req(engine_.get(), sql);
-                execute_sync(req, MFF_READ);
+                // Allow write-capable SQL helpers (set_name, set_comment, etc.)
+                execute_sync(req, MFF_WRITE);
                 return std::move(req.result);
             });
 
@@ -527,7 +553,7 @@ struct idasql_plugmod_t : public plugmod_t
             cli_ = std::make_unique<idasql::IdasqlCLI>(
                 [this](const std::string& sql) -> std::string {
                     query_request_t req(engine_.get(), sql);
-                    execute_sync(req, MFF_READ);
+                    execute_sync(req, MFF_WRITE);
                     if (req.result.success) {
                         return req.result.to_string();
                     } else {

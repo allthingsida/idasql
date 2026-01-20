@@ -19,6 +19,8 @@
 #include <string>
 #include <functional>
 #include <memory>
+#include <cctype>
+#include <algorithm>
 
 #include "idasql_commands.hpp"
 
@@ -33,6 +35,15 @@ class SessionHandler
 public:
     using SqlExecutor = std::function<std::string(const std::string&)>;
 
+    // Simple allowlist for table identifiers (alnum + underscore)
+    static bool is_safe_table_name(const std::string& name)
+    {
+        if (name.empty() || name.size() > 128) return false;
+        return std::all_of(name.begin(), name.end(), [](unsigned char c) {
+            return std::isalnum(c) || c == '_';
+        });
+    }
+
     /**
      * Create a session handler
      * @param executor Function to execute SQL and return formatted results
@@ -46,7 +57,9 @@ public:
             return executor_("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
         };
         callbacks_.get_schema = [this](const std::string& table) {
-            // Note: Should sanitize table name in production
+            if (!is_safe_table_name(table)) {
+                return std::string("Invalid table name");
+            }
             std::string sql = "SELECT sql FROM sqlite_master WHERE name='" + table + "'";
             return executor_(sql);
         };

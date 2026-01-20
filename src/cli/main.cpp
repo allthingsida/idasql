@@ -33,7 +33,9 @@
 #include <sstream>
 #include <string>
 #include <cstring>
+#include <cctype>
 #include <vector>
+#include <algorithm>
 #include <csignal>
 #include <atomic>
 
@@ -159,6 +161,17 @@ static bool parse_port(const std::string& s, int& port) {
     } catch (...) {
         return false;
     }
+}
+
+// ============================================================================ 
+// Validation Helpers
+// ============================================================================ 
+
+static bool is_safe_table_name(const std::string& name) {
+    if (name.empty() || name.size() > 128) return false;
+    return std::all_of(name.begin(), name.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == '_';
+    });
 }
 
 // ============================================================================ 
@@ -345,6 +358,11 @@ static void show_tables(idasql::Database& db) {
 }
 
 static void show_schema(idasql::Database& db, const std::string& table) {
+    if (!is_safe_table_name(table)) {
+        std::cerr << "Invalid table name\n";
+        return;
+    }
+
     std::string sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name='" + table + "';";
     db.exec(sql.c_str(),
         [](void*, int, char** argv, char**) -> int {
@@ -588,6 +606,11 @@ static bool export_to_sql(idasql::Database& db, const char* path,
         tables = get_all_tables(db);
     } else {
         tables = parse_table_list(table_spec);
+        // Remove invalid names to avoid SQL injection
+        tables.erase(
+            std::remove_if(tables.begin(), tables.end(),
+                           [](const std::string& t) { return !is_safe_table_name(t); }),
+            tables.end());
     }
 
     out << "-- IDASQL Export\n";
