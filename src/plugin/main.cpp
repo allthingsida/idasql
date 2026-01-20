@@ -2,15 +2,11 @@
  * idasql_plugin - IDA plugin that hosts an IDASQL server
  *
  * GUI mode:   Press Ctrl-Shift-Q to toggle server on/off (uses execute_sync)
- * idalib mode: Driver calls run(1) to start, run(4) to poll, run(2) to stop
+ * idalib mode: Driver calls run() with control codes from plugin_control.hpp
  *
  * Connect with: idasql --remote localhost:13337 -q "SELECT * FROM funcs"
  *
- * run() arg codes:
- *   0 = Toggle server (GUI mode, uses execute_sync)
- *   1 = Start server in poll mode (for idalib)
- *   2 = Stop server
- *   4 = Poll: execute one pending query (for idalib pump loop)
+ * See plugin_control.hpp for run() arg codes.
  */
 
 // When building with Claude Agent support, we need to:
@@ -46,6 +42,9 @@
 
 // IDASQL CLI (command line interface)
 #include "../common/idasql_cli.hpp"
+
+// Plugin control codes (shared with test harness)
+#include "../common/plugin_control.hpp"
 
 // Platform-specific socket includes
 #ifdef _WIN32
@@ -551,37 +550,44 @@ struct idasql_plugmod_t : public plugmod_t
 
     virtual bool idaapi run(size_t arg) override
     {
+        using namespace idasql;
+
         if (!engine_ || !engine_->is_valid()) {
             msg("IDASQL: Query engine not available\n");
             return false;
         }
 
-        switch (arg) {
-            case 0:  // Toggle server (GUI mode with execute_sync)
+        // Decode port from upper 16 bits (0 = use default)
+        int port = static_cast<int>((arg >> PLUGIN_ARG_PORT_SHIFT) & PLUGIN_ARG_CMD_MASK);
+        if (port == 0) port = PLUGIN_DEFAULT_PORT;
+        size_t cmd = arg & PLUGIN_ARG_CMD_MASK;
+
+        switch (cmd) {
+            case PLUGIN_ARG_GUI_TOGGLE:  // Toggle server (GUI mode with execute_sync)
                 if (server_.is_running()) {
                     server_.stop();
                     msg("IDASQL: Server stopped\n");
                 } else {
                     server_.set_poll_mode(false);
-                    server_.start(13337);
+                    server_.start(port);
                 }
                 return true;
 
-            case 1:  // Start server in poll mode (idalib)
+            case PLUGIN_ARG_START_POLL_MODE:  // Start server in poll mode (idalib)
                 if (!server_.is_running()) {
                     server_.set_poll_mode(true);
-                    server_.start(13337);
+                    server_.start(port);
                 }
                 return true;
 
-            case 2:  // Stop server
+            case PLUGIN_ARG_STOP_SERVER:  // Stop server
                 if (server_.is_running()) {
                     server_.stop();
                     msg("IDASQL: Server stopped\n");
                 }
                 return true;
 
-            case 3:  // Toggle CLI
+            case PLUGIN_ARG_TOGGLE_CLI:  // Toggle CLI
                 if (cli_) {
                     if (cli_->is_installed()) {
                         cli_->uninstall();
@@ -591,7 +597,7 @@ struct idasql_plugmod_t : public plugmod_t
                 }
                 return true;
 
-            case 4:  // Poll: execute one pending query
+            case PLUGIN_ARG_POLL_ONE:  // Poll: execute one pending query
                 return server_.poll_one();
 
             default:
@@ -619,11 +625,13 @@ plugin_t PLUGIN =
     "IDASQL - SQL interface for IDA database",
     "IDASQL Plugin\n"
     "\n"
-    "run(0): Toggle remote server on/off (GUI mode)\n"
-    "run(1): Start server in poll mode (idalib)\n"
-    "run(2): Stop server\n"
-    "run(3): Toggle CLI (command line interface)\n"
-    "run(4): Poll pending query (idalib)\n"
+    "run(0):  Toggle remote server on/off (GUI mode)\n"
+    "run(21): Start server in poll mode (idalib)\n"
+    "run(22): Stop server\n"
+    "run(23): Toggle CLI (command line interface)\n"
+    "run(24): Poll pending query (idalib)\n"
+    "\n"
+    "Port encoding: arg = (port << 16) | cmd\n"
     "\n"
     "Remote: idasql --remote localhost:13337\n"
     "CLI: Type SQL or natural language in IDA's command line",
