@@ -6,9 +6,17 @@ set(CMAKE_CXX_STANDARD 20)
 include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
-# Find libxsql (sibling directory)
+# Find libxsql
 if(NOT TARGET xsql::xsql)
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql libxsql)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql/CMakeLists.txt")
+        # Monorepo: sibling of idasql
+        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql libxsql)
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../external/libxsql/CMakeLists.txt")
+        # Standalone: submodule in external/
+        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../external/libxsql libxsql)
+    else()
+        message(FATAL_ERROR "libxsql not found. Initialize submodule: git submodule update --init external/libxsql")
+    endif()
 endif()
 
 # Plugin sources
@@ -19,7 +27,6 @@ ida_add_plugin(idasql_plugin
 # Include directories and link dependencies
 target_include_directories(idasql_plugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql/include
 )
 target_link_libraries(idasql_plugin PRIVATE xsql::xsql)
 

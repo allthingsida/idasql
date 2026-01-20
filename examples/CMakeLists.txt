@@ -22,15 +22,13 @@ find_package(idasdk REQUIRED)
 # xsql dependency (provides SQLite)
 # ============================================================================
 
-set(LIBXSQL_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../libxsql)
-
 if(TARGET xsql::xsql)
     message(STATUS "idasql_examples: Using xsql::xsql from parent project")
-elseif(EXISTS "${LIBXSQL_ROOT}/CMakeLists.txt")
-    add_subdirectory(${LIBXSQL_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
-    message(STATUS "idasql_examples: Added libxsql from ${LIBXSQL_ROOT}")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../external/libxsql/CMakeLists.txt")
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../external/libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
+    message(STATUS "idasql_examples: Added libxsql from external/libxsql")
 else()
-    message(FATAL_ERROR "libxsql not found at ${LIBXSQL_ROOT}")
+    message(FATAL_ERROR "libxsql not found. Initialize submodule: git submodule update --init external/libxsql")
 endif()
 
 # libidasql interface library (headers only)

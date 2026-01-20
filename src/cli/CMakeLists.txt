@@ -30,13 +30,23 @@ else()
     if(xsql_FOUND)
         message(STATUS "idasql_cli: Using xsql::xsql via find_package")
     elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql/CMakeLists.txt")
+        # Monorepo: sibling of idasql
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
-        message(STATUS "idasql_cli: Added libxsql from ../../../libxsql")
+        message(STATUS "idasql_cli: Added libxsql from monorepo sibling")
+    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../external/libxsql/CMakeLists.txt")
+        # Standalone: submodule in external/
+        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../external/libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
+        message(STATUS "idasql_cli: Added libxsql from external/libxsql submodule")
     else()
-        message(FATAL_ERROR "libxsql not found. Either:\n"
-            "  1. Build as part of xsql monorepo\n"
-            "  2. Set xsql_DIR to the libxsql build directory\n"
-            "  3. Install libxsql and ensure it's in CMAKE_PREFIX_PATH")
+        message(FATAL_ERROR "libxsql not found. Either:
+"
+            "  1. Build as part of xsql monorepo
+"
+            "  2. Set xsql_DIR to the libxsql build directory
+"
+            "  3. Install libxsql and ensure it's in CMAKE_PREFIX_PATH
+"
+            "  4. Initialize submodule: git submodule update --init external/libxsql")
     endif()
 endif()
 
