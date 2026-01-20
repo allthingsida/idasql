@@ -77,6 +77,11 @@ struct QueryResult {
     size_t column_count() const { return columns.size(); }
     bool empty() const { return rows.empty(); }
 
+    // Get first cell as scalar (for single-value queries)
+    std::string scalar() const {
+        return (!empty() && rows[0].size() > 0) ? rows[0][0] : "";
+    }
+
     // Iterator support
     auto begin() { return rows.begin(); }
     auto end() { return rows.end(); }
