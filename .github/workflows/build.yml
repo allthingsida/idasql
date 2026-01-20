@@ -3,17 +3,165 @@ name: build
 on:
   push:
     branches: ["**"]
+    tags: ["v*", "V*"]
   pull_request:
     branches: ["**"]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
+  # ============================================================================
+  # Plugin builds
+  # ============================================================================
+  build-plugin-linux:
+    name: Plugin (Linux)
+    runs-on: ubuntu-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk/src
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        shell: bash
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+          git clone --depth 1 https://github.com/allthingsida/idacpp.git "${IDASDK}/include/idacpp"
+
+      - name: Configure (plugin)
+        shell: bash
+        working-directory: src/plugin
+        run: cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build (plugin)
+        shell: bash
+        working-directory: src/plugin
+        run: cmake --build build --config RelWithDebInfo
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp src/plugin/build/idasql_plugin64.so dist/ 2>/dev/null || true
+          cp src/plugin/build/*/idasql_plugin64.so dist/ 2>/dev/null || true
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: idasql-linux
+          path: dist/
+          if-no-files-found: error
+
+  build-plugin-macos:
+    name: Plugin (macOS)
+    runs-on: macos-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk/src
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        shell: bash
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+          git clone --depth 1 https://github.com/allthingsida/idacpp.git "${IDASDK}/include/idacpp"
+
+      - name: Configure (plugin)
+        shell: bash
+        working-directory: src/plugin
+        run: cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build (plugin)
+        shell: bash
+        working-directory: src/plugin
+        run: cmake --build build --config RelWithDebInfo
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp src/plugin/build/idasql_plugin64.dylib dist/ 2>/dev/null || true
+          cp src/plugin/build/*/idasql_plugin64.dylib dist/ 2>/dev/null || true
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: idasql-macos
+          path: dist/
+          if-no-files-found: error
+
+  build-plugin-windows:
+    name: Plugin (Windows)
+    runs-on: windows-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk/src
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        shell: bash
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+          git clone --depth 1 https://github.com/allthingsida/idacpp.git "${IDASDK}/include/idacpp"
+
+      - name: Configure (plugin)
+        shell: bash
+        working-directory: src/plugin
+        run: cmake -B build
+
+      - name: Build (plugin)
+        shell: bash
+        working-directory: src/plugin
+        run: cmake --build build --config RelWithDebInfo
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp src/plugin/build/RelWithDebInfo/idasql_plugin64.dll dist/ 2>/dev/null || true
+          cp src/plugin/build/idasql_plugin64.dll dist/ 2>/dev/null || true
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: idasql-windows
+          path: dist/
+          if-no-files-found: error
+
+  # ============================================================================
+  # Tests
+  # ============================================================================
+  build-tests:
+    name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -84,3 +232,33 @@ jobs:
         run: |
           export DYLD_LIBRARY_PATH="${IDASDK}/bin:$DYLD_LIBRARY_PATH"
           ctest --test-dir build -C Release --output-on-failure
+
+  # ============================================================================
+  # Release
+  # ============================================================================
+  publish-release:
+    name: Publish Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-plugin-linux, build-plugin-macos, build-plugin-windows, build-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package release
+        run: |
+          cd artifacts
+          zip -r ../idasql-linux.zip idasql-linux/
+          zip -r ../idasql-macos.zip idasql-macos/
+          zip -r ../idasql-windows.zip idasql-windows/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            idasql-linux.zip
+            idasql-macos.zip
+            idasql-windows.zip
+          generate_release_notes: true

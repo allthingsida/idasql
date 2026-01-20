@@ -1,0 +1,29 @@
+{
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "IDASQL",
+    "version": "1.0.0",
+    "entryPoint": "idasql_plugin",
+    "description": "SQL interface for IDA databases. Query functions, xrefs, strings, types, and more using SQL. Supports local CLI, remote server mode, and natural language queries via Claude.",
+    "urls": {
+      "repository": "https://github.com/allthingsida/idasql"
+    },
+    "authors": [
+      {
+        "name": "Elias Bachaalany",
+        "email": "elias.bachaalany@gmail.com"
+      }
+    ],
+    "categories": [
+      "api-scripting-and-automation",
+      "collaboration-and-productivity"
+    ],
+    "idaVersions": ">=9.0",
+    "platforms": [
+      "windows-x86_64",
+      "linux-x86_64",
+      "macos-aarch64"
+    ],
+    "license": "MIT"
+  }
+}
