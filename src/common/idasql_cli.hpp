@@ -65,13 +65,9 @@ public:
         cli_.hint = "Enter SQL query, .command, or natural language";
         cli_.execute_line = &IdasqlCLI::execute_line_cb;
         cli_.keydown = nullptr;
-        cli_.completion = nullptr;
+        cli_.find_completions = nullptr;
 
-        if (!install_command_interpreter(&cli_)) {
-            msg("IDASQL CLI: Failed to install command interpreter\n");
-            return false;
-        }
-
+        install_command_interpreter(&cli_);
         installed_ = true;
         msg("IDASQL CLI: Installed (Claude: %s)\n",
             session_.is_claude_enabled() ? "enabled" : "disabled");
