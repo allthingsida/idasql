@@ -9,11 +9,11 @@
  * See plugin_control.hpp for run() arg codes.
  */
 
-// When building with Claude Agent support, we need to:
+// When building with AI Agent support, we need to:
 // 1. Include nlohmann/json BEFORE IDA headers (IDA defines dont_use_* macros)
 // 2. Define USE_DANGEROUS_FUNCTIONS to disable IDA's safe function macros
 //    which conflict with MSVC's PPL headers (pplcancellation_token.h uses wait())
-#ifdef IDASQL_HAS_CLAUDE_AGENT
+#ifdef IDASQL_HAS_AI_AGENT
 #define USE_DANGEROUS_FUNCTIONS 1
 #include <nlohmann/json.hpp>
 #endif

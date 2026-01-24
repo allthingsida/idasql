@@ -39,36 +39,38 @@ endif()
 target_compile_definitions(idasql_plugin PRIVATE USE_HEXRAYS)
 
 # ============================================================================
-# Claude Agent support (optional)
+# AI Agent support (libagents - optional)
 # ============================================================================
 
-if(IDASQL_WITH_CLAUDE_AGENT)
-    # If claude_sdk target doesn't exist, add the submodule
-    if(NOT TARGET claude_sdk)
-        set(CLAUDE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(CLAUDE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../external/claude-agent-sdk-cpp
-                         ${CMAKE_CURRENT_BINARY_DIR}/claude-agent-sdk-cpp)
+if(IDASQL_WITH_AI_AGENT)
+    # If libagents target doesn't exist, add the submodule
+    if(NOT TARGET libagents)
+        set(LIBAGENTS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(LIBAGENTS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(LIBAGENTS_BUILD_CLI OFF CACHE BOOL "" FORCE)
+        set(LIBAGENTS_BUILD_COPILOT OFF CACHE BOOL "" FORCE)
+        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../external/libagents
+                         ${CMAKE_CURRENT_BINARY_DIR}/libagents)
     endif()
 
-    # Add claude_agent source files
+    # Add ai_agent source files
     target_sources(idasql_plugin PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../common/claude_agent.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common/ai_agent.cpp
     )
     target_include_directories(idasql_plugin PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common
     )
 
-    # Link against claude_sdk
-    target_link_libraries(idasql_plugin PRIVATE claude_sdk)
+    # Link against libagents
+    target_link_libraries(idasql_plugin PRIVATE libagents)
 
     # Define the feature flag
-    target_compile_definitions(idasql_plugin PRIVATE IDASQL_HAS_CLAUDE_AGENT)
+    target_compile_definitions(idasql_plugin PRIVATE IDASQL_HAS_AI_AGENT)
 
     # Add dependency on prompt generation
     if(TARGET generate_prompt)
         add_dependencies(idasql_plugin generate_prompt)
     endif()
 
-    message(STATUS "idasql_plugin: Claude agent support enabled")
+    message(STATUS "idasql_plugin: AI agent support enabled via libagents")
 endif()

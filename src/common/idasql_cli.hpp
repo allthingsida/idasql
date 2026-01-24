@@ -27,8 +27,8 @@ class IdasqlCLI
 public:
     using SqlExecutor = std::function<std::string(const std::string&)>;
 
-    explicit IdasqlCLI(SqlExecutor executor, bool enable_claude = true)
-        : session_(std::move(executor), enable_claude)
+    explicit IdasqlCLI(SqlExecutor executor, bool enable_agent = true)
+        : session_(std::move(executor), enable_agent)
     {
         // Override clear_session callback to add IDA-specific behavior
         session_.callbacks().clear_session = [this]() {
@@ -59,8 +59,8 @@ public:
         cli_.size = sizeof(cli_t);
         cli_.flags = 0;
         cli_.sname = "idasql";
-        cli_.lname = session_.is_claude_enabled()
-            ? "idasql - SQL queries with natural language support"
+        cli_.lname = session_.is_agent_enabled()
+            ? "idasql - SQL queries with AI agent support"
             : "idasql - SQL interface to IDA database";
         cli_.hint = "Enter SQL query, .command, or natural language";
         cli_.execute_line = &IdasqlCLI::execute_line_cb;
@@ -69,8 +69,8 @@ public:
 
         install_command_interpreter(&cli_);
         installed_ = true;
-        msg("IDASQL CLI: Installed (Claude: %s)\n",
-            session_.is_claude_enabled() ? "enabled" : "disabled");
+        msg("IDASQL CLI: Installed (AI agent: %s)\n",
+            session_.is_agent_enabled() ? "enabled" : "disabled");
         return true;
     }
 
@@ -90,17 +90,17 @@ public:
     }
 
     bool is_installed() const { return installed_; }
-    bool is_claude_enabled() const { return session_.is_claude_enabled(); }
+    bool is_agent_enabled() const { return session_.is_agent_enabled(); }
 
     /**
-     * Clear session - clears IDA message window and resets Claude agent
+     * Clear session - clears IDA message window and resets AI agent
      */
     std::string clear_session()
     {
         // Clear IDA's message window
         msg_clear();
 
-        // Clear the Claude agent session
+        // Clear the AI agent session
         std::string result = session_.clear_session();
 
         // Print status to fresh message window

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(idasql VERSION 1.0.0 LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -55,18 +55,20 @@ if(IDASQL_BUILD_TESTS)
 endif()
 
 # ============================================================================
-# Claude Agent SDK (optional)
+# AI Agent Support (libagents - optional)
 # ============================================================================
 
-option(IDASQL_WITH_CLAUDE_AGENT "Build with Claude AI agent support" OFF)
+option(IDASQL_WITH_AI_AGENT "Build with AI agent support (libagents)" OFF)
 
-if(IDASQL_WITH_CLAUDE_AGENT)
-    message(STATUS "idasql: Building with Claude agent support")
+if(IDASQL_WITH_AI_AGENT)
+    message(STATUS "idasql: Building with AI agent support via libagents")
 
-    # Add claude-agent-sdk-cpp as subdirectory
-    set(CLAUDE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(CLAUDE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    add_subdirectory(external/claude-agent-sdk-cpp)
+    # Add libagents as subdirectory (Claude only for now)
+    set(LIBAGENTS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(LIBAGENTS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LIBAGENTS_BUILD_CLI OFF CACHE BOOL "" FORCE)
+    set(LIBAGENTS_BUILD_COPILOT OFF CACHE BOOL "" FORCE)
+    add_subdirectory(external/libagents)
 
     # Generate prompt header if needed (conditional on source file age)
     find_package(Python3 COMPONENTS Interpreter)

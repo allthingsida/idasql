@@ -1,6 +1,6 @@
 [submodule "libxsql"]
 	path = external/libxsql
 	url = https://github.com/0xeb/libxsql.git
-[submodule "external/claude-agent-sdk-cpp"]
-	path = external/claude-agent-sdk-cpp
-	url = https://github.com/0xeb/claude-agent-sdk-cpp.git
+[submodule "external/libagents"]
+	path = external/libagents
+	url = https://github.com/0xeb/libagents.git
