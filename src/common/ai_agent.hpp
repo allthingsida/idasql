@@ -3,6 +3,8 @@
 #ifdef IDASQL_HAS_AI_AGENT
 
 #include <libagents/agent.hpp>
+#include <libagents/config.hpp>
+#include "agent_settings.hpp"
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -18,6 +20,7 @@ namespace idasql {
  * - Main-thread tool dispatch via query_hosted() (required for IDA safety)
  * - SQL passthrough detection
  * - Signal handling for Ctrl-C
+ * - BYOK (Bring Your Own Key) support for Copilot provider
  *
  * Architecture:
  *   - libagents handles all threading internally
@@ -33,11 +36,38 @@ public:
     using ContentCallback = std::function<void(const std::string& content)>;
 
     /**
-     * Construct agent with SQL executor
+     * Construct agent with SQL executor and settings
+     * @param executor Function that executes SQL and returns formatted results
+     * @param settings Agent settings (provider, BYOK, timeout, etc.)
+     * @param verbose If true, show debug output
+     */
+    explicit AIAgent(SqlExecutor executor, const AgentSettings& settings, bool verbose = false);
+
+    /**
+     * Construct agent with SQL executor (uses stored settings)
      * @param executor Function that executes SQL and returns formatted results
      * @param verbose If true, show debug output
      */
     explicit AIAgent(SqlExecutor executor, bool verbose = false);
+
+    /**
+     * Configure BYOK (Bring Your Own Key) - call before start()
+     * Required for Copilot provider, optional for Claude
+     * @param config BYOK configuration (api_key, base_url, model, provider_type)
+     */
+    void set_byok(const libagents::BYOKConfig& config);
+
+    /**
+     * Load BYOK config from environment variables (fallback)
+     * Looks for COPILOT_SDK_BYOK_API_KEY, COPILOT_SDK_BYOK_BASE_URL, etc.
+     * @return true if BYOK was configured from environment
+     */
+    bool load_byok_from_env();
+
+    /**
+     * Get the current provider type
+     */
+    libagents::ProviderType provider_type() const { return provider_type_; }
 
     ~AIAgent();
 
@@ -110,6 +140,10 @@ private:
     bool docs_primed_ = false;
     std::atomic<bool> quit_requested_{false};
     std::unique_ptr<libagents::IAgent> agent_;
+    libagents::ProviderType provider_type_ = libagents::ProviderType::Claude;
+    libagents::BYOKConfig byok_config_;
+    bool byok_configured_ = false;
+    int response_timeout_ms_ = 0;
 
     /// Register the idasql tool with libagents
     void setup_tools();

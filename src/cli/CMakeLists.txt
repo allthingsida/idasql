@@ -5,9 +5,9 @@
 #   cmake --build build --config Release
 #
 # Run:
-#   Windows: set PATH=%IDASDK%\bin;%PATH% && build\Release\idasql.exe -s database.i64 -i
-#   Linux:   LD_LIBRARY_PATH=$IDASDK/bin ./build/idasql -s database.i64 -i
-#   macOS:   DYLD_LIBRARY_PATH=$IDASDK/bin ./build/idasql -s database.i64 -i
+#   Windows: set PATH=%IDASDK%\src\bin;%PATH% && build\Release\idasql.exe -s database.i64 -i
+#   Linux:   LD_LIBRARY_PATH=$IDASDK/src/bin ./build/idasql -s database.i64 -i
+#   macOS:   DYLD_LIBRARY_PATH=$IDASDK/src/bin ./build/idasql -s database.i64 -i
 
 cmake_minimum_required(VERSION 3.20)
 project(idasql_cli VERSION 1.0 LANGUAGES C CXX)
@@ -102,7 +102,8 @@ if(IDASQL_WITH_AI_AGENT)
         set(LIBAGENTS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
         set(LIBAGENTS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
         set(LIBAGENTS_BUILD_CLI OFF CACHE BOOL "" FORCE)
-        set(LIBAGENTS_BUILD_COPILOT OFF CACHE BOOL "" FORCE)
+        # Enable both Claude and Copilot providers
+        set(LIBAGENTS_BUILD_COPILOT ON CACHE BOOL "" FORCE)
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../external/libagents
                          ${CMAKE_CURRENT_BINARY_DIR}/libagents)
     endif()

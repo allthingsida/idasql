@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdlib>
 #include <iostream>
 
 namespace idasql {
@@ -15,11 +17,73 @@ namespace idasql {
 // Construction / Destruction
 // ============================================================================
 
-AIAgent::AIAgent(SqlExecutor executor, bool verbose)
-    : executor_(std::move(executor)), verbose_(verbose)
+AIAgent::AIAgent(SqlExecutor executor, const AgentSettings& settings, bool verbose)
+    : executor_(std::move(executor)), verbose_(verbose),
+      provider_type_(settings.default_provider),
+      response_timeout_ms_(settings.response_timeout_ms)
 {
-    // Create agent with default provider (Claude for now, Copilot support planned)
-    agent_ = libagents::create_agent(libagents::ProviderType::Claude);
+    // Create agent with provider from settings
+    agent_ = libagents::create_agent(provider_type_);
+
+    if (verbose_) {
+        std::cerr << "[AGENT] Created " << libagents::provider_type_name(provider_type_)
+                  << " provider" << std::endl;
+    }
+
+    // Apply BYOK from settings if configured
+    const BYOKSettings* byok = settings.get_byok();
+    if (byok && byok->is_usable()) {
+        set_byok(byok->to_config());
+        if (verbose_) {
+            std::cerr << "[AGENT] Loaded BYOK from settings" << std::endl;
+        }
+    } else {
+        // Fall back to environment variables
+        load_byok_from_env();
+    }
+}
+
+AIAgent::AIAgent(SqlExecutor executor, bool verbose)
+    : AIAgent(std::move(executor), LoadAgentSettings(), verbose)
+{
+    // Delegates to settings-based constructor
+}
+
+void AIAgent::set_byok(const libagents::BYOKConfig& config) {
+    byok_config_ = config;
+    byok_configured_ = config.is_configured();
+    if (verbose_ && byok_configured_) {
+        std::cerr << "[AGENT] BYOK configured";
+        if (!config.model.empty()) std::cerr << " (model: " << config.model << ")";
+        if (!config.base_url.empty()) std::cerr << " (endpoint: " << config.base_url << ")";
+        std::cerr << std::endl;
+    }
+}
+
+bool AIAgent::load_byok_from_env() {
+    libagents::BYOKConfig config;
+
+    // Load from COPILOT_SDK_BYOK_* environment variables
+    if (const char* key = std::getenv("COPILOT_SDK_BYOK_API_KEY"))
+        config.api_key = key;
+    if (const char* url = std::getenv("COPILOT_SDK_BYOK_BASE_URL"))
+        config.base_url = url;
+    if (const char* model = std::getenv("COPILOT_SDK_BYOK_MODEL"))
+        config.model = model;
+    if (const char* type = std::getenv("COPILOT_SDK_BYOK_PROVIDER_TYPE"))
+        config.provider_type = type;
+
+    if (config.is_configured()) {
+        if (verbose_) {
+            std::cerr << "[AGENT] Loaded BYOK from environment:" << std::endl;
+            std::cerr << "[AGENT]   Model: " << (config.model.empty() ? "(default)" : config.model) << std::endl;
+            std::cerr << "[AGENT]   Endpoint: " << (config.base_url.empty() ? "(default)" : config.base_url) << std::endl;
+            std::cerr << "[AGENT]   Type: " << (config.provider_type.empty() ? "(default)" : config.provider_type) << std::endl;
+        }
+        set_byok(config);
+        return true;
+    }
+    return false;
 }
 
 AIAgent::~AIAgent() {
@@ -34,6 +98,22 @@ void AIAgent::start() {
     if (!agent_) return;
 
     setup_tools();
+
+    // Apply BYOK configuration before initialize() - required for Copilot provider
+    if (byok_configured_) {
+        agent_->set_byok(byok_config_);
+        if (verbose_) {
+            std::cerr << "[AGENT] Applied BYOK configuration" << std::endl;
+        }
+    }
+
+    // Apply response timeout if configured
+    if (response_timeout_ms_ > 0) {
+        agent_->set_response_timeout(std::chrono::milliseconds(response_timeout_ms_));
+        if (verbose_) {
+            std::cerr << "[AGENT] Response timeout: " << response_timeout_ms_ << " ms" << std::endl;
+        }
+    }
 
     // Note: We don't use set_system_prompt() because it can break MCP tool
     // visibility with some providers. Instead, we embed the prompt in the

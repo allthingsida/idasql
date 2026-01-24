@@ -51,6 +51,7 @@
 // AI Agent integration (optional, enabled via IDASQL_WITH_AI_AGENT)
 #ifdef IDASQL_HAS_AI_AGENT
 #include "../common/ai_agent.hpp"
+#include "../common/idasql_commands.hpp"
 
 // Global signal handler state
 namespace {
@@ -393,7 +394,8 @@ static std::string execute_sql_to_string(idasql::Database& db, const std::string
 }
 
 #ifdef IDASQL_HAS_AI_AGENT
-static void run_repl(idasql::Database& db, bool agent_mode, bool verbose) {
+static void run_repl(idasql::Database& db, bool agent_mode, bool verbose,
+                     const std::string& provider_override = "") {
 #else
 static void run_repl(idasql::Database& db) {
     [[maybe_unused]] bool agent_mode = false;
@@ -407,7 +409,20 @@ static void run_repl(idasql::Database& db) {
         auto executor = [&db](const std::string& sql) -> std::string {
             return execute_sql_to_string(db, sql);
         };
-        agent = std::make_unique<idasql::AIAgent>(executor, verbose);
+
+        // Load settings (includes BYOK, provider, timeout)
+        idasql::AgentSettings settings = idasql::LoadAgentSettings();
+
+        // Apply provider override from CLI if specified
+        if (!provider_override.empty()) {
+            try {
+                settings.default_provider = idasql::ParseProviderType(provider_override);
+            } catch (...) {
+                // Already validated in argument parsing
+            }
+        }
+
+        agent = std::make_unique<idasql::AIAgent>(executor, settings, verbose);
 
         // Register signal handler for clean Ctrl-C handling
         g_agent = agent.get();
@@ -448,26 +463,63 @@ static void run_repl(idasql::Database& db) {
 
         // Handle dot commands
         if (query.empty() && !line.empty() && line[0] == '.') {
+#ifdef IDASQL_HAS_AI_AGENT
+            // Use unified command handler for agent mode
+            idasql::CommandCallbacks callbacks;
+            callbacks.get_tables = [&db]() -> std::string {
+                std::stringstream ss;
+                auto result = db.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+                for (const auto& row : result.rows) {
+                    if (row.size() > 0) ss << row[0] << "\n";
+                }
+                return ss.str();
+            };
+            callbacks.get_schema = [&db](const std::string& table) -> std::string {
+                auto result = db.query("SELECT sql FROM sqlite_master WHERE name='" + table + "'");
+                if (!result.empty() && result.rows[0].size() > 0) {
+                    return std::string(result.rows[0][0]);
+                }
+                return "Table not found: " + table;
+            };
+            callbacks.get_info = [&db]() -> std::string {
+                return db.info();
+            };
+            callbacks.clear_session = [&agent]() -> std::string {
+                if (agent) {
+                    agent->reset_session();
+                    return "Session cleared (conversation history reset)";
+                }
+                return "Session cleared";
+            };
+
+            std::string output;
+            auto result = idasql::handle_command(line, callbacks, output);
+
+            switch (result) {
+                case idasql::CommandResult::QUIT:
+                    goto exit_repl;  // Exit the while loop
+                case idasql::CommandResult::HANDLED:
+                    if (!output.empty()) {
+                        std::cout << output;
+                        if (output.back() != '\n') std::cout << "\n";
+                    }
+                    continue;
+                case idasql::CommandResult::NOT_HANDLED:
+                    // Fall through to standard handling
+                    break;
+            }
+#else
+            // Non-agent mode: basic command handling
             if (line == ".quit" || line == ".exit") break;
             if (line == ".tables") { show_tables(db); continue; }
             if (line == ".info") { std::cout << db.info(); continue; }
             if (line == ".help") { show_help(); continue; }
             if (line == ".clear") {
-#ifdef IDASQL_HAS_AI_AGENT
-                if (agent_mode && agent) {
-                    agent->reset_session();
-                    std::cout << "Session cleared (conversation history reset)\n";
-                } else {
-                    std::cout << "Session cleared\n";
-                }
-#else
                 std::cout << "Session cleared\n";
-#endif
                 continue;
             }
             if (line.substr(0, 7) == ".schema") {
                 std::string table = line.length() > 8 ? line.substr(8) : "";
-                // Trim whitespace
                 while (!table.empty() && table[0] == ' ') table = table.substr(1);
                 if (table.empty()) {
                     std::cerr << "Usage: .schema <table_name>\n";
@@ -478,6 +530,7 @@ static void run_repl(idasql::Database& db) {
             }
             std::cerr << "Unknown command: " << line << "\n";
             continue;
+#endif
         }
 
 #ifdef IDASQL_HAS_AI_AGENT
@@ -528,6 +581,7 @@ static void run_repl(idasql::Database& db) {
     }
 
 #ifdef IDASQL_HAS_AI_AGENT
+exit_repl:
     if (agent) {
         agent->stop();
         g_agent = nullptr;
@@ -760,7 +814,11 @@ static void print_usage() {
 #ifdef IDASQL_HAS_AI_AGENT
               << "  --prompt <text>      Natural language query (uses AI agent)\n"
               << "  --agent              Enable AI agent mode in interactive REPL\n"
+              << "  --provider <name>    Override AI provider (claude, copilot)\n"
               << "  -v, --verbose        Show agent debug logs\n"
+              << "\n"
+              << "Agent settings stored in: ~/.idasql/agent_settings.json\n"
+              << "Configure via: .agent provider, .agent byok, .agent timeout\n"
 #endif
               << "  -h, --help           Show this help\n\n"
               << "Examples:\n"
@@ -772,6 +830,7 @@ static void print_usage() {
 #ifdef IDASQL_HAS_AI_AGENT
               << "  idasql -s test.i64 --prompt \"Find the largest functions\"\n"
               << "  idasql -s test.i64 -i --agent\n"
+              << "  idasql -s test.i64 --provider copilot --prompt \"How many functions?\"\n"
 #endif
               << "  idasql --remote localhost:13337 -i\n";
 }
@@ -802,6 +861,7 @@ int main(int argc, char* argv[]) {
     std::string nl_prompt;            // --prompt for natural language
     bool agent_mode = false;          // --agent for interactive mode
     bool verbose_mode = false;        // -v for verbose agent output
+    std::string provider_override;    // --provider overrides stored setting
 #endif
 
     // Parse arguments
@@ -829,6 +889,15 @@ int main(int argc, char* argv[]) {
             agent_mode = true;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
             verbose_mode = true;
+        } else if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
+            provider_override = argv[++i];
+            // Validate provider name
+            if (provider_override != "copilot" && provider_override != "Copilot" &&
+                provider_override != "claude" && provider_override != "Claude") {
+                std::cerr << "Unknown provider: " << provider_override << "\n";
+                std::cerr << "Available providers: claude, copilot\n";
+                return 1;
+            }
 #endif
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             // Already handled above, but skip here to avoid "unknown option"
@@ -923,7 +992,20 @@ int main(int argc, char* argv[]) {
         auto executor = [&db](const std::string& sql) -> std::string {
             return execute_sql_to_string(db, sql);
         };
-        idasql::AIAgent agent(executor, verbose_mode);
+
+        // Load settings (includes BYOK, provider, timeout)
+        idasql::AgentSettings settings = idasql::LoadAgentSettings();
+
+        // Apply provider override from CLI if specified
+        if (!provider_override.empty()) {
+            try {
+                settings.default_provider = idasql::ParseProviderType(provider_override);
+            } catch (...) {
+                // Already validated in argument parsing
+            }
+        }
+
+        idasql::AIAgent agent(executor, settings, verbose_mode);
 
         // Register signal handler
         g_agent = &agent;
@@ -959,7 +1041,7 @@ int main(int argc, char* argv[]) {
     } else if (interactive) {
         // Interactive REPL
 #ifdef IDASQL_HAS_AI_AGENT
-        run_repl(db, agent_mode, verbose_mode);
+        run_repl(db, agent_mode, verbose_mode, provider_override);
 #else
         run_repl(db);
 #endif
