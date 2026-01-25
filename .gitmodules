@@ -1,0 +1,6 @@
+[submodule "libxsql"]
+	path = external/libxsql
+	url = https://github.com/0xeb/libxsql.git
+[submodule "external/libagents"]
+	path = external/libagents
+	url = https://github.com/0xeb/libagents.git

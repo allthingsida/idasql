@@ -1,0 +1,251 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*", "V*"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================================
+  # Build (CLI + Plugin)
+  # ============================================================================
+  build-linux:
+    name: Build (Linux)
+    runs-on: ubuntu-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=ON
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-linux
+          path: ${{ env.IDASDK }}/src/bin/plugins/idasql_plugin.so
+
+      - name: Upload CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-linux
+          path: build/bin/idasql
+
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=ON
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-macos
+          path: ${{ env.IDASDK }}/src/bin/plugins/idasql_plugin.dylib
+
+      - name: Upload CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-macos
+          path: build/bin/idasql
+
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        shell: bash
+        run: git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        shell: bash
+        run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+
+      - name: Configure
+        run: cmake -B build -DIDASQL_WITH_AI_AGENT=ON
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-windows
+          path: ${{ env.IDASDK }}/src/bin/plugins/idasql_plugin.dll
+
+      - name: Upload CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-windows
+          path: build/bin/Release/idasql.exe
+
+  # ============================================================================
+  # Tests
+  # ============================================================================
+  build-tests:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Linux
+            runner: ubuntu-latest
+          - os: macOS
+            runner: macos-latest
+          - os: Windows
+            runner: windows-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        shell: bash
+        run: git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        shell: bash
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+          mv "${IDASDK}/src/include/regex.h" "${IDASDK}/src/include/ida_regex.h"
+
+      - name: Configure
+        shell: bash
+        working-directory: tests
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: bash
+        working-directory: tests
+        run: cmake --build build --config Release
+
+      - name: Test
+        shell: bash
+        working-directory: tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  # ============================================================================
+  # Release
+  # ============================================================================
+  publish-release:
+    name: Publish Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-linux, build-macos, build-windows, build-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download plugins
+        uses: actions/download-artifact@v4
+        with:
+          pattern: plugin-*
+          path: plugins
+          merge-multiple: true
+
+      - name: Download CLI (Linux)
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-linux
+          path: cli-linux
+
+      - name: Download CLI (macOS)
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-macos
+          path: cli-macos
+
+      - name: Download CLI (Windows)
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-windows
+          path: cli-windows
+
+      - name: Prepare release
+        run: |
+          mkdir -p release
+          # Plugins
+          cp plugins/idasql_plugin.dll release/ || true
+          cp plugins/idasql_plugin.so release/ || true
+          cp plugins/idasql_plugin.dylib release/ || true
+          # CLI (each in separate directory to avoid name collision)
+          cp cli-windows/idasql.exe release/ || true
+          cp cli-linux/idasql release/idasql-linux || true
+          cp cli-macos/idasql release/idasql-macos || true
+          # Metadata
+          cp ida-plugin.json release/
+          ls -la release/
+
+      - name: Create plugin zip
+        run: |
+          cd release
+          zip -9 idasql_plugin-${{ github.ref_name }}.zip \
+            idasql_plugin.dll idasql_plugin.so idasql_plugin.dylib ida-plugin.json
+
+      - name: Create CLI zip
+        run: |
+          cd release
+          zip -9 idasql_cli-${{ github.ref_name }}.zip \
+            idasql.exe idasql-linux idasql-macos 2>/dev/null || \
+          zip -9 idasql_cli-${{ github.ref_name }}.zip \
+            idasql.exe idasql-linux || true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: IDASQL ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release/idasql_plugin-${{ github.ref_name }}.zip
+            release/idasql_cli-${{ github.ref_name }}.zip
+            release/idasql_plugin.dll
+            release/idasql_plugin.so
+            release/idasql_plugin.dylib
+            release/idasql.exe
+            release/idasql-linux
+            release/idasql-macos
+            release/ida-plugin.json

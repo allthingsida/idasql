@@ -1,0 +1,32 @@
+# Auto detect text files and normalize line endings to LF
+* text=auto eol=lf
+
+# Explicit text files
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.h text eol=lf
+*.c text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.cmake text eol=lf
+*.json text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+CMakeLists.txt text eol=lf
+
+# Binary files
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.a binary
+*.lib binary
+*.o binary
+*.obj binary
+*.i64 binary
+*.idb binary
+*.til binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary

@@ -1,0 +1,49 @@
+# Build directories
+**/sqlite3.build/*
+build*/
+.claude/
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.lib
+*.a
+*.o
+*.obj
+
+# IDA databases (keep .i64 for testing)
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Visual Studio
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+
+# Temporary
+*.tmp
+*.log
+*.bak
+*~
+
+# Python
+__pycache__/
+*.py[cod]
