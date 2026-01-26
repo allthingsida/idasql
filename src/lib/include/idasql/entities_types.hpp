@@ -854,6 +854,134 @@ inline VTableDef define_types_enum_values() {
 // TYPES_FUNC_ARGS Table - Function prototype arguments
 // ============================================================================
 
+// Type classification info (surface + resolved)
+struct TypeClassification {
+    // Surface-level classification (literal type as written)
+    bool is_ptr = false;
+    bool is_int = false;        // Exactly int type
+    bool is_integral = false;   // Int-like family (int, long, short, char, bool)
+    bool is_float = false;
+    bool is_void = false;
+    bool is_struct = false;
+    bool is_array = false;
+    int ptr_depth = 0;
+    std::string base_type;      // Type name with pointers stripped
+
+    // Resolved classification (after typedef resolution)
+    bool is_ptr_resolved = false;
+    bool is_int_resolved = false;
+    bool is_integral_resolved = false;
+    bool is_float_resolved = false;
+    bool is_void_resolved = false;
+    int ptr_depth_resolved = 0;
+    std::string base_type_resolved;
+};
+
+// Get pointer depth (int** -> 2, int* -> 1, int -> 0)
+inline int get_ptr_depth(tinfo_t tif) {
+    int depth = 0;
+    while (tif.is_ptr()) {
+        depth++;
+        tif = tif.get_pointed_object();
+    }
+    return depth;
+}
+
+// Get base type name (strips pointers/arrays)
+inline std::string get_base_type_name(tinfo_t tif) {
+    // Strip pointers
+    while (tif.is_ptr()) {
+        tif = tif.get_pointed_object();
+    }
+    // Strip arrays
+    while (tif.is_array()) {
+        tif = tif.get_array_element();
+    }
+    qstring name;
+    tif.print(&name);
+    return name.c_str();
+}
+
+// Classify a single tinfo_t (surface or resolved)
+inline void classify_tinfo(const tinfo_t& tif,
+                           bool& is_ptr, bool& is_int, bool& is_integral,
+                           bool& is_float, bool& is_void, bool& is_struct,
+                           bool& is_array, int& ptr_depth, std::string& base_type) {
+    is_ptr = tif.is_ptr();
+    is_array = tif.is_array();
+    is_struct = tif.is_struct() || tif.is_union();
+    is_void = tif.is_void();
+    is_float = tif.is_float() || tif.is_double() || tif.is_ldouble() ||
+               tif.is_floating();
+
+    // For int classification, we need to check the actual type
+    // is_int = exactly "int" type
+    // is_integral = int-like family
+    is_integral = tif.is_integral();  // IDA SDK: int, char, short, long, bool, etc.
+    is_int = tif.is_int();            // IDA SDK: exactly int32/int64
+
+    ptr_depth = get_ptr_depth(tif);
+    base_type = get_base_type_name(tif);
+}
+
+// Check if type is a typedef (type reference) at surface level
+inline bool is_surface_typedef(const tinfo_t& tif) {
+    return tif.is_typeref();
+}
+
+// Classify surface-level type (WITHOUT typedef resolution)
+// If tif is a typedef, surface classification shows it as "other" not the underlying type
+inline void classify_surface(const tinfo_t& tif,
+                             bool& is_ptr, bool& is_int, bool& is_integral,
+                             bool& is_float, bool& is_void, bool& is_struct,
+                             bool& is_array, int& ptr_depth, std::string& base_type) {
+    // If it's a typedef, surface level is NOT a ptr/int/etc - it's a typedef
+    if (is_surface_typedef(tif)) {
+        is_ptr = false;
+        is_int = false;
+        is_integral = false;
+        is_float = false;
+        is_void = false;
+        is_struct = false;
+        is_array = false;
+        ptr_depth = 0;
+        // Get the typedef name as base_type
+        qstring name;
+        if (tif.get_type_name(&name)) {
+            base_type = name.c_str();
+        } else {
+            tif.print(&name);
+            base_type = name.c_str();
+        }
+        return;
+    }
+
+    // Not a typedef - classify directly
+    classify_tinfo(tif, is_ptr, is_int, is_integral, is_float,
+                   is_void, is_struct, is_array, ptr_depth, base_type);
+}
+
+// Full type classification (surface + resolved)
+inline TypeClassification classify_arg_type(const tinfo_t& tif) {
+    TypeClassification tc;
+
+    // Surface classification (without typedef resolution)
+    classify_surface(tif,
+        tc.is_ptr, tc.is_int, tc.is_integral, tc.is_float,
+        tc.is_void, tc.is_struct, tc.is_array,
+        tc.ptr_depth, tc.base_type);
+
+    // Resolved classification (with typedef resolution)
+    // IDA SDK's is_ptr(), is_integral(), etc. already resolve typedefs via get_realtype()
+    classify_tinfo(tif,
+        tc.is_ptr_resolved, tc.is_int_resolved, tc.is_integral_resolved,
+        tc.is_float_resolved, tc.is_void_resolved,
+        tc.is_struct, tc.is_array,  // Reuse - struct/array handled by classify_tinfo
+        tc.ptr_depth_resolved, tc.base_type_resolved);
+
+    return tc;
+}
+
 struct FuncArgEntry {
     uint32_t type_ordinal;
     std::string type_name;
@@ -861,6 +989,9 @@ struct FuncArgEntry {
     std::string arg_name;
     std::string arg_type;
     std::string calling_conv;  // Only set on arg_index=-1 row
+
+    // Type classification
+    TypeClassification tc;
 };
 
 inline std::vector<FuncArgEntry>& get_func_args_cache() {
@@ -916,6 +1047,7 @@ inline void rebuild_func_args_cache() {
                     fi.rettype.print(&ret_str);
                     ret_entry.arg_type = ret_str.c_str();
                     ret_entry.calling_conv = get_calling_convention_name(fi.get_cc());
+                    ret_entry.tc = classify_arg_type(fi.rettype);
                     cache.push_back(ret_entry);
 
                     // Arguments
@@ -930,6 +1062,7 @@ inline void rebuild_func_args_cache() {
                         qstring type_str;
                         a.type.print(&type_str);
                         entry.arg_type = type_str.c_str();
+                        entry.tc = classify_arg_type(a.type);
                         // calling_conv only on return type row
                         cache.push_back(entry);
                     }
@@ -997,6 +1130,13 @@ public:
             return;
         }
 
+        // Get the type for classification (computed on-the-fly for iterator)
+        auto get_current_type = [&]() -> tinfo_t {
+            if (idx_ == -1) return fi_.rettype;
+            if (static_cast<size_t>(idx_) < fi_.size()) return fi_[idx_].type;
+            return tinfo_t();
+        };
+
         switch (col) {
             case 0: // type_ordinal
                 sqlite3_result_int(ctx, type_ordinal_);
@@ -1036,6 +1176,30 @@ public:
                     sqlite3_result_text(ctx, "", -1, SQLITE_STATIC);
                 }
                 break;
+            // Type classification columns (computed on-the-fly)
+            case 6: case 7: case 8: case 9: case 10: case 11: case 12: case 13: case 14:
+            case 15: case 16: case 17: case 18: case 19: case 20: case 21: {
+                TypeClassification tc = classify_arg_type(get_current_type());
+                switch (col) {
+                    case 6:  sqlite3_result_int(ctx, tc.is_ptr ? 1 : 0); break;
+                    case 7:  sqlite3_result_int(ctx, tc.is_int ? 1 : 0); break;
+                    case 8:  sqlite3_result_int(ctx, tc.is_integral ? 1 : 0); break;
+                    case 9:  sqlite3_result_int(ctx, tc.is_float ? 1 : 0); break;
+                    case 10: sqlite3_result_int(ctx, tc.is_void ? 1 : 0); break;
+                    case 11: sqlite3_result_int(ctx, tc.is_struct ? 1 : 0); break;
+                    case 12: sqlite3_result_int(ctx, tc.is_array ? 1 : 0); break;
+                    case 13: sqlite3_result_int(ctx, tc.ptr_depth); break;
+                    case 14: sqlite3_result_text(ctx, tc.base_type.c_str(), -1, SQLITE_TRANSIENT); break;
+                    case 15: sqlite3_result_int(ctx, tc.is_ptr_resolved ? 1 : 0); break;
+                    case 16: sqlite3_result_int(ctx, tc.is_int_resolved ? 1 : 0); break;
+                    case 17: sqlite3_result_int(ctx, tc.is_integral_resolved ? 1 : 0); break;
+                    case 18: sqlite3_result_int(ctx, tc.is_float_resolved ? 1 : 0); break;
+                    case 19: sqlite3_result_int(ctx, tc.is_void_resolved ? 1 : 0); break;
+                    case 20: sqlite3_result_int(ctx, tc.ptr_depth_resolved); break;
+                    case 21: sqlite3_result_text(ctx, tc.base_type_resolved.c_str(), -1, SQLITE_TRANSIENT); break;
+                }
+                break;
+            }
             default:
                 sqlite3_result_null(ctx);
                 break;
@@ -1076,6 +1240,72 @@ inline VTableDef define_types_func_args() {
         .column_text("calling_conv", [](size_t i) -> std::string {
             auto& cache = get_func_args_cache();
             return i < cache.size() ? cache[i].calling_conv : "";
+        })
+        // Surface-level type classification
+        .column_int("is_ptr", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_ptr ? 1 : 0) : 0;
+        })
+        .column_int("is_int", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_int ? 1 : 0) : 0;
+        })
+        .column_int("is_integral", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_integral ? 1 : 0) : 0;
+        })
+        .column_int("is_float", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_float ? 1 : 0) : 0;
+        })
+        .column_int("is_void", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_void ? 1 : 0) : 0;
+        })
+        .column_int("is_struct", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_struct ? 1 : 0) : 0;
+        })
+        .column_int("is_array", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_array ? 1 : 0) : 0;
+        })
+        .column_int("ptr_depth", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? cache[i].tc.ptr_depth : 0;
+        })
+        .column_text("base_type", [](size_t i) -> std::string {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? cache[i].tc.base_type : "";
+        })
+        // Resolved type classification (after typedef resolution)
+        .column_int("is_ptr_resolved", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_ptr_resolved ? 1 : 0) : 0;
+        })
+        .column_int("is_int_resolved", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_int_resolved ? 1 : 0) : 0;
+        })
+        .column_int("is_integral_resolved", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_integral_resolved ? 1 : 0) : 0;
+        })
+        .column_int("is_float_resolved", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_float_resolved ? 1 : 0) : 0;
+        })
+        .column_int("is_void_resolved", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? (cache[i].tc.is_void_resolved ? 1 : 0) : 0;
+        })
+        .column_int("ptr_depth_resolved", [](size_t i) -> int {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? cache[i].tc.ptr_depth_resolved : 0;
+        })
+        .column_text("base_type_resolved", [](size_t i) -> std::string {
+            auto& cache = get_func_args_cache();
+            return i < cache.size() ? cache[i].tc.base_type_resolved : "";
         })
         // Constraint pushdown: type_ordinal = X
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {

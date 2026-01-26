@@ -1260,6 +1260,35 @@ inline bool register_ctree_views(xsql::Database& db) {
     )";
     db.exec(v_call_chains);
 
+    // Return statements with return value details
+    const char* v_returns = R"(
+        CREATE VIEW IF NOT EXISTS ctree_v_returns AS
+        SELECT
+            ret.func_addr,
+            ret.item_id,
+            ret.ea,
+            val.op_name AS return_op,
+            val.item_id AS return_item_id,
+            -- Numeric return (cot_num)
+            CASE WHEN val.op_name = 'cot_num' THEN val.num_value ELSE NULL END AS return_num,
+            -- String return (cot_str)
+            CASE WHEN val.op_name = 'cot_str' THEN val.str_value ELSE NULL END AS return_str,
+            -- Variable return (cot_var)
+            CASE WHEN val.op_name = 'cot_var' THEN val.var_name ELSE NULL END AS return_var,
+            CASE WHEN val.op_name = 'cot_var' THEN val.var_idx ELSE NULL END AS return_var_idx,
+            CASE WHEN val.op_name = 'cot_var' THEN val.var_is_arg ELSE NULL END AS returns_arg,
+            CASE WHEN val.op_name = 'cot_var' THEN val.var_is_stk ELSE NULL END AS returns_stk_var,
+            -- Object/symbol return (cot_obj)
+            CASE WHEN val.op_name = 'cot_obj' THEN val.obj_name ELSE NULL END AS return_obj,
+            CASE WHEN val.op_name = 'cot_obj' THEN val.obj_ea ELSE NULL END AS return_obj_ea,
+            -- Call result return (cot_call) - returning result of another call
+            CASE WHEN val.op_name = 'cot_call' THEN 1 ELSE 0 END AS returns_call_result
+        FROM ctree ret
+        LEFT JOIN ctree val ON val.func_addr = ret.func_addr AND val.item_id = ret.x_id
+        WHERE ret.op_name = 'cit_return'
+    )";
+    db.exec(v_returns);
+
     return true;
 }
 
