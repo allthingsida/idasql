@@ -1865,6 +1865,8 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Wrapper functions | `ctree_v_returns WHERE returns_call_result = 1` |
 | Variable analysis | `ctree_lvars WHERE func_addr = X` |
 | Type information | `types`, `types_members` |
+| Function signatures | `types_func_args` (with type classification) |
+| Functions by return type | `types_func_args WHERE arg_index = -1` |
 | Typedef-aware type queries | `types_func_args` (surface vs resolved) |
 | Hidden pointer types | `types_func_args WHERE is_ptr = 0 AND is_ptr_resolved = 1` |
 | Modify database | `*_live` tables |
