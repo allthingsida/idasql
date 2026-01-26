@@ -380,10 +380,41 @@ Pre-built views for common patterns:
 | `ctree_v_comparisons` | Comparisons with operands |
 | `ctree_v_assignments` | Assignments with operands |
 | `ctree_v_derefs` | Pointer dereferences |
+| `ctree_v_returns` | Return statements with value details |
 | `ctree_v_calls_in_loops` | Calls inside loops (recursive) |
 | `ctree_v_calls_in_ifs` | Calls inside if branches (recursive) |
 | `ctree_v_leaf_funcs` | Functions with no outgoing calls |
 | `ctree_v_call_chains` | Call chain paths up to depth 10 |
+
+#### ctree_v_returns
+
+Return statements with details about what's being returned.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `func_addr` | INT | Function address |
+| `item_id` | INT | Return statement item_id |
+| `ea` | INT | Address of return |
+| `return_op` | TEXT | Return value opcode (`cot_num`, `cot_var`, `cot_call`, etc.) |
+| `return_num` | INT | Numeric value (if `cot_num`) |
+| `return_str` | TEXT | String value (if `cot_str`) |
+| `return_var` | TEXT | Variable name (if `cot_var`) |
+| `returns_arg` | INT | 1 if returning a function argument |
+| `returns_call_result` | INT | 1 if returning result of another call |
+
+```sql
+-- Functions that return 0
+SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+WHERE return_op = 'cot_num' AND return_num = 0;
+
+-- Functions that return -1 (error sentinel)
+SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+WHERE return_op = 'cot_num' AND return_num = -1;
+
+-- Functions that return their argument (pass-through)
+SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+WHERE returns_arg = 1;
+```
 
 ### Type Tables
 
@@ -426,15 +457,61 @@ Enum constant values.
 | `value` | INT | Constant value |
 
 #### types_func_args
-Function prototype arguments.
+Function prototype arguments with type classification.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `type_ordinal` | INT | Function type ordinal |
 | `type_name` | TEXT | Function type name |
-| `arg_idx` | INT | Argument index (0-based) |
+| `arg_index` | INT | Argument index (-1 = return type, 0+ = args) |
 | `arg_name` | TEXT | Argument name |
 | `arg_type` | TEXT | Argument type string |
+| `calling_conv` | TEXT | Calling convention (on return row only) |
+
+**Surface-level type classification** (literal type as written):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `is_ptr` | INT | 1 if pointer type |
+| `is_int` | INT | 1 if exactly int type |
+| `is_integral` | INT | 1 if int-like (int, long, short, char, bool) |
+| `is_float` | INT | 1 if float/double |
+| `is_void` | INT | 1 if void |
+| `is_struct` | INT | 1 if struct/union |
+| `is_array` | INT | 1 if array |
+| `ptr_depth` | INT | Pointer depth (int** = 2) |
+| `base_type` | TEXT | Type with pointers stripped |
+
+**Resolved type classification** (after typedef resolution):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `is_ptr_resolved` | INT | 1 if resolved type is pointer |
+| `is_int_resolved` | INT | 1 if resolved type is exactly int |
+| `is_integral_resolved` | INT | 1 if resolved type is int-like |
+| `is_float_resolved` | INT | 1 if resolved type is float/double |
+| `is_void_resolved` | INT | 1 if resolved type is void |
+| `ptr_depth_resolved` | INT | Pointer depth after resolution |
+| `base_type_resolved` | TEXT | Resolved type with pointers stripped |
+
+```sql
+-- Functions returning integers (strict: exactly int)
+SELECT type_name FROM types_func_args
+WHERE arg_index = -1 AND is_int = 1;
+
+-- Functions returning integers (loose: includes BOOL, DWORD, LONG)
+SELECT type_name FROM types_func_args
+WHERE arg_index = -1 AND is_integral_resolved = 1;
+
+-- Functions taking 4 pointer arguments
+SELECT type_name, COUNT(*) as ptr_args FROM types_func_args
+WHERE arg_index >= 0 AND is_ptr = 1
+GROUP BY type_ordinal HAVING ptr_args = 4;
+
+-- Typedefs that hide pointers (HANDLE, etc.)
+SELECT type_name, arg_type FROM types_func_args
+WHERE is_ptr = 0 AND is_ptr_resolved = 1;
+```
 
 ### Type Views
 
@@ -1081,6 +1158,44 @@ WHERE ct.op_name = 'cit_return'
 GROUP BY f.address
 HAVING COUNT(*) > 3
 ORDER BY return_count DESC;
+
+-- Functions that return 0 (common success pattern)
+SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+WHERE return_op = 'cot_num' AND return_num = 0;
+
+-- Functions that return -1 (error sentinel)
+SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+WHERE return_op = 'cot_num' AND return_num = -1;
+
+-- Functions that return a specific constant
+SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+WHERE return_op = 'cot_num' AND return_num = 1;
+```
+
+### Function Signature Queries
+
+```sql
+-- Functions returning integers (includes BOOL, DWORD via resolved)
+SELECT type_name FROM types_func_args
+WHERE arg_index = -1 AND is_integral_resolved = 1;
+
+-- Functions taking exactly 4 pointer arguments
+SELECT type_name, COUNT(*) as ptr_args FROM types_func_args
+WHERE arg_index >= 0 AND is_ptr = 1
+GROUP BY type_ordinal HAVING ptr_args = 4;
+
+-- Functions with string parameters (char*/wchar_t*)
+SELECT DISTINCT type_name FROM types_func_args
+WHERE arg_index >= 0 AND is_ptr = 1
+  AND base_type_resolved IN ('char', 'wchar_t', 'CHAR', 'WCHAR');
+
+-- Typedefs hiding pointers (HANDLE, HMODULE, etc.)
+SELECT DISTINCT type_name, arg_type FROM types_func_args
+WHERE is_ptr = 0 AND is_ptr_resolved = 1;
+
+-- Functions returning void pointers
+SELECT type_name FROM types_func_args
+WHERE arg_index = -1 AND is_ptr_resolved = 1 AND is_void_resolved = 1;
 ```
 
 ### Loops with System Calls (Performance/Security Hotspots)
@@ -1580,8 +1695,11 @@ WHERE s.content LIKE '%config%';
 | AST pattern matching | `ctree WHERE func_addr = X` |
 | Call patterns | `ctree_v_calls`, `disasm_calls` |
 | Control flow | `ctree_v_loops`, `ctree_v_ifs` |
+| Return value analysis | `ctree_v_returns` |
 | Variable analysis | `ctree_lvars WHERE func_addr = X` |
 | Type information | `types`, `types_members` |
+| Function signatures | `types_func_args` (with type classification) |
+| Functions by return type | `types_func_args WHERE arg_index = -1` |
 | Modify database | `*_live` tables |
 | Jump to Anything | `jump_entities('pattern', 'mode')` |
 | Entity search (JSON) | `jump_search('pattern', 'mode', limit, offset)` |
