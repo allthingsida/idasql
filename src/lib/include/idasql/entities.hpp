@@ -28,6 +28,7 @@
 #include <name.hpp>
 #include <entry.hpp>
 #include <nalt.hpp>
+#include <typeinf.hpp>  // For tinfo_t, func_type_data_t
 #include <xref.hpp>
 #include <strlist.hpp>
 #include <gdl.hpp>
@@ -80,6 +81,27 @@ inline std::string safe_entry_name(size_t idx) {
 // FUNCS Table (with UPDATE/DELETE support)
 // ============================================================================
 
+// Helper to get function type info
+inline bool get_func_tinfo(ea_t ea, tinfo_t& tif) {
+    return get_tinfo(&tif, ea);
+}
+
+// Helper to get calling convention name from callcnv_t
+inline const char* get_cc_name(callcnv_t cc) {
+    switch (cc) {
+        case CM_CC_CDECL:    return "cdecl";
+        case CM_CC_STDCALL:  return "stdcall";
+        case CM_CC_FASTCALL: return "fastcall";
+        case CM_CC_THISCALL: return "thiscall";
+        case CM_CC_PASCAL:   return "pascal";
+        case CM_CC_SPECIAL:  return "special";
+        case CM_CC_SPECIALE: return "speciale";
+        case CM_CC_SPECIALP: return "specialp";
+        case CM_CC_ELLIPSIS: return "ellipsis";
+        default:             return "unknown";
+    }
+}
+
 inline VTableDef define_funcs() {
     return table("funcs")
         .count([]() { return get_func_qty(); })
@@ -113,6 +135,73 @@ inline VTableDef define_funcs() {
         .column_int64("flags", [](size_t i) -> int64_t {
             func_t* f = getn_func(i);
             return f ? static_cast<int64_t>(f->flags) : 0;
+        })
+        // Prototype columns - return type
+        .column_text("return_type", [](size_t i) -> std::string {
+            func_t* f = getn_func(i);
+            if (!f) return "";
+            tinfo_t tif;
+            if (!get_func_tinfo(f->start_ea, tif) || !tif.is_func()) return "";
+            func_type_data_t fi;
+            if (!tif.get_func_details(&fi)) return "";
+            qstring ret_str;
+            fi.rettype.print(&ret_str);
+            return ret_str.c_str();
+        })
+        .column_int("return_is_ptr", [](size_t i) -> int {
+            func_t* f = getn_func(i);
+            if (!f) return 0;
+            tinfo_t tif;
+            if (!get_func_tinfo(f->start_ea, tif) || !tif.is_func()) return 0;
+            func_type_data_t fi;
+            if (!tif.get_func_details(&fi)) return 0;
+            return fi.rettype.is_ptr() ? 1 : 0;
+        })
+        .column_int("return_is_int", [](size_t i) -> int {
+            func_t* f = getn_func(i);
+            if (!f) return 0;
+            tinfo_t tif;
+            if (!get_func_tinfo(f->start_ea, tif) || !tif.is_func()) return 0;
+            func_type_data_t fi;
+            if (!tif.get_func_details(&fi)) return 0;
+            return fi.rettype.is_int() ? 1 : 0;
+        })
+        .column_int("return_is_integral", [](size_t i) -> int {
+            func_t* f = getn_func(i);
+            if (!f) return 0;
+            tinfo_t tif;
+            if (!get_func_tinfo(f->start_ea, tif) || !tif.is_func()) return 0;
+            func_type_data_t fi;
+            if (!tif.get_func_details(&fi)) return 0;
+            return fi.rettype.is_integral() ? 1 : 0;
+        })
+        .column_int("return_is_void", [](size_t i) -> int {
+            func_t* f = getn_func(i);
+            if (!f) return 0;
+            tinfo_t tif;
+            if (!get_func_tinfo(f->start_ea, tif) || !tif.is_func()) return 0;
+            func_type_data_t fi;
+            if (!tif.get_func_details(&fi)) return 0;
+            return fi.rettype.is_void() ? 1 : 0;
+        })
+        // Prototype columns - arguments
+        .column_int("arg_count", [](size_t i) -> int {
+            func_t* f = getn_func(i);
+            if (!f) return 0;
+            tinfo_t tif;
+            if (!get_func_tinfo(f->start_ea, tif) || !tif.is_func()) return 0;
+            func_type_data_t fi;
+            if (!tif.get_func_details(&fi)) return 0;
+            return static_cast<int>(fi.size());
+        })
+        .column_text("calling_conv", [](size_t i) -> std::string {
+            func_t* f = getn_func(i);
+            if (!f) return "";
+            tinfo_t tif;
+            if (!get_func_tinfo(f->start_ea, tif) || !tif.is_func()) return "";
+            func_type_data_t fi;
+            if (!tif.get_func_details(&fi)) return "";
+            return get_cc_name(fi.get_cc());
         })
         .deletable([](size_t i) -> bool {
             auto_wait();

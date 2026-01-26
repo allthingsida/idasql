@@ -90,7 +90,7 @@ idasql -s database.i64 --export out.sql
 ### Entity Tables (Read-Only)
 
 #### funcs
-All detected functions in the binary.
+All detected functions in the binary with prototype information.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -100,12 +100,43 @@ All detected functions in the binary.
 | `end_ea` | INT | Function end address |
 | `flags` | INT | Function flags |
 
+**Prototype columns** (populated when type info available):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `return_type` | TEXT | Return type string (e.g., "int", "void *") |
+| `return_is_ptr` | INT | 1 if return type is pointer |
+| `return_is_int` | INT | 1 if return type is exactly int |
+| `return_is_integral` | INT | 1 if return type is int-like (int, long, DWORD, BOOL) |
+| `return_is_void` | INT | 1 if return type is void |
+| `arg_count` | INT | Number of function arguments |
+| `calling_conv` | TEXT | Calling convention (cdecl, stdcall, fastcall, etc.) |
+
 ```sql
 -- 10 largest functions
 SELECT name, size FROM funcs ORDER BY size DESC LIMIT 10;
 
 -- Functions starting with "sub_" (auto-named, not analyzed)
 SELECT name, printf('0x%X', address) as addr FROM funcs WHERE name LIKE 'sub_%';
+
+-- Functions returning integers with 3+ arguments
+SELECT name, return_type, arg_count FROM funcs
+WHERE return_is_integral = 1 AND arg_count >= 3;
+
+-- Void functions (side effects, callbacks)
+SELECT name, arg_count FROM funcs WHERE return_is_void = 1;
+
+-- Pointer-returning functions (factories, allocators)
+SELECT name, return_type FROM funcs WHERE return_is_ptr = 1;
+
+-- Simple getter functions (no args, returns value)
+SELECT name, return_type FROM funcs
+WHERE arg_count = 0 AND return_is_void = 0;
+
+-- Functions by calling convention
+SELECT calling_conv, COUNT(*) as count FROM funcs
+WHERE calling_conv IS NOT NULL AND calling_conv != ''
+GROUP BY calling_conv ORDER BY count DESC;
 ```
 
 #### segments
@@ -1680,11 +1711,144 @@ WHERE s.content LIKE '%config%';
 
 ---
 
+## Natural Language Query Examples
+
+These examples show how to translate common user questions into SQL.
+
+### Function Signature Queries
+
+**"Show me functions that return integers"**
+```sql
+-- Using funcs table (recommended - direct and fast)
+SELECT name, return_type, arg_count FROM funcs
+WHERE return_is_integral = 1
+LIMIT 20;
+
+-- Or via types_func_args (for typedef-aware queries)
+SELECT DISTINCT type_name FROM types_func_args
+WHERE arg_index = -1 AND is_integral_resolved = 1;
+```
+
+**"Show me functions that take 4 string arguments"**
+```sql
+-- String = char* or wchar_t*
+SELECT type_name, COUNT(*) as string_args
+FROM types_func_args
+WHERE arg_index >= 0
+  AND is_ptr_resolved = 1
+  AND base_type_resolved IN ('char', 'wchar_t', 'CHAR', 'WCHAR')
+GROUP BY type_ordinal
+HAVING string_args = 4;
+```
+
+**"Which functions return pointers?"**
+```sql
+SELECT name, return_type FROM funcs
+WHERE return_is_ptr = 1
+ORDER BY name LIMIT 20;
+```
+
+**"Find void functions with many arguments"**
+```sql
+SELECT name, arg_count FROM funcs
+WHERE return_is_void = 1 AND arg_count >= 4
+ORDER BY arg_count DESC;
+```
+
+**"What calling conventions are used?"**
+```sql
+SELECT calling_conv, COUNT(*) as count
+FROM funcs
+WHERE calling_conv IS NOT NULL AND calling_conv != ''
+GROUP BY calling_conv ORDER BY count DESC;
+```
+
+### Return Value Analysis
+
+**"Which functions return 0?"**
+```sql
+SELECT DISTINCT f.name FROM funcs f
+JOIN ctree_v_returns r ON r.func_addr = f.address
+WHERE r.return_num = 0;
+```
+
+**"Find functions that return -1 (error pattern)"**
+```sql
+SELECT DISTINCT f.name FROM funcs f
+JOIN ctree_v_returns r ON r.func_addr = f.address
+WHERE r.return_num = -1;
+```
+
+**"Functions that return their input argument"**
+```sql
+SELECT DISTINCT f.name FROM funcs f
+JOIN ctree_v_returns r ON r.func_addr = f.address
+WHERE r.returns_arg = 1;
+```
+
+**"Functions that return the result of another call (wrappers)"**
+```sql
+SELECT DISTINCT f.name FROM funcs f
+JOIN ctree_v_returns r ON r.func_addr = f.address
+WHERE r.returns_call_result = 1;
+```
+
+**"Functions with multiple return statements"**
+```sql
+SELECT f.name, COUNT(*) as return_count
+FROM funcs f
+JOIN ctree_v_returns r ON r.func_addr = f.address
+GROUP BY f.address
+HAVING return_count > 1
+ORDER BY return_count DESC LIMIT 20;
+```
+
+### Type Analysis
+
+**"Find typedefs that hide pointers (like HANDLE)"**
+```sql
+SELECT DISTINCT type_name, arg_type, base_type_resolved
+FROM types_func_args
+WHERE is_ptr = 0 AND is_ptr_resolved = 1;
+```
+
+**"Functions with struct parameters"**
+```sql
+SELECT type_name, arg_name, arg_type FROM types_func_args
+WHERE arg_index >= 0 AND is_struct = 1;
+```
+
+### Combined Queries
+
+**"Integer-returning functions with 3+ args that return specific values"**
+```sql
+SELECT f.name, f.return_type, f.arg_count, r.return_num
+FROM funcs f
+JOIN ctree_v_returns r ON r.func_addr = f.address
+WHERE f.return_is_integral = 1
+  AND f.arg_count >= 3
+  AND r.return_num IS NOT NULL
+ORDER BY r.return_num;
+```
+
+**"Fastcall functions that return pointers"**
+```sql
+SELECT name, return_type, arg_count FROM funcs
+WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
+```
+
+---
+
 ## Summary: When to Use What
 
 | Goal | Table/Function |
 |------|----------------|
 | List all functions | `funcs` |
+| Functions by return type | `funcs WHERE return_is_integral = 1` |
+| Functions by arg count | `funcs WHERE arg_count >= N` |
+| Void functions | `funcs WHERE return_is_void = 1` |
+| Pointer-returning functions | `funcs WHERE return_is_ptr = 1` |
+| Functions by calling convention | `funcs WHERE calling_conv = 'fastcall'` |
 | Find who calls what | `xrefs` with `is_code = 1` |
 | Find data references | `xrefs` with `is_code = 0` |
 | Analyze imports | `imports` |
@@ -1696,10 +1860,13 @@ WHERE s.content LIKE '%config%';
 | Call patterns | `ctree_v_calls`, `disasm_calls` |
 | Control flow | `ctree_v_loops`, `ctree_v_ifs` |
 | Return value analysis | `ctree_v_returns` |
+| Functions returning specific values | `ctree_v_returns WHERE return_num = 0` |
+| Pass-through functions | `ctree_v_returns WHERE returns_arg = 1` |
+| Wrapper functions | `ctree_v_returns WHERE returns_call_result = 1` |
 | Variable analysis | `ctree_lvars WHERE func_addr = X` |
 | Type information | `types`, `types_members` |
-| Function signatures | `types_func_args` (with type classification) |
-| Functions by return type | `types_func_args WHERE arg_index = -1` |
+| Typedef-aware type queries | `types_func_args` (surface vs resolved) |
+| Hidden pointer types | `types_func_args WHERE is_ptr = 0 AND is_ptr_resolved = 1` |
 | Modify database | `*_live` tables |
 | Jump to Anything | `jump_entities('pattern', 'mode')` |
 | Entity search (JSON) | `jump_search('pattern', 'mode', limit, offset)` |
