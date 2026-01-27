@@ -616,20 +616,11 @@ static void run_repl(idasql::Database& db) {
         }
 
 #ifdef IDASQL_HAS_AI_AGENT
-        // In agent mode, use query_hosted for main-thread safety
+        // In agent mode, use query for main-thread safety
         if (agent_mode && agent) {
-            // Query with streaming (tools execute on main thread)
-            std::string result = agent->query_streaming(line, [verbose](const std::string& content) {
-                if (verbose) {
-                    // Could show streaming progress here
-                    std::cout << content << std::flush;
-                }
-            });
-
-            if (!result.empty() && !verbose) {
+            std::string result = agent->query(line);
+            if (!result.empty()) {
                 std::cout << result << "\n";
-            } else if (verbose) {
-                std::cout << "\n";  // Newline after streaming
             }
 
             // Check if we were interrupted
