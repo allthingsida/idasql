@@ -774,6 +774,7 @@ static void print_usage() {
               << "  --prompt <text>      Natural language query (uses AI agent)\n"
               << "  --agent              Enable AI agent mode in interactive REPL\n"
               << "  --provider <name>    Override AI provider (claude, copilot)\n"
+              << "  --config [path] [val] View/set agent configuration\n"
               << "  -v, --verbose        Show agent debug logs\n"
               << "\n"
               << "Agent settings stored in: ~/.idasql/agent_settings.json\n"
@@ -857,6 +858,13 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Available providers: claude, copilot\n";
                 return 1;
             }
+        } else if (strcmp(argv[i], "--config") == 0) {
+            // Handle --config [path] [value] and exit immediately
+            std::string config_path = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : "";
+            std::string config_value = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : "";
+            auto [ok, output, code] = idasql::handle_config_command(config_path, config_value);
+            std::cout << output;
+            return code;
 #endif
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             // Already handled above, but skip here to avoid "unknown option"

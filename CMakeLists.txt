@@ -65,7 +65,7 @@ endif()
 # AI Agent Support (libagents - optional)
 # ============================================================================
 
-option(IDASQL_WITH_AI_AGENT "Build with AI agent support (libagents)" OFF)
+option(IDASQL_WITH_AI_AGENT "Build with AI agent support (libagents)" ON)
 
 if(IDASQL_WITH_AI_AGENT)
     message(STATUS "idasql: Building with AI agent support via libagents")
