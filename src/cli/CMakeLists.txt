@@ -57,3 +57,9 @@ if(IDASQL_WITH_AI_AGENT)
 
     message(STATUS "idasql_cli: AI agent support enabled")
 endif()
+
+# HTTP server support
+if(IDASQL_WITH_HTTP)
+    target_compile_definitions(idasql_cli PRIVATE IDASQL_HAS_HTTP)
+    message(STATUS "idasql_cli: HTTP server support enabled")
+endif()

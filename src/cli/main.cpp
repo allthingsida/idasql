@@ -31,6 +31,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 #include <string>
 #include <cstring>
 #include <cctype>
@@ -38,6 +39,9 @@
 #include <algorithm>
 #include <csignal>
 #include <atomic>
+#include <mutex>
+#include <thread>
+#include <chrono>
 
 // Windows UTF-8 console support
 #ifdef _WIN32
@@ -47,6 +51,9 @@
 
 // Socket client for remote mode (shared library, no IDA dependency)
 #include <xsql/socket/client.hpp>
+#ifdef IDASQL_HAS_HTTP
+#include <xsql/thinclient/server.hpp>
+#endif
 
 #include "../common/sqlite_utils.hpp"
 
@@ -744,6 +751,237 @@ static bool execute_file(idasql::Database& db, const char* path) {
 }
 
 // ============================================================================
+// HTTP Server Mode
+// ============================================================================
+
+#ifdef IDASQL_HAS_HTTP
+static xsql::thinclient::server* g_http_server = nullptr;
+
+static void http_signal_handler(int) {
+    if (g_http_server) g_http_server->stop();
+}
+
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 10);
+    for (char ch : s) {
+        switch (ch) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(ch) < 0x20) {
+                    std::ostringstream oss;
+                    oss << "\\u" << std::hex << std::setfill('0') << std::setw(4) << static_cast<unsigned>(ch);
+                    out += oss.str();
+                } else {
+                    out += ch;
+                }
+        }
+    }
+    return out;
+}
+
+static std::string query_result_to_json(idasql::Database& db, const std::string& sql) {
+    auto result = db.query(sql);
+    std::ostringstream json;
+    json << "{";
+    json << "\"success\":" << (result.success ? "true" : "false");
+
+    if (result.success) {
+        json << ",\"columns\":[";
+        for (size_t i = 0; i < result.columns.size(); i++) {
+            if (i > 0) json << ",";
+            json << "\"" << json_escape(result.columns[i]) << "\"";
+        }
+        json << "]";
+
+        json << ",\"rows\":[";
+        for (size_t i = 0; i < result.rows.size(); i++) {
+            if (i > 0) json << ",";
+            json << "[";
+            for (size_t c = 0; c < result.rows[i].size(); c++) {
+                if (c > 0) json << ",";
+                json << "\"" << json_escape(result.rows[i][c]) << "\"";
+            }
+            json << "]";
+        }
+        json << "]";
+        json << ",\"row_count\":" << result.rows.size();
+    } else {
+        json << ",\"error\":\"" << json_escape(result.error) << "\"";
+    }
+
+    json << "}";
+    return json.str();
+}
+
+static const char* IDASQL_HELP_TEXT = R"(IDASQL HTTP REST API
+====================
+
+SQL interface for IDA Pro databases via HTTP.
+
+Endpoints:
+  GET  /         - Welcome message
+  GET  /help     - This documentation (for LLM discovery)
+  POST /query    - Execute SQL (body = raw SQL, response = JSON)
+  GET  /status   - Server health
+  POST /shutdown - Stop server
+
+Tables:
+  funcs           - Functions with address, size, flags
+  segments        - Segment/section information
+  imports         - Imported functions
+  exports         - Exported functions
+  names           - Named locations
+  strings         - String references
+  comments        - User comments
+  xrefs           - Cross references
+  structs         - Structure definitions
+  struct_members  - Structure members
+  enums           - Enumeration definitions
+  enum_members    - Enumeration values
+  localvars       - Local variables (requires Hex-Rays)
+  pseudocode      - Decompiled pseudocode (requires Hex-Rays)
+
+Example Queries:
+  SELECT name, start_ea, size FROM funcs ORDER BY size DESC LIMIT 10;
+  SELECT * FROM imports WHERE name LIKE '%malloc%';
+  SELECT s.name, COUNT(*) FROM structs s JOIN struct_members m ON s.id = m.struct_id GROUP BY s.id;
+
+Response Format:
+  Success: {"success": true, "columns": [...], "rows": [[...]], "row_count": N}
+  Error:   {"success": false, "error": "message"}
+
+Example:
+  curl http://localhost:8080/help
+  curl -X POST http://localhost:8080/query -d "SELECT name FROM funcs LIMIT 5"
+)";
+
+static int run_http_mode(idasql::Database& db, int port, const std::string& bind_addr, const std::string& auth_token) {
+    xsql::thinclient::server_config cfg;
+    cfg.port = port;
+    cfg.bind_address = bind_addr.empty() ? "127.0.0.1" : bind_addr;
+    if (!auth_token.empty()) cfg.auth_token = auth_token;
+    if (!bind_addr.empty() && bind_addr != "127.0.0.1" && bind_addr != "localhost") {
+        cfg.allow_insecure_no_auth = auth_token.empty();
+    }
+
+    std::mutex query_mutex;
+
+    cfg.setup_routes = [&db, &auth_token, &query_mutex, port](httplib::Server& svr) {
+        svr.Get("/", [port](const httplib::Request&, httplib::Response& res) {
+            std::string welcome = "IDASQL HTTP Server\n\nEndpoints:\n"
+                "  GET  /help     - API documentation\n"
+                "  POST /query    - Execute SQL query\n"
+                "  GET  /status   - Health check\n"
+                "  POST /shutdown - Stop server\n\n"
+                "Example: curl -X POST http://localhost:" + std::to_string(port) + "/query -d \"SELECT name FROM funcs LIMIT 5\"\n";
+            res.set_content(welcome, "text/plain");
+        });
+
+        svr.Get("/help", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content(IDASQL_HELP_TEXT, "text/plain");
+        });
+
+        svr.Post("/query", [&db, &auth_token, &query_mutex](const httplib::Request& req, httplib::Response& res) {
+            if (!auth_token.empty()) {
+                std::string token;
+                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
+                else if (req.has_header("Authorization")) {
+                    auto auth = req.get_header_value("Authorization");
+                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
+                }
+                if (token != auth_token) {
+                    res.status = 401;
+                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    return;
+                }
+            }
+            if (req.body.empty()) {
+                res.status = 400;
+                res.set_content("{\"success\":false,\"error\":\"Empty query\"}", "application/json");
+                return;
+            }
+            std::lock_guard<std::mutex> lock(query_mutex);
+            res.set_content(query_result_to_json(db, req.body), "application/json");
+        });
+
+        svr.Get("/status", [&db, &auth_token](const httplib::Request& req, httplib::Response& res) {
+            if (!auth_token.empty()) {
+                std::string token;
+                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
+                else if (req.has_header("Authorization")) {
+                    auto auth = req.get_header_value("Authorization");
+                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
+                }
+                if (token != auth_token) {
+                    res.status = 401;
+                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    return;
+                }
+            }
+            auto result = db.query("SELECT COUNT(*) FROM funcs");
+            std::string count = result.success && !result.empty() ? result.rows[0][0] : "?";
+            res.set_content("{\"status\":\"ok\",\"functions\":" + count + "}", "application/json");
+        });
+
+        svr.Post("/shutdown", [&svr, &auth_token](const httplib::Request& req, httplib::Response& res) {
+            if (!auth_token.empty()) {
+                std::string token;
+                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
+                else if (req.has_header("Authorization")) {
+                    auto auth = req.get_header_value("Authorization");
+                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
+                }
+                if (token != auth_token) {
+                    res.status = 401;
+                    res.set_content("Unauthorized", "text/plain");
+                    return;
+                }
+            }
+            res.set_content("Shutting down\n", "text/plain");
+            std::thread([&svr] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                svr.stop();
+            }).detach();
+        });
+    };
+
+    xsql::thinclient::server http_server(cfg);
+    g_http_server = &http_server;
+
+    auto old_handler = std::signal(SIGINT, http_signal_handler);
+#ifdef _WIN32
+    auto old_break_handler = std::signal(SIGBREAK, http_signal_handler);
+#else
+    auto old_term_handler = std::signal(SIGTERM, http_signal_handler);
+#endif
+
+    std::cout << "IDASQL HTTP server listening on http://" << cfg.bind_address << ":" << port << "\n";
+    std::cout << "Database: " << db.info() << "\n";
+    std::cout << "Endpoints: /help, /query, /status, /shutdown\n";
+    std::cout << "Example: curl http://localhost:" << port << "/help\n";
+    std::cout << "Press Ctrl+C to stop.\n\n";
+    std::cout.flush();
+
+    http_server.run();
+
+    std::signal(SIGINT, old_handler);
+#ifdef _WIN32
+    std::signal(SIGBREAK, old_break_handler);
+#else
+    std::signal(SIGTERM, old_term_handler);
+#endif
+    g_http_server = nullptr;
+    std::cout << "\nHTTP server stopped.\n";
+    return 0;
+}
+#endif // IDASQL_HAS_HTTP
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -761,6 +999,10 @@ static void print_usage() {
               << "  -i                   Interactive REPL mode\n"
               << "  --export <file>      Export tables to SQL file (local mode only)\n"
               << "  --export-tables=X    Tables to export: * (all, default) or table1,table2,...\n"
+#ifdef IDASQL_HAS_HTTP
+              << "  --http [port]        Start HTTP REST server (default: 8080, local mode only)\n"
+              << "  --bind <addr>        Bind address for HTTP server (default: 127.0.0.1)\n"
+#endif
 #ifdef IDASQL_HAS_AI_AGENT
               << "  --prompt <text>      Natural language query (uses AI agent)\n"
               << "  --agent              Enable AI agent mode in interactive REPL\n"
@@ -807,7 +1049,10 @@ int main(int argc, char* argv[]) {
     std::string export_tables = "*";  // Default: all tables
     std::string remote_spec;          // host:port for remote mode
     std::string auth_token;           // --token for remote mode
+    std::string bind_addr;            // --bind for HTTP mode
     bool interactive = false;
+    bool http_mode = false;
+    int http_port = 8080;
 #ifdef IDASQL_HAS_AI_AGENT
     std::string nl_prompt;            // --prompt for natural language
     bool agent_mode = false;          // --agent for interactive mode
@@ -857,6 +1102,13 @@ int main(int argc, char* argv[]) {
             std::cout << output;
             return code;
 #endif
+        } else if (strcmp(argv[i], "--http") == 0) {
+            http_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                http_port = std::stoi(argv[++i]);
+            }
+        } else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) {
+            bind_addr = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             // Already handled above, but skip here to avoid "unknown option"
             continue;
@@ -882,12 +1134,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    bool has_action = !query.empty() || !sql_file.empty() || interactive || !export_file.empty();
+    bool has_action = !query.empty() || !sql_file.empty() || interactive || !export_file.empty() || http_mode;
 #ifdef IDASQL_HAS_AI_AGENT
     has_action = has_action || !nl_prompt.empty();
 #endif
     if (!has_action) {
-        std::cerr << "Error: Specify -q, -c, -f, -i, --export"
+        std::cerr << "Error: Specify -q, -c, -f, -i, --export, --http"
 #ifdef IDASQL_HAS_AI_AGENT
                   << ", or --prompt"
 #endif
@@ -898,6 +1150,12 @@ int main(int argc, char* argv[]) {
 
     if (remote_mode && !export_file.empty()) {
         std::cerr << "Error: --export not supported in remote mode\n\n";
+        print_usage();
+        return 1;
+    }
+
+    if (remote_mode && http_mode) {
+        std::cerr << "Error: Cannot use both --remote and --http\n\n";
         print_usage();
         return 1;
     }
@@ -940,6 +1198,21 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     std::cerr << "Database opened successfully." << std::endl;
+
+    // HTTP server mode
+#ifdef IDASQL_HAS_HTTP
+    if (http_mode) {
+        int http_result = run_http_mode(db, http_port, bind_addr, auth_token);
+        db.close();
+        return http_result;
+    }
+#else
+    if (http_mode) {
+        std::cerr << "Error: HTTP mode not available. Rebuild with -DIDASQL_WITH_HTTP=ON\n";
+        db.close();
+        return 1;
+    }
+#endif
 
     int result = 0;
 

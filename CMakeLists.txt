@@ -20,6 +20,17 @@ include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
 # ============================================================================
+# HTTP Server Support (optional) - must be set BEFORE libxsql
+# ============================================================================
+
+option(IDASQL_WITH_HTTP "Build with HTTP REST server support" OFF)
+
+if(IDASQL_WITH_HTTP)
+    message(STATUS "idasql: Building with HTTP server support")
+    set(XSQL_WITH_THINCLIENT ON CACHE BOOL "" FORCE)
+endif()
+
+# ============================================================================
 # libxsql dependency
 # ============================================================================
 
