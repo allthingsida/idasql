@@ -828,6 +828,7 @@ Endpoints:
   GET  /help     - This documentation (for LLM discovery)
   POST /query    - Execute SQL (body = raw SQL, response = JSON)
   GET  /status   - Server health
+  GET  /health   - Alias for /status
   POST /shutdown - Stop server
 
 Tables:
@@ -925,7 +926,27 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
             }
             auto result = db.query("SELECT COUNT(*) FROM funcs");
             std::string count = result.success && !result.empty() ? result.rows[0][0] : "?";
-            res.set_content("{\"status\":\"ok\",\"functions\":" + count + "}", "application/json");
+            res.set_content("{\"success\":true,\"status\":\"ok\",\"tool\":\"idasql\",\"functions\":" + count + "}", "application/json");
+        });
+
+        // GET /health - Alias for /status
+        svr.Get("/health", [&db, &auth_token](const httplib::Request& req, httplib::Response& res) {
+            if (!auth_token.empty()) {
+                std::string token;
+                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
+                else if (req.has_header("Authorization")) {
+                    auto auth = req.get_header_value("Authorization");
+                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
+                }
+                if (token != auth_token) {
+                    res.status = 401;
+                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    return;
+                }
+            }
+            auto result = db.query("SELECT COUNT(*) FROM funcs");
+            std::string count = result.success && !result.empty() ? result.rows[0][0] : "?";
+            res.set_content("{\"success\":true,\"status\":\"ok\",\"tool\":\"idasql\",\"functions\":" + count + "}", "application/json");
         });
 
         svr.Post("/shutdown", [&svr, &auth_token](const httplib::Request& req, httplib::Response& res) {
@@ -938,11 +959,11 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                 }
                 if (token != auth_token) {
                     res.status = 401;
-                    res.set_content("Unauthorized", "text/plain");
+                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
                     return;
                 }
             }
-            res.set_content("Shutting down\n", "text/plain");
+            res.set_content("{\"success\":true,\"message\":\"Shutting down\"}", "application/json");
             std::thread([&svr] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 svr.stop();
