@@ -518,11 +518,11 @@ static void run_repl(idasql::Database& db) {
 
         std::cout << "IDASQL AI Agent Mode\n"
                   << "Ask questions in natural language or use SQL directly.\n"
-                  << "Type .help for commands, .quit to exit, Ctrl-C to interrupt\n\n";
+                  << "Type .help for commands, .clear to reset, .quit to exit\n\n";
     } else {
 #endif
         std::cout << "IDASQL Interactive Mode\n"
-                  << "Type .help for commands, .quit to exit\n\n";
+                  << "Type .help for commands, .clear to reset, .quit to exit\n\n";
 #ifdef IDASQL_HAS_AI_AGENT
     }
 #endif
