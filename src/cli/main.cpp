@@ -856,9 +856,13 @@ Response Format:
   Success: {"success": true, "columns": [...], "rows": [[...]], "row_count": N}
   Error:   {"success": false, "error": "message"}
 
+Authentication (if enabled):
+  Header: Authorization: Bearer <token>
+  Or:     X-XSQL-Token: <token>
+
 Example:
-  curl http://localhost:8080/help
-  curl -X POST http://localhost:8080/query -d "SELECT name FROM funcs LIMIT 5"
+  curl http://localhost:8081/help
+  curl -X POST http://localhost:8081/query -d "SELECT name FROM funcs LIMIT 5"
 )";
 
 static int run_http_mode(idasql::Database& db, int port, const std::string& bind_addr, const std::string& auth_token) {
@@ -866,8 +870,14 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     cfg.port = port;
     cfg.bind_address = bind_addr.empty() ? "127.0.0.1" : bind_addr;
     if (!auth_token.empty()) cfg.auth_token = auth_token;
+    // Allow non-loopback binds if explicitly requested (with warning)
     if (!bind_addr.empty() && bind_addr != "127.0.0.1" && bind_addr != "localhost") {
         cfg.allow_insecure_no_auth = auth_token.empty();
+        std::cerr << "WARNING: Binding to non-loopback address " << bind_addr << "\n";
+        if (auth_token.empty()) {
+            std::cerr << "WARNING: No authentication token set. Server is accessible without authentication.\n";
+            std::cerr << "         Consider using --token <secret> for remote access.\n";
+        }
     }
 
     std::mutex query_mutex;

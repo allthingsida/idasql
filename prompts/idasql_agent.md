@@ -1872,3 +1872,84 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Entity search (JSON) | `jump_search('pattern', 'mode', limit, offset)` |
 
 **Remember:** Always use `func_addr = X` constraints on instruction and decompiler tables for acceptable performance.
+
+---
+
+## Server Modes
+
+IDASQL supports two server protocols for remote queries: **HTTP REST** (recommended) and raw TCP.
+
+---
+
+### HTTP REST Server (Recommended)
+
+Standard REST API that works with curl, any HTTP client, or LLM tools.
+
+**Starting the server:**
+```bash
+# Default port 8081
+idasql -s database.i64 --http
+
+# Custom port and bind address
+idasql -s database.i64 --http 9000 --bind 0.0.0.0
+
+# With authentication
+idasql -s database.i64 --http 8081 --token mysecret
+```
+
+**HTTP Endpoints:**
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/` | GET | No | Welcome message |
+| `/help` | GET | No | API documentation (for LLM discovery) |
+| `/query` | POST | Yes* | Execute SQL (body = raw SQL) |
+| `/status` | GET | Yes* | Health check |
+| `/health` | GET | Yes* | Alias for /status |
+| `/shutdown` | POST | Yes* | Stop server |
+
+*Auth required only if `--token` was specified.
+
+**Example with curl:**
+```bash
+# Get API documentation
+curl http://localhost:8081/help
+
+# Execute SQL query
+curl -X POST http://localhost:8081/query -d "SELECT name, size FROM funcs LIMIT 5"
+
+# With authentication
+curl -X POST http://localhost:8081/query \
+     -H "Authorization: Bearer mysecret" \
+     -d "SELECT * FROM funcs"
+
+# Check status
+curl http://localhost:8081/status
+```
+
+**Response Format (JSON):**
+```json
+{"success": true, "columns": ["name", "size"], "rows": [["main", "500"]], "row_count": 1}
+```
+
+```json
+{"success": false, "error": "no such table: bad_table"}
+```
+
+---
+
+### Raw TCP Server (Legacy)
+
+Binary protocol with length-prefixed JSON. Use only when HTTP is not available.
+
+**Starting the server:**
+```bash
+idasql -s database.i64 --server 13337
+idasql -s database.i64 --server 13337 --token mysecret
+```
+
+**Connecting as client:**
+```bash
+idasql --remote localhost:13337 -q "SELECT name FROM funcs LIMIT 5"
+idasql --remote localhost:13337 -i
+```
