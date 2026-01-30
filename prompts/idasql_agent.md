@@ -265,6 +265,74 @@ SELECT func_at(func_ea) as name, COUNT(*) as blocks
 FROM blocks GROUP BY func_ea ORDER BY blocks DESC LIMIT 10;
 ```
 
+### Convenience Views
+
+Pre-built views for common xref analysis patterns. These simplify caller/callee queries.
+
+#### callers
+Who calls each function. Use this instead of manual xref JOINs.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `func_addr` | INT | Target function address |
+| `caller_addr` | INT | Xref source address |
+| `caller_name` | TEXT | Calling function name |
+| `caller_func_addr` | INT | Calling function start |
+
+```sql
+-- Who calls function at 0x401000?
+SELECT caller_name, printf('0x%X', caller_addr) as from_addr
+FROM callers WHERE func_addr = 0x401000;
+
+-- Most called functions
+SELECT printf('0x%X', func_addr) as addr, COUNT(*) as callers
+FROM callers GROUP BY func_addr ORDER BY callers DESC LIMIT 10;
+```
+
+#### callees
+What each function calls. Inverse of callers view.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `func_addr` | INT | Calling function address |
+| `func_name` | TEXT | Calling function name |
+| `callee_addr` | INT | Called address |
+| `callee_name` | TEXT | Called function/symbol name |
+
+```sql
+-- What does main call?
+SELECT callee_name, printf('0x%X', callee_addr) as addr
+FROM callees WHERE func_name LIKE '%main%';
+
+-- Functions making most calls
+SELECT func_name, COUNT(*) as call_count
+FROM callees GROUP BY func_addr ORDER BY call_count DESC LIMIT 10;
+```
+
+#### string_refs
+Which functions reference which strings. Great for finding functions by string content.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `string_addr` | INT | String address |
+| `string_value` | TEXT | String content |
+| `string_length` | INT | String length |
+| `ref_addr` | INT | Reference address |
+| `func_addr` | INT | Referencing function |
+| `func_name` | TEXT | Function name |
+
+```sql
+-- Find functions using error strings
+SELECT func_name, string_value
+FROM string_refs
+WHERE string_value LIKE '%error%' OR string_value LIKE '%fail%';
+
+-- Functions with most string references
+SELECT func_name, COUNT(*) as string_count
+FROM string_refs WHERE func_name IS NOT NULL
+GROUP BY func_addr ORDER BY string_count DESC LIMIT 10;
+```
+
 ### Instruction Tables
 
 #### instructions
