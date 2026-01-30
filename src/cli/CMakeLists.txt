@@ -60,6 +60,17 @@ endif()
 
 # HTTP server support
 if(IDASQL_WITH_HTTP)
-    target_compile_definitions(idasql_cli PRIVATE IDASQL_HAS_HTTP)
+    target_compile_definitions(idasql_cli PRIVATE IDASQL_HAS_HTTP XSQL_HAS_THINCLIENT)
+
+    # Fetch cpp-httplib if not already available
+    include(FetchContent)
+    FetchContent_Declare(
+        cpp_httplib
+        GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+        GIT_TAG v0.15.3
+    )
+    FetchContent_MakeAvailable(cpp_httplib)
+    target_include_directories(idasql_cli PRIVATE ${cpp_httplib_SOURCE_DIR})
+
     message(STATUS "idasql_cli: HTTP server support enabled")
 endif()

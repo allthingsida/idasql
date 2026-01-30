@@ -1,5 +1,5 @@
 // Auto-generated from idasql_agent.md
-// Generated: 2026-01-26T15:38:56.398745
+// Generated: 2026-01-29T19:48:30.049515
 // DO NOT EDIT - regenerate with: python scripts/embed_prompt.py
 
 #pragma once
@@ -733,6 +733,38 @@ FROM disasm_v_calls_in_loops;
 | `mnemonic(addr)` | Instruction mnemonic only |
 | `operand(addr, n)` | Operand text (n=0-5) |
 
+### Binary Search
+| Function | Description |
+|----------|-------------|
+| `search_bytes(pattern)` | Find all matches, returns JSON array |
+| `search_bytes(pattern, start, end)` | Search within address range |
+| `search_first(pattern)` | First match address (or NULL) |
+| `search_first(pattern, start, end)` | First match in range |
+
+**Pattern syntax (IDA native):**
+- `"48 8B 05"` - Exact bytes (hex, space-separated)
+- `"48 ? 05"` or `"48 ?? 05"` - `?` = any byte wildcard (whole byte only)
+- `"(01 02 03)"` - Alternatives (match any of these bytes)
+
+**Note:** Unlike Binary Ninja, IDA does NOT support nibble wildcards or regex.
+
+**Example:**
+```sql
+-- Find all matches for a pattern
+SELECT search_bytes('48 8B ? 00');
+
+-- Parse JSON results
+SELECT json_extract(value, '$.address') as addr
+FROM json_each(search_bytes('48 89 ?'))
+LIMIT 10;
+
+-- First match only
+SELECT printf('0x%llX', search_first('CC CC CC'));
+
+-- Search with alternatives
+SELECT search_bytes('E8 (01 02 03 04)');
+```
+
 ### Names & Functions
 | Function | Description |
 |----------|-------------|
@@ -926,8 +958,8 @@ WHERE j.kind = 'function';
 
 | Parameter | Description |
 |-----------|-------------|
-| `pattern` | Search pattern (required) |
-| `mode` | `'prefix'` or `'contains'` |
+| `pattern` | Search pattern (required) |)PROMPT"
+    R"PROMPT(| `mode` | `'prefix'` or `'contains'` |
 
 ### Columns
 
@@ -955,8 +987,8 @@ Some tables have **optimized filters** that use efficient IDA SDK APIs:
 | `instructions` | `func_addr = X` | O(all instructions) - SLOW |
 | `blocks` | `func_ea = X` | O(all blocks) |
 | `xrefs` | `to_ea = X` or `from_ea = X` | O(all xrefs) |
-| `pseudocode` | `func_addr = X` | **Decompiles ALL functions** |)PROMPT"
-    R"PROMPT(| `ctree*` | `func_addr = X` | **Decompiles ALL functions** |
+| `pseudocode` | `func_addr = X` | **Decompiles ALL functions** |
+| `ctree*` | `func_addr = X` | **Decompiles ALL functions** |
 
 **Always filter decompiler tables by `func_addr`!**
 
@@ -1524,8 +1556,8 @@ WHERE length > 5;
 ```sql
 -- Comprehensive security audit in one query
 SELECT 'dangerous_func' as check_type, func_at(func_addr) as location, callee_name as detail
-FROM disasm_calls
-WHERE callee_name IN ('strcpy', 'strcat', 'sprintf', 'gets', 'scanf')
+FROM disasm_calls)PROMPT"
+    R"PROMPT(WHERE callee_name IN ('strcpy', 'strcat', 'sprintf', 'gets', 'scanf')
 
 UNION ALL
 
@@ -1567,8 +1599,8 @@ WHERE row_num BETWEEN 101 AND 200;  -- Page 2 (100 per page)
 ```sql
 -- Functions that have at least one string reference (more efficient than JOIN + DISTINCT)
 SELECT f.name
-FROM funcs f)PROMPT"
-    R"PROMPT(WHERE EXISTS (
+FROM funcs f
+WHERE EXISTS (
     SELECT 1 FROM xrefs x
     JOIN strings s ON x.to_ea = s.address
     WHERE x.from_ea BETWEEN f.address AND f.end_ea
@@ -1881,6 +1913,87 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Entity search (JSON) | `jump_search('pattern', 'mode', limit, offset)` |
 
 **Remember:** Always use `func_addr = X` constraints on instruction and decompiler tables for acceptable performance.
+
+---
+
+## Server Modes
+
+IDASQL supports two server protocols for remote queries: **HTTP REST** (recommended) and raw TCP.
+
+---
+
+### HTTP REST Server (Recommended)
+
+Standard REST API that works with curl, any HTTP client, or LLM tools.
+
+**Starting the server:**
+```bash
+# Default port 8081
+idasql -s database.i64 --http
+
+# Custom port and bind address
+idasql -s database.i64 --http 9000 --bind 0.0.0.0
+
+# With authentication
+idasql -s database.i64 --http 8081 --token mysecret
+```
+
+**HTTP Endpoints:**
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/` | GET | No | Welcome message |
+| `/help` | GET | No | API documentation (for LLM discovery) |
+| `/query` | POST | Yes* | Execute SQL (body = raw SQL) |
+| `/status` | GET | Yes* | Health check |
+| `/health` | GET | Yes* | Alias for /status |
+| `/shutdown` | POST | Yes* | Stop server |
+
+*Auth required only if `--token` was specified.
+
+**Example with curl:**
+```bash
+# Get API documentation
+curl http://localhost:8081/help
+
+# Execute SQL query
+curl -X POST http://localhost:8081/query -d "SELECT name, size FROM funcs LIMIT 5"
+
+# With authentication
+curl -X POST http://localhost:8081/query \
+     -H "Authorization: Bearer mysecret" \
+     -d "SELECT * FROM funcs"
+
+# Check status
+curl http://localhost:8081/status
+```
+
+**Response Format (JSON):**
+```json
+{"success": true, "columns": ["name", "size"], "rows": [["main", "500"]], "row_count": 1}
+```
+
+```json
+{"success": false, "error": "no such table: bad_table"}
+```
+
+---
+
+### Raw TCP Server (Legacy)
+
+Binary protocol with length-prefixed JSON. Use only when HTTP is not available.
+
+**Starting the server:**
+```bash
+idasql -s database.i64 --server 13337
+idasql -s database.i64 --server 13337 --token mysecret
+```
+
+**Connecting as client:**
+```bash
+idasql --remote localhost:13337 -q "SELECT name FROM funcs LIMIT 5"
+idasql --remote localhost:13337 -i
+```
 )PROMPT";
 
 } // namespace idasql

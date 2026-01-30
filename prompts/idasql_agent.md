@@ -724,6 +724,59 @@ FROM disasm_v_calls_in_loops;
 | `mnemonic(addr)` | Instruction mnemonic only |
 | `operand(addr, n)` | Operand text (n=0-5) |
 
+### Binary Search
+| Function | Description |
+|----------|-------------|
+| `search_bytes(pattern)` | Find all matches, returns JSON array |
+| `search_bytes(pattern, start, end)` | Search within address range |
+| `search_first(pattern)` | First match address (or NULL) |
+| `search_first(pattern, start, end)` | First match in range |
+
+**Pattern syntax (IDA native):**
+- `"48 8B 05"` - Exact bytes (hex, space-separated)
+- `"48 ? 05"` or `"48 ?? 05"` - `?` = any byte wildcard (whole byte only)
+- `"(01 02 03)"` - Alternatives (match any of these bytes)
+
+**Note:** Unlike Binary Ninja, IDA does NOT support nibble wildcards or regex.
+
+**Example:**
+```sql
+-- Find all matches for a pattern
+SELECT search_bytes('48 8B ? 00');
+
+-- Parse JSON results
+SELECT json_extract(value, '$.address') as addr
+FROM json_each(search_bytes('48 89 ?'))
+LIMIT 10;
+
+-- First match only
+SELECT printf('0x%llX', search_first('CC CC CC'));
+
+-- Search with alternatives
+SELECT search_bytes('E8 (01 02 03 04)');
+```
+
+**Optimization Pattern: Find functions using specific instruction**
+
+To answer "How many functions use RDTSC instruction?" efficiently:
+```sql
+-- Count unique functions containing RDTSC (opcode: 0F 31)
+SELECT COUNT(DISTINCT func_start(json_extract(value, '$.address'))) as count
+FROM json_each(search_bytes('0F 31'))
+WHERE func_start(json_extract(value, '$.address')) IS NOT NULL;
+
+-- List those functions with names
+SELECT DISTINCT
+    func_start(json_extract(value, '$.address')) as func_ea,
+    name_at(func_start(json_extract(value, '$.address'))) as func_name
+FROM json_each(search_bytes('0F 31'))
+WHERE func_start(json_extract(value, '$.address')) IS NOT NULL;
+```
+
+This is **much faster** than scanning all disassembly lines because:
+- `search_bytes()` uses native binary search
+- `func_start()` is O(1) lookup in IDA's function index
+
 ### Names & Functions
 | Function | Description |
 |----------|-------------|
