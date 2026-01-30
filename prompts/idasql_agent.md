@@ -265,6 +265,74 @@ SELECT func_at(func_ea) as name, COUNT(*) as blocks
 FROM blocks GROUP BY func_ea ORDER BY blocks DESC LIMIT 10;
 ```
 
+### Convenience Views
+
+Pre-built views for common xref analysis patterns. These simplify caller/callee queries.
+
+#### callers
+Who calls each function. Use this instead of manual xref JOINs.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `func_addr` | INT | Target function address |
+| `caller_addr` | INT | Xref source address |
+| `caller_name` | TEXT | Calling function name |
+| `caller_func_addr` | INT | Calling function start |
+
+```sql
+-- Who calls function at 0x401000?
+SELECT caller_name, printf('0x%X', caller_addr) as from_addr
+FROM callers WHERE func_addr = 0x401000;
+
+-- Most called functions
+SELECT printf('0x%X', func_addr) as addr, COUNT(*) as callers
+FROM callers GROUP BY func_addr ORDER BY callers DESC LIMIT 10;
+```
+
+#### callees
+What each function calls. Inverse of callers view.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `func_addr` | INT | Calling function address |
+| `func_name` | TEXT | Calling function name |
+| `callee_addr` | INT | Called address |
+| `callee_name` | TEXT | Called function/symbol name |
+
+```sql
+-- What does main call?
+SELECT callee_name, printf('0x%X', callee_addr) as addr
+FROM callees WHERE func_name LIKE '%main%';
+
+-- Functions making most calls
+SELECT func_name, COUNT(*) as call_count
+FROM callees GROUP BY func_addr ORDER BY call_count DESC LIMIT 10;
+```
+
+#### string_refs
+Which functions reference which strings. Great for finding functions by string content.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `string_addr` | INT | String address |
+| `string_value` | TEXT | String content |
+| `string_length` | INT | String length |
+| `ref_addr` | INT | Reference address |
+| `func_addr` | INT | Referencing function |
+| `func_name` | TEXT | Function name |
+
+```sql
+-- Find functions using error strings
+SELECT func_name, string_value
+FROM string_refs
+WHERE string_value LIKE '%error%' OR string_value LIKE '%fail%';
+
+-- Functions with most string references
+SELECT func_name, COUNT(*) as string_count
+FROM string_refs WHERE func_name IS NOT NULL
+GROUP BY func_addr ORDER BY string_count DESC LIMIT 10;
+```
+
 ### Instruction Tables
 
 #### instructions
@@ -723,6 +791,59 @@ FROM disasm_v_calls_in_loops;
 | `bytes_raw(addr, n)` | Raw bytes as BLOB |
 | `mnemonic(addr)` | Instruction mnemonic only |
 | `operand(addr, n)` | Operand text (n=0-5) |
+
+### Binary Search
+| Function | Description |
+|----------|-------------|
+| `search_bytes(pattern)` | Find all matches, returns JSON array |
+| `search_bytes(pattern, start, end)` | Search within address range |
+| `search_first(pattern)` | First match address (or NULL) |
+| `search_first(pattern, start, end)` | First match in range |
+
+**Pattern syntax (IDA native):**
+- `"48 8B 05"` - Exact bytes (hex, space-separated)
+- `"48 ? 05"` or `"48 ?? 05"` - `?` = any byte wildcard (whole byte only)
+- `"(01 02 03)"` - Alternatives (match any of these bytes)
+
+**Note:** Unlike Binary Ninja, IDA does NOT support nibble wildcards or regex.
+
+**Example:**
+```sql
+-- Find all matches for a pattern
+SELECT search_bytes('48 8B ? 00');
+
+-- Parse JSON results
+SELECT json_extract(value, '$.address') as addr
+FROM json_each(search_bytes('48 89 ?'))
+LIMIT 10;
+
+-- First match only
+SELECT printf('0x%llX', search_first('CC CC CC'));
+
+-- Search with alternatives
+SELECT search_bytes('E8 (01 02 03 04)');
+```
+
+**Optimization Pattern: Find functions using specific instruction**
+
+To answer "How many functions use RDTSC instruction?" efficiently:
+```sql
+-- Count unique functions containing RDTSC (opcode: 0F 31)
+SELECT COUNT(DISTINCT func_start(json_extract(value, '$.address'))) as count
+FROM json_each(search_bytes('0F 31'))
+WHERE func_start(json_extract(value, '$.address')) IS NOT NULL;
+
+-- List those functions with names
+SELECT DISTINCT
+    func_start(json_extract(value, '$.address')) as func_ea,
+    name_at(func_start(json_extract(value, '$.address'))) as func_name
+FROM json_each(search_bytes('0F 31'))
+WHERE func_start(json_extract(value, '$.address')) IS NOT NULL;
+```
+
+This is **much faster** than scanning all disassembly lines because:
+- `search_bytes()` uses native binary search
+- `func_start()` is O(1) lookup in IDA's function index
 
 ### Names & Functions
 | Function | Description |
@@ -1865,6 +1986,8 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Wrapper functions | `ctree_v_returns WHERE returns_call_result = 1` |
 | Variable analysis | `ctree_lvars WHERE func_addr = X` |
 | Type information | `types`, `types_members` |
+| Function signatures | `types_func_args` (with type classification) |
+| Functions by return type | `types_func_args WHERE arg_index = -1` |
 | Typedef-aware type queries | `types_func_args` (surface vs resolved) |
 | Hidden pointer types | `types_func_args WHERE is_ptr = 0 AND is_ptr_resolved = 1` |
 | Modify database | `*_live` tables |

@@ -1256,6 +1256,57 @@ struct TableRegistry {
 
         // Table-valued function for entity search
         search::register_jump_entities(db);
+
+        // Create convenience views for common queries
+        create_helper_views(db);
+    }
+
+    void create_helper_views(xsql::Database& db) {
+        // callers view - who calls a function
+        db.exec(R"(
+            CREATE VIEW IF NOT EXISTS callers AS
+            SELECT
+                x.to_ea as func_addr,
+                x.from_ea as caller_addr,
+                f.name as caller_name,
+                f.address as caller_func_addr
+            FROM xrefs x
+            LEFT JOIN funcs f ON x.from_ea >= f.address
+                AND x.from_ea < f.end_ea
+            WHERE x.is_code = 1
+        )");
+
+        // callees view - what does a function call
+        db.exec(R"(
+            CREATE VIEW IF NOT EXISTS callees AS
+            SELECT
+                f.address as func_addr,
+                f.name as func_name,
+                x.to_ea as callee_addr,
+                COALESCE(f2.name, n.name, printf('sub_%X', x.to_ea)) as callee_name
+            FROM funcs f
+            JOIN xrefs x ON x.from_ea >= f.address
+                AND x.from_ea < f.end_ea
+            LEFT JOIN funcs f2 ON x.to_ea = f2.address
+            LEFT JOIN names n ON x.to_ea = n.address
+            WHERE x.is_code = 1
+        )");
+
+        // string_refs view - which functions reference which strings
+        db.exec(R"(
+            CREATE VIEW IF NOT EXISTS string_refs AS
+            SELECT
+                s.address as string_addr,
+                s.content as string_value,
+                s.length as string_length,
+                x.from_ea as ref_addr,
+                f.address as func_addr,
+                f.name as func_name
+            FROM strings s
+            JOIN xrefs x ON x.to_ea = s.address
+            LEFT JOIN funcs f ON x.from_ea >= f.address
+                AND x.from_ea < f.end_ea
+        )");
     }
 
 private:

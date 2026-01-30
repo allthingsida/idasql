@@ -321,14 +321,16 @@ idasql> which imports are related to networking?
 
 See an [example session](examples/agent_session_strings.md) analyzing string references in a binary.
 
-### Requirements
+### Prerequisites for AI Features
 
-The AI agent requires one of the following to be installed and authenticated on your system:
+The AI agent requires one of these CLI tools installed and authenticated:
 
-- **Claude Code** - Anthropic's CLI tool. Install and run `claude` to authenticate.
-- **GitHub Copilot** - Via Copilot CLI.  Install and run `copilot` to authenticate.
+| Provider | CLI Tool | Install | Login |
+|----------|----------|---------|-------|
+| Claude (default) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` | Run `claude`, then `/login` |
+| GitHub Copilot | [Copilot CLI](https://github.com/features/copilot/cli/) | `npm install -g @github/copilot` | Run `copilot`, then `/login` |
 
-The agent uses these tools' authentication - no API keys needed for basic usage.
+**Important:** You must be logged in before using AI features. No API keys needed for basic usage.
 
 ### Provider Configuration
 

@@ -41,6 +41,7 @@
 #include <idasql/metadata.hpp>
 #include <idasql/functions.hpp>
 #include <idasql/disassembly.hpp>
+#include <idasql/search_bytes.hpp>
 
 // Optional: Decompiler (may not be available)
 #ifdef USE_HEXRAYS
@@ -290,6 +291,7 @@ private:
         types_->register_all(db_);
 
         functions::register_sql_functions(db_);
+        search::register_search_bytes(db_);
 
 #ifdef USE_HEXRAYS
         decompiler_ = std::make_unique<decompiler::DecompilerRegistry>();
