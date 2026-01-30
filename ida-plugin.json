@@ -2,7 +2,7 @@
   "IDAMetadataDescriptorVersion": 1,
   "plugin": {
     "name": "IDASQL",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "entryPoint": "idasql_plugin",
     "description": "SQL interface for IDA databases. Query functions, xrefs, strings, types, and more using SQL. Supports local CLI, remote server mode, and natural language queries via Claude.",
     "urls": {

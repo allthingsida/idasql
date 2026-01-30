@@ -223,32 +223,29 @@ jobs:
 
       - name: Prepare release
         run: |
-          mkdir -p release
-          # Plugins
-          cp plugins/idasql_plugin.dll release/ || true
-          cp plugins/idasql_plugin.so release/ || true
-          cp plugins/idasql_plugin.dylib release/ || true
-          # CLI (each in separate directory to avoid name collision)
-          cp cli-windows/idasql.exe release/ || true
-          cp cli-linux/idasql release/idasql-linux || true
-          cp cli-macos/idasql release/idasql-macos || true
-          # Metadata
-          cp ida-plugin.json release/
-          ls -la release/
+          mkdir -p release/plugin
+          mkdir -p release/cli/{windows,linux,macos}
+          # Plugin (flat, IDA-compatible)
+          cp plugins/idasql_plugin.dll release/plugin/ || true
+          cp plugins/idasql_plugin.so release/plugin/ || true
+          cp plugins/idasql_plugin.dylib release/plugin/ || true
+          cp ida-plugin.json release/plugin/
+          # CLI (organized by platform)
+          cp cli-windows/idasql.exe release/cli/windows/ || true
+          cp cli-linux/idasql release/cli/linux/ || true
+          cp cli-macos/idasql release/cli/macos/ || true
+          echo "=== Plugin ===" && ls -la release/plugin/
+          echo "=== CLI ===" && ls -laR release/cli/
 
       - name: Create plugin zip
         run: |
-          cd release
-          zip -9 idasql_plugin-${{ github.ref_name }}.zip \
-            idasql_plugin.dll idasql_plugin.so idasql_plugin.dylib ida-plugin.json
+          cd release/plugin
+          zip -9 ../idasql_plugin-${{ github.ref_name }}.zip *
 
       - name: Create CLI zip
         run: |
-          cd release
-          zip -9 idasql_cli-${{ github.ref_name }}.zip \
-            idasql.exe idasql-linux idasql-macos 2>/dev/null || \
-          zip -9 idasql_cli-${{ github.ref_name }}.zip \
-            idasql.exe idasql-linux || true
+          cd release/cli
+          zip -r9 ../idasql_cli-${{ github.ref_name }}.zip windows linux macos
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -259,10 +256,3 @@ jobs:
           files: |
             release/idasql_plugin-${{ github.ref_name }}.zip
             release/idasql_cli-${{ github.ref_name }}.zip
-            release/idasql_plugin.dll
-            release/idasql_plugin.so
-            release/idasql_plugin.dylib
-            release/idasql.exe
-            release/idasql-linux
-            release/idasql-macos
-            release/ida-plugin.json
