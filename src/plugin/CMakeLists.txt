@@ -6,6 +6,9 @@ ida_add_plugin(idasql_plugin
     SOURCES main.cpp
 )
 
+# Output as idasql.dll (not idasql_plugin.dll)
+set_target_properties(idasql_plugin PROPERTIES OUTPUT_NAME "idasql")
+
 # Include directories and link dependencies
 target_include_directories(idasql_plugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include
