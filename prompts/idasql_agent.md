@@ -62,26 +62,107 @@ The **Hex-Rays decompiler** converts assembly to C-like **pseudocode**:
 
 ---
 
-## CLI Usage
+## Command-Line Interface
 
+IDASQL provides SQL access to IDA databases via command line or as a server.
+
+### Invocation Modes
+
+**1. Single Query (Local)**
 ```bash
-# Single query
 idasql -s database.i64 -q "SELECT * FROM funcs LIMIT 10"
-
-# Execute SQL file
-idasql -s database.i64 -f script.sql
-
-# Interactive mode
-idasql -s database.i64 -i
-
-# Output as JSON
-idasql -s database.i64 -q "SELECT * FROM funcs" --format=json
-
-# Export tables to SQL
-idasql -s database.i64 --export out.sql
+idasql -s database.i64 -c "SELECT COUNT(*) FROM funcs"  # -c is alias for -q
 ```
 
-**Note:** The `-s` flag specifies the IDA database file (`.i64` for 64-bit, `.idb` for 32-bit).
+**2. SQL File Execution**
+```bash
+idasql -s database.i64 -f analysis.sql
+```
+
+**3. Interactive REPL**
+```bash
+idasql -s database.i64 -i
+```
+
+**4. Remote Mode** (connect to running server)
+```bash
+idasql --remote localhost:8080 -q "SELECT * FROM funcs"
+idasql --remote localhost:8080 -i  # Remote interactive
+```
+
+**5. HTTP Server Mode**
+```bash
+idasql -s database.i64 --http 8080
+# Then query via: curl -X POST http://localhost:8080/query -d "SELECT * FROM funcs"
+```
+
+**6. Export Mode**
+```bash
+idasql -s database.i64 --export dump.sql
+idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
+```
+
+### CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `-s <file>` | IDA database file (.idb/.i64) |
+| `--remote <host:port>` | Connect to IDASQL server |
+| `--token <token>` | Auth token for remote/server mode |
+| `-q <sql>` | Execute single SQL query |
+| `-c <sql>` | Alias for -q (Python-style) |
+| `-f <file>` | Execute SQL from file |
+| `-i` | Interactive REPL mode |
+| `-w, --write` | Save database changes on exit |
+| `--export <file>` | Export tables to SQL file |
+| `--export-tables=X` | Tables to export: `*` (all) or `table1,table2,...` |
+| `--http [port]` | Start HTTP REST server (default: 8080) |
+| `--bind <addr>` | Bind address for server (default: 127.0.0.1) |
+| `-h, --help` | Show help |
+
+### REPL Commands
+
+| Command | Description |
+|---------|-------------|
+| `.tables` | List all virtual tables |
+| `.schema [table]` | Show table schema |
+| `.info` | Show database metadata |
+| `.clear` | Clear session |
+| `.quit` / `.exit` | Exit REPL |
+| `.help` | Show available commands |
+
+### Performance Strategy
+
+**Single queries:** Use `-q` directly.
+```bash
+idasql -s database.i64 -q "SELECT COUNT(*) FROM funcs"
+```
+
+**Multiple queries / exploration:** Start a server once, then query as a client.
+
+Opening an IDA database has startup overhead (idalib initialization, auto-analysis). If you plan to run many queries—exploring the database, experimenting with different queries, or iterating on analysis—avoid re-opening the database each time.
+
+**Recommended workflow for iterative analysis:**
+```bash
+# Terminal 1: Start server (opens database once)
+idasql -s database.i64 --http 8080
+
+# Terminal 2: Query repeatedly via remote client (instant responses)
+idasql --remote localhost:8080 -q "SELECT * FROM funcs LIMIT 5"
+idasql --remote localhost:8080 -q "SELECT * FROM strings WHERE content LIKE '%error%'"
+idasql --remote localhost:8080 -q "SELECT name, size FROM funcs ORDER BY size DESC"
+# ... as many queries as needed, no startup cost
+```
+
+Or use interactive mode on the remote connection:
+```bash
+idasql --remote localhost:8080 -i
+idasql> SELECT COUNT(*) FROM funcs;
+idasql> SELECT * FROM xrefs WHERE to_ea = 0x401000;
+idasql> .quit
+```
+
+This approach is significantly faster for iterative analysis since the database remains open and queries go directly through the already-initialized session.
 
 ---
 
@@ -380,25 +461,71 @@ FROM disasm_calls WHERE callee_name LIKE '%malloc%';
 
 ### Database Modification
 
-**Note:** IDASQL currently modifies the database via SQL functions rather than writable virtual tables.
+The following tables support SQL UPDATE and DELETE:
 
-#### Modification Functions
+| Table | UPDATE columns | DELETE |
+|-------|---------------|--------|
+| `funcs` | `name` | No |
+| `names` | `name` | Yes |
+| `comments` | `comment`, `rep_comment` | Yes |
+| `bookmarks` | `description` | Yes |
+| `ctree_lvars` | `name`, `type` | No |
 
+**Examples:**
 ```sql
--- Rename a function or set a name at address
-SELECT set_name(0x401000, 'my_main');
+-- Rename a function
+UPDATE funcs SET name = 'my_main' WHERE address = 0x401000;
 
--- Add a regular comment
-SELECT set_comment(0x401050, 'Check return value');
+-- Rename any named address
+UPDATE names SET name = 'my_global' WHERE address = 0x404000;
 
--- Add a repeatable comment (shows everywhere address is referenced)
-SELECT set_comment(0x404000, 'Global config', 1);
+-- Add/update comment
+UPDATE comments SET comment = 'Check return value' WHERE address = 0x401050;
 
--- Rename a local variable in decompiled code
-SELECT rename_lvar(0x401000, 'v1', 'buffer_size');
+-- Add repeatable comment
+UPDATE comments SET rep_comment = 'Global config' WHERE address = 0x404000;
+
+-- Delete a name
+DELETE FROM names WHERE address = 0x401000;
 ```
 
-**Future:** Live virtual tables (`funcs_live`, `names_live`, `comments_live`) with UPDATE/DELETE support are planned but not yet implemented.
+**Decompiler local variables (requires Hex-Rays):**
+```sql
+-- Rename a local variable
+UPDATE ctree_lvars SET name = 'buffer_size'
+WHERE func_addr = 0x401000 AND name = 'v1';
+
+-- Change variable type
+UPDATE ctree_lvars SET type = 'char *'
+WHERE func_addr = 0x401000 AND idx = 2;
+```
+
+### Persisting Changes
+
+Changes to the database (UPDATE, set_name, etc.) are held in memory by default.
+
+**To persist changes:**
+```sql
+-- Explicit save (recommended for scripts)
+SELECT save_database();  -- Returns 1 on success, 0 on failure
+```
+
+**CLI flag for auto-save:**
+```bash
+# Auto-save on exit (use with caution)
+idasql -s db.i64 -q "UPDATE funcs SET name='main' WHERE address=0x401000" -w
+```
+
+**Best practice for batch operations:**
+```sql
+-- Make multiple changes
+UPDATE funcs SET name = 'init_config' WHERE address = 0x401000;
+UPDATE names SET name = 'g_settings' WHERE address = 0x402000;
+-- Persist once at the end
+SELECT save_database();
+```
+
+> Without `save_database()` or `-w`, changes are lost when the session ends.
 
 ### Decompiler Tables (Hex-Rays Required)
 
