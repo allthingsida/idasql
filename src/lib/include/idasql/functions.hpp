@@ -38,6 +38,9 @@
  *   - gen_cfg_dot_file(address, path) - Generate CFG DOT to file
  *   - gen_schema_dot()              - Generate schema diagram as DOT
  *
+ * Database Persistence:
+ *   - save_database()               - Persist changes to .i64 file (returns 1/0)
+ *
  * Introspection (standard SQLite):
  *   - SELECT * FROM sqlite_master WHERE type='table'
  *   - PRAGMA table_info(tablename)
@@ -1172,7 +1175,7 @@ static void sql_rename_lvar(sqlite3_context* ctx, int argc, sqlite3_value** argv
     lvar_saved_info_t lsi;
     lsi.ll = lv;  // Copy lvar_locator_t
     lsi.name = new_name;
-    lsi.flags = LVINF_NAME;
+    lsi.flags = 0;  // No special LVINF_* flags needed
 
     bool success2 = modify_user_lvar_info(func_addr, MLI_NAME, lsi);
     result << ",\"modify_user_lvar_info_result\":" << (success2 ? "true" : "false");
@@ -1497,6 +1500,17 @@ static void sql_string_count(sqlite3_context* ctx, int /*argc*/, sqlite3_value**
 }
 
 // ============================================================================
+// Database Persistence
+// ============================================================================
+
+// save_database() - Persist changes to the IDA database file
+// Returns: 1 on success, 0 on failure
+static void sql_save_database(sqlite3_context* ctx, int /*argc*/, sqlite3_value** /*argv*/) {
+    bool ok = save_database();  // IDA API: save to current file with default flags
+    sqlite3_result_int(ctx, ok ? 1 : 0);
+}
+
+// ============================================================================
 // Registration
 // ============================================================================
 
@@ -1578,6 +1592,9 @@ inline bool register_sql_functions(xsql::Database& db) {
     sqlite3_create_function(db.handle(), "rebuild_strings", 1, SQLITE_UTF8, nullptr, sql_rebuild_strings, nullptr, nullptr);
     sqlite3_create_function(db.handle(), "rebuild_strings", 2, SQLITE_UTF8, nullptr, sql_rebuild_strings, nullptr, nullptr);
     sqlite3_create_function(db.handle(), "string_count", 0, SQLITE_UTF8, nullptr, sql_string_count, nullptr, nullptr);
+
+    // Database persistence
+    sqlite3_create_function(db.handle(), "save_database", 0, SQLITE_UTF8, nullptr, sql_save_database, nullptr, nullptr);
 
     return true;
 }

@@ -1105,6 +1105,7 @@ static void print_usage() {
               << "  -c <sql>             Execute single SQL query (alias for -q)\n"
               << "  -f <file>            Execute SQL from file\n"
               << "  -i                   Interactive REPL mode\n"
+              << "  -w, --write          Save database on exit (persist changes)\n"
               << "  --export <file>      Export tables to SQL file (local mode only)\n"
               << "  --export-tables=X    Tables to export: * (all, default) or table1,table2,...\n"
 #ifdef IDASQL_HAS_HTTP
@@ -1163,6 +1164,7 @@ int main(int argc, char* argv[]) {
     std::string auth_token;           // --token for remote mode
     std::string bind_addr;            // --bind for HTTP/MCP mode
     bool interactive = false;
+    bool write_mode = false;          // -w/--write to save on exit
     bool http_mode = false;
     int http_port = 8080;
     bool mcp_mode = false;
@@ -1188,6 +1190,8 @@ int main(int argc, char* argv[]) {
             sql_file = argv[++i];
         } else if (strcmp(argv[i], "-i") == 0) {
             interactive = true;
+        } else if (strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--write") == 0) {
+            write_mode = true;
         } else if (strcmp(argv[i], "--export") == 0 && i + 1 < argc) {
             export_file = argv[++i];
         } else if (strncmp(argv[i], "--export-tables=", 16) == 0) {
@@ -1464,6 +1468,15 @@ int main(int argc, char* argv[]) {
 #else
         run_repl(db);
 #endif
+    }
+
+    // Save database if -w/--write was specified
+    if (write_mode) {
+        if (save_database()) {
+            std::cerr << "Database saved.\n";
+        } else {
+            std::cerr << "Warning: Failed to save database.\n";
+        }
     }
 
     db.close();

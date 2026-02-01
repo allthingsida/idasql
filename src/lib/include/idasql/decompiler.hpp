@@ -967,6 +967,75 @@ inline VTableDef define_pseudocode() {
         .build();
 }
 
+// Helper: Rename lvar by func_addr and lvar index
+inline bool rename_lvar_at(ea_t func_addr, int lvar_idx, const char* new_name) {
+    if (!hexrays_available())
+        return false;
+
+    func_t* f = get_func(func_addr);
+    if (!f)
+        return false;
+
+    hexrays_failure_t hf;
+    cfuncptr_t cfunc = decompile(f, &hf);
+    if (!cfunc)
+        return false;
+
+    lvars_t* lvars = cfunc->get_lvars();
+    if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size())
+        return false;
+
+    lvar_t& lv = (*lvars)[lvar_idx];
+
+    // Use modify_user_lvar_info to persist the name change
+    lvar_saved_info_t lsi;
+    lsi.ll = lv;  // Copy lvar_locator_t
+    lsi.name = new_name;
+    lsi.flags = 0;  // No special flags needed
+
+    return modify_user_lvar_info(func_addr, MLI_NAME, lsi);
+}
+
+// Helper: Set lvar type by func_addr and lvar index
+inline bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
+    if (!hexrays_available())
+        return false;
+
+    func_t* f = get_func(func_addr);
+    if (!f)
+        return false;
+
+    hexrays_failure_t hf;
+    cfuncptr_t cfunc = decompile(f, &hf);
+    if (!cfunc)
+        return false;
+
+    lvars_t* lvars = cfunc->get_lvars();
+    if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size())
+        return false;
+
+    lvar_t& lv = (*lvars)[lvar_idx];
+
+    // Parse type string - try named type first, then parse as declaration
+    tinfo_t tif;
+    if (!tif.get_named_type(nullptr, type_str)) {
+        // Use parse_decl for C declaration parsing
+        qstring decl;
+        decl.sprnt("%s __x;", type_str);
+        qstring out_name;
+        if (!parse_decl(&tif, &out_name, nullptr, decl.c_str(), PT_SIL))
+            return false;
+    }
+
+    // Use modify_user_lvar_info to persist the type change
+    lvar_saved_info_t lsi;
+    lsi.ll = lv;  // Copy lvar_locator_t
+    lsi.type = tif;
+    lsi.flags = 0;  // No special flags needed
+
+    return modify_user_lvar_info(func_addr, MLI_TYPE, lsi);
+}
+
 inline VTableDef define_ctree_lvars() {
     return table("ctree_lvars")
         .count([]() { LvarsCache::rebuild(); return LvarsCache::get().size(); })
@@ -976,12 +1045,44 @@ inline VTableDef define_ctree_lvars() {
         .column_int("idx", [](size_t i) -> int {
             auto& c = LvarsCache::get(); return i < c.size() ? c[i].idx : 0;
         })
-        .column_text("name", [](size_t i) -> std::string {
-            auto& c = LvarsCache::get(); return i < c.size() ? c[i].name : "";
-        })
-        .column_text("type", [](size_t i) -> std::string {
-            auto& c = LvarsCache::get(); return i < c.size() ? c[i].type : "";
-        })
+        .column_text_rw("name",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& c = LvarsCache::get();
+                return i < c.size() ? c[i].name : "";
+            },
+            // Setter - rename lvar
+            [](size_t i, const char* new_name) -> bool {
+                auto& c = LvarsCache::get();
+                if (i >= c.size()) return false;
+                ea_t func_addr = c[i].func_addr;
+                int idx = c[i].idx;
+                bool ok = rename_lvar_at(func_addr, idx, new_name);
+                if (ok) {
+                    // Update cache entry
+                    c[i].name = new_name;
+                }
+                return ok;
+            })
+        .column_text_rw("type",
+            // Getter
+            [](size_t i) -> std::string {
+                auto& c = LvarsCache::get();
+                return i < c.size() ? c[i].type : "";
+            },
+            // Setter - change lvar type
+            [](size_t i, const char* new_type) -> bool {
+                auto& c = LvarsCache::get();
+                if (i >= c.size()) return false;
+                ea_t func_addr = c[i].func_addr;
+                int idx = c[i].idx;
+                bool ok = set_lvar_type_at(func_addr, idx, new_type);
+                if (ok) {
+                    // Update cache entry
+                    c[i].type = new_type;
+                }
+                return ok;
+            })
         .column_int("size", [](size_t i) -> int {
             auto& c = LvarsCache::get(); return i < c.size() ? c[i].size : 0;
         })
