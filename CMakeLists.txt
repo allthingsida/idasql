@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+include(FetchContent)
+
 # Output directories (only set if building standalone)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -35,28 +37,20 @@ endif()
 # ============================================================================
 
 if(TARGET xsql::xsql)
-    # Part of monorepo - already available via add_subdirectory
+    # Monorepo: already available from parent
     message(STATUS "idasql: Using xsql::xsql from parent project")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../libxsql/CMakeLists.txt")
+    # Monorepo: sibling directory (private test infrastructure)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
+    message(STATUS "idasql: Added libxsql from sibling directory")
 else()
-    # Standalone build - try find_package first, then fallback to sibling directory
-    find_package(xsql QUIET)
-    if(xsql_FOUND)
-        message(STATUS "idasql: Using xsql::xsql via find_package")
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../libxsql/CMakeLists.txt")
-        # Monorepo: sibling directory
-        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
-        message(STATUS "idasql: Added libxsql from sibling directory")
-    elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/libxsql/CMakeLists.txt")
-        # Standalone: submodule in external/
-        add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/external/libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
-        message(STATUS "idasql: Added libxsql from external/libxsql submodule")
-    else()
-        message(FATAL_ERROR "libxsql not found. Either:\n"
-            "  1. Build as part of xsql monorepo\n"
-            "  2. Set xsql_DIR to the libxsql build directory\n"
-            "  3. Install libxsql and ensure it's in CMAKE_PREFIX_PATH\n"
-            "  4. Initialize submodule: git submodule update --init external/libxsql")
-    endif()
+    # Standalone: FetchContent from GitHub
+    message(STATUS "idasql: Fetching libxsql from GitHub...")
+    FetchContent_Declare(libxsql
+        GIT_REPOSITORY https://github.com/0xeb/libxsql.git
+        GIT_TAG        main
+    )
+    FetchContent_MakeAvailable(libxsql)
 endif()
 
 # Include directories
@@ -81,12 +75,20 @@ option(IDASQL_WITH_AI_AGENT "Build with AI agent support (libagents)" ON)
 if(IDASQL_WITH_AI_AGENT)
     message(STATUS "idasql: Building with AI agent support via libagents")
 
-    # Add libagents as subdirectory (Claude only for now)
+    # libagents build options
     set(LIBAGENTS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(LIBAGENTS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(LIBAGENTS_BUILD_CLI OFF CACHE BOOL "" FORCE)
     set(LIBAGENTS_BUILD_COPILOT OFF CACHE BOOL "" FORCE)
-    add_subdirectory(external/libagents)
+
+    # FetchContent from GitHub (with recursive submodules for fastmcpp, SDKs)
+    message(STATUS "idasql: Fetching libagents from GitHub...")
+    FetchContent_Declare(libagents
+        GIT_REPOSITORY https://github.com/0xeb/libagents.git
+        GIT_TAG        main
+        GIT_SUBMODULES_RECURSE TRUE
+    )
+    FetchContent_MakeAvailable(libagents)
 
     # Generate prompt header if needed (conditional on source file age)
     find_package(Python3 COMPONENTS Interpreter)
