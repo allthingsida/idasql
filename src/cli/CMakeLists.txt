@@ -15,6 +15,13 @@ target_compile_definitions(idasql_cli PRIVATE USE_IDA_SDK)
 # Output name: idasql (not idasql_cli)
 set_target_properties(idasql_cli PROPERTIES OUTPUT_NAME "idasql")
 
+# Add Windows manifest for UTF-8 support (Windows 10 1903+)
+if(WIN32)
+    target_sources(idasql_cli PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/idasql.manifest
+    )
+endif()
+
 # Platform-specific settings
 if(MSVC)
     file(TO_NATIVE_PATH "${IDABIN}" IDABIN_NATIVE)
@@ -44,18 +51,20 @@ endif()
 if(IDASQL_WITH_AI_AGENT)
     target_sources(idasql_cli PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common/ai_agent.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common/mcp_server.cpp
     )
     target_include_directories(idasql_cli PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../external/libagents/external/fastmcpp/include
     )
-    target_link_libraries(idasql_cli PRIVATE libagents)
+    target_link_libraries(idasql_cli PRIVATE libagents fastmcpp_core)
     target_compile_definitions(idasql_cli PRIVATE IDASQL_HAS_AI_AGENT)
 
     if(TARGET generate_prompt)
         add_dependencies(idasql_cli generate_prompt)
     endif()
 
-    message(STATUS "idasql_cli: AI agent support enabled")
+    message(STATUS "idasql_cli: AI agent support enabled (with MCP server)")
 endif()
 
 # HTTP server support

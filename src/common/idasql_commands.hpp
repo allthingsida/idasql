@@ -32,6 +32,11 @@ struct CommandCallbacks {
     std::function<std::string(const std::string&)> get_schema;  // Return schema for table
     std::function<std::string()> get_info;        // Return database info
     std::function<std::string()> clear_session;   // Clear/reset session (agent, UI, etc.)
+
+    // MCP server callbacks (optional - plugin only)
+    std::function<std::string()> mcp_status;      // Get MCP status
+    std::function<std::string()> mcp_start;       // Start MCP server
+    std::function<std::string()> mcp_stop;        // Stop MCP server
 };
 
 /**
@@ -86,6 +91,14 @@ inline CommandResult handle_command(
                  "  .clear          Clear/reset session\n"
                  "  .quit / .exit   Exit\n"
                  "  .help           Show this help\n"
+#ifdef IDASQL_HAS_AI_AGENT
+                 "\n"
+                 "MCP Server:\n"
+                 "  .mcp            Show status or start if not running\n"
+                 "  .mcp start      Start MCP server\n"
+                 "  .mcp stop       Stop MCP server\n"
+                 "  .mcp help       Show MCP help\n"
+#endif
                  "\n"
                  "SQL:\n"
                  "  SELECT * FROM funcs LIMIT 10;\n"
@@ -103,6 +116,60 @@ inline CommandResult handle_command(
                  "  What imports does this binary use?\n"
 #endif
                  ;
+        return CommandResult::HANDLED;
+    }
+
+    // .mcp commands (MCP server control - plugin only)
+    if (input.rfind(".mcp", 0) == 0) {
+#ifdef IDASQL_HAS_AI_AGENT
+        std::string subargs = input.length() > 4 ? input.substr(4) : "";
+        // Trim leading whitespace
+        size_t start = subargs.find_first_not_of(" \t");
+        if (start != std::string::npos)
+            subargs = subargs.substr(start);
+
+        if (subargs.empty()) {
+            // .mcp - show status, start if not running
+            if (callbacks.mcp_status) {
+                output = callbacks.mcp_status();
+            } else {
+                output = "MCP server not available (plugin mode only)";
+            }
+        }
+        else if (subargs == "start") {
+            if (callbacks.mcp_start) {
+                output = callbacks.mcp_start();
+            } else {
+                output = "MCP server not available (plugin mode only)";
+            }
+        }
+        else if (subargs == "stop") {
+            if (callbacks.mcp_stop) {
+                output = callbacks.mcp_stop();
+            } else {
+                output = "MCP server not available (plugin mode only)";
+            }
+        }
+        else if (subargs == "help") {
+            output = "MCP Server Commands:\n"
+                     "  .mcp            Show status, start if not running\n"
+                     "  .mcp start      Start MCP server on random port\n"
+                     "  .mcp stop       Stop MCP server\n"
+                     "  .mcp help       Show this help\n"
+                     "\n"
+                     "The MCP server exposes two tools:\n"
+                     "  idasql_query  - Execute SQL query directly\n"
+                     "  idasql_agent  - Ask natural language question (AI-powered)\n"
+                     "\n"
+                     "Connect with Claude Desktop by adding to config:\n"
+                     "  {\"mcpServers\": {\"idasql\": {\"url\": \"http://127.0.0.1:<port>/sse\"}}}\n";
+        }
+        else {
+            output = "Unknown MCP command: " + subargs + "\nUse '.mcp help' for available commands.";
+        }
+#else
+        output = "MCP server requires AI agent support. Rebuild with -DIDASQL_WITH_AI_AGENT=ON";
+#endif
         return CommandResult::HANDLED;
     }
 

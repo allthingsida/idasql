@@ -39,16 +39,18 @@ target_compile_definitions(idasql_plugin PRIVATE USE_HEXRAYS)
 # ============================================================================
 
 if(IDASQL_WITH_AI_AGENT)
-    # Add ai_agent source files
+    # Add ai_agent and mcp_server source files
     target_sources(idasql_plugin PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common/ai_agent.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common/mcp_server.cpp
     )
     target_include_directories(idasql_plugin PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../external/libagents/external/fastmcpp/include
     )
 
-    # Link against libagents (already available from parent)
-    target_link_libraries(idasql_plugin PRIVATE libagents)
+    # Link against libagents and fastmcpp
+    target_link_libraries(idasql_plugin PRIVATE libagents fastmcpp_core)
 
     # Define the feature flag
     target_compile_definitions(idasql_plugin PRIVATE IDASQL_HAS_AI_AGENT)

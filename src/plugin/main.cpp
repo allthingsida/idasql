@@ -82,6 +82,12 @@
 #include "../common/plugin_control.hpp"
 #include "../common/json_utils.hpp"
 
+// MCP server (when AI agent is enabled)
+#ifdef IDASQL_HAS_AI_AGENT
+#include "../common/mcp_server.hpp"
+#include "../common/ai_agent.hpp"
+#endif
+
 //=============================================================================
 // JSON Protocol Helpers
 //=============================================================================
@@ -509,6 +515,11 @@ struct idasql_plugmod_t : public plugmod_t
     idasql_server_t server_;
     std::unique_ptr<idasql::IdasqlCLI> cli_;
 
+#ifdef IDASQL_HAS_AI_AGENT
+    idasql::IDAMCPServer mcp_server_;
+    std::unique_ptr<idasql::AIAgent> mcp_agent_;  // AI agent for MCP
+#endif
+
     idasql_plugmod_t()
     {
         engine_ = std::make_unique<idasql::QueryEngine>();
@@ -552,18 +563,45 @@ struct idasql_plugmod_t : public plugmod_t
                 return std::move(req.result);
             });
 
-            // Create CLI with execute_sync wrapper for thread safety
-            cli_ = std::make_unique<idasql::IdasqlCLI>(
-                [this](const std::string& sql) -> std::string {
-                    query_request_t req(engine_.get(), sql);
-                    execute_sync(req, MFF_WRITE);
-                    if (req.result.success) {
-                        return req.result.to_string();
-                    } else {
-                        return "Error: " + req.result.error;
-                    }
+            // SQL executor that uses execute_sync for thread safety
+            auto sql_executor = [this](const std::string& sql) -> std::string {
+                query_request_t req(engine_.get(), sql);
+                execute_sync(req, MFF_WRITE);
+                if (req.result.success) {
+                    return req.result.to_string();
+                } else {
+                    return "Error: " + req.result.error;
                 }
-            );
+            };
+
+            // Create CLI with execute_sync wrapper for thread safety
+            cli_ = std::make_unique<idasql::IdasqlCLI>(sql_executor);
+
+#ifdef IDASQL_HAS_AI_AGENT
+            // Setup MCP callbacks
+            cli_->session().callbacks().mcp_status = [this]() -> std::string {
+                if (mcp_server_.is_running()) {
+                    return idasql::format_mcp_status(mcp_server_.port(), true);
+                } else {
+                    // Auto-start if not running
+                    return start_mcp_server();
+                }
+            };
+
+            cli_->session().callbacks().mcp_start = [this]() -> std::string {
+                return start_mcp_server();
+            };
+
+            cli_->session().callbacks().mcp_stop = [this]() -> std::string {
+                if (mcp_server_.is_running()) {
+                    mcp_server_.stop();
+                    mcp_agent_.reset();
+                    return "MCP server stopped";
+                } else {
+                    return "MCP server not running";
+                }
+            };
+#endif
 
             // Auto-install CLI so it's available immediately
             // User can still toggle it off with run(23) if desired
@@ -573,8 +611,54 @@ struct idasql_plugmod_t : public plugmod_t
         }
     }
 
+#ifdef IDASQL_HAS_AI_AGENT
+    std::string start_mcp_server()
+    {
+        if (mcp_server_.is_running()) {
+            return idasql::format_mcp_status(mcp_server_.port(), true);
+        }
+
+        // SQL executor that uses execute_sync for thread safety
+        auto sql_executor = [this](const std::string& sql) -> std::string {
+            query_request_t req(engine_.get(), sql);
+            execute_sync(req, MFF_WRITE);
+            if (req.result.success) {
+                return req.result.to_string();
+            } else {
+                return "Error: " + req.result.error;
+            }
+        };
+
+        // Create AI agent for MCP (runs on MCP thread, SQL via execute_sync)
+        mcp_agent_ = std::make_unique<idasql::AIAgent>(sql_executor);
+        mcp_agent_->start();
+
+        // MCP ask callback - agent runs on MCP thread
+        idasql::AskCallback ask_cb = [this](const std::string& question) -> std::string {
+            if (!mcp_agent_) return "Error: AI agent not available";
+            return mcp_agent_->query(question);
+        };
+
+        // Start MCP server with random port (port=0)
+        int port = mcp_server_.start(0, sql_executor, ask_cb);
+        if (port <= 0) {
+            mcp_agent_.reset();
+            return "Error: Failed to start MCP server";
+        }
+
+        return idasql::format_mcp_info(port, true);
+    }
+#endif
+
     ~idasql_plugmod_t()
     {
+#ifdef IDASQL_HAS_AI_AGENT
+        // Stop MCP server before destroying engine
+        if (mcp_server_.is_running()) {
+            mcp_server_.stop();
+        }
+        mcp_agent_.reset();
+#endif
         if (cli_) cli_->uninstall();
         server_.stop();
         engine_.reset();
