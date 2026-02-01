@@ -61,11 +61,14 @@
 #ifdef IDASQL_HAS_AI_AGENT
 #include "../common/ai_agent.hpp"
 #include "../common/idasql_commands.hpp"
+#include "../common/mcp_server.hpp"
 
 // Global signal handler state
 namespace {
     std::atomic<bool> g_quit_requested{false};
     idasql::AIAgent* g_agent = nullptr;
+    std::unique_ptr<idasql::IDAMCPServer> g_mcp_server;
+    std::unique_ptr<idasql::AIAgent> g_mcp_agent;
 }
 
 extern "C" void signal_handler(int sig) {
@@ -581,6 +584,80 @@ static void run_repl(idasql::Database& db) {
                 return "Session cleared";
             };
 
+            // MCP server callbacks
+            callbacks.mcp_status = []() -> std::string {
+                if (g_mcp_server && g_mcp_server->is_running()) {
+                    return idasql::format_mcp_status(g_mcp_server->port(), true);
+                } else {
+                    return "MCP server not running\nUse '.mcp start' to start\n";
+                }
+            };
+
+            callbacks.mcp_start = [&db, &agent]() -> std::string {
+                if (g_mcp_server && g_mcp_server->is_running()) {
+                    return idasql::format_mcp_status(g_mcp_server->port(), true);
+                }
+
+                // Create MCP server if needed
+                if (!g_mcp_server) {
+                    g_mcp_server = std::make_unique<idasql::IDAMCPServer>();
+                }
+
+                // SQL executor - will be called on main thread via wait()
+                idasql::QueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
+                    auto result = db.query(sql);
+                    if (result.success) {
+                        return result.to_string();
+                    }
+                    return "Error: " + result.error;
+                };
+
+                // Create MCP agent for natural language queries
+                g_mcp_agent = std::make_unique<idasql::AIAgent>(sql_cb);
+                g_mcp_agent->start();
+
+                idasql::AskCallback ask_cb = [](const std::string& question) -> std::string {
+                    if (!g_mcp_agent) return "Error: AI agent not available";
+                    return g_mcp_agent->query(question);
+                };
+
+                // Start with use_queue=true for CLI mode (main thread execution)
+                int port = g_mcp_server->start(0, sql_cb, ask_cb, "127.0.0.1", true);
+                if (port <= 0) {
+                    g_mcp_agent.reset();
+                    return "Error: Failed to start MCP server\n";
+                }
+
+                // Print info
+                std::cout << idasql::format_mcp_info(port, true);
+                std::cout << "Press Ctrl+C to stop MCP server and return to REPL...\n\n";
+                std::cout.flush();
+
+                // Set interrupt check to stop on Ctrl+C
+                g_mcp_server->set_interrupt_check([]() {
+                    return g_quit_requested.load();
+                });
+
+                // Enter wait loop - processes MCP commands on main thread
+                // This blocks until Ctrl+C or .mcp stop via another client
+                g_mcp_server->run_until_stopped();
+
+                // Cleanup
+                g_mcp_agent.reset();
+                g_quit_requested.store(false);  // Reset for continued REPL use
+
+                return "MCP server stopped. Returning to REPL.\n";
+            };
+
+            callbacks.mcp_stop = []() -> std::string {
+                if (g_mcp_server && g_mcp_server->is_running()) {
+                    g_mcp_server->stop();
+                    g_mcp_agent.reset();
+                    return "MCP server stopped\n";
+                }
+                return "MCP server not running\n";
+            };
+
             std::string output;
             auto result = idasql::handle_command(line, callbacks, output);
 
@@ -1032,7 +1109,11 @@ static void print_usage() {
               << "  --export-tables=X    Tables to export: * (all, default) or table1,table2,...\n"
 #ifdef IDASQL_HAS_HTTP
               << "  --http [port]        Start HTTP REST server (default: 8080, local mode only)\n"
-              << "  --bind <addr>        Bind address for HTTP server (default: 127.0.0.1)\n"
+              << "  --bind <addr>        Bind address for HTTP/MCP server (default: 127.0.0.1)\n"
+#endif
+#ifdef IDASQL_HAS_AI_AGENT
+              << "  --mcp [port]         Start MCP server (default: random port, use in -i mode)\n"
+              << "                       Or use .mcp start in interactive mode\n"
 #endif
 #ifdef IDASQL_HAS_AI_AGENT
               << "  --prompt <text>      Natural language query (uses AI agent)\n"
@@ -1080,10 +1161,12 @@ int main(int argc, char* argv[]) {
     std::string export_tables = "*";  // Default: all tables
     std::string remote_spec;          // host:port for remote mode
     std::string auth_token;           // --token for remote mode
-    std::string bind_addr;            // --bind for HTTP mode
+    std::string bind_addr;            // --bind for HTTP/MCP mode
     bool interactive = false;
     bool http_mode = false;
     int http_port = 8080;
+    bool mcp_mode = false;
+    int mcp_port = 0;                 // 0 = random port
 #ifdef IDASQL_HAS_AI_AGENT
     std::string nl_prompt;            // --prompt for natural language
     bool agent_mode = false;          // --agent for interactive mode
@@ -1138,6 +1221,11 @@ int main(int argc, char* argv[]) {
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 http_port = std::stoi(argv[++i]);
             }
+        } else if (strcmp(argv[i], "--mcp") == 0) {
+            mcp_mode = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                mcp_port = std::stoi(argv[++i]);
+            }
         } else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) {
             bind_addr = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -1165,12 +1253,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    bool has_action = !query.empty() || !sql_file.empty() || interactive || !export_file.empty() || http_mode;
+    bool has_action = !query.empty() || !sql_file.empty() || interactive || !export_file.empty() || http_mode || mcp_mode;
 #ifdef IDASQL_HAS_AI_AGENT
     has_action = has_action || !nl_prompt.empty();
 #endif
     if (!has_action) {
-        std::cerr << "Error: Specify -q, -c, -f, -i, --export, --http"
+        std::cerr << "Error: Specify -q, -c, -f, -i, --export, --http, --mcp"
 #ifdef IDASQL_HAS_AI_AGENT
                   << ", or --prompt"
 #endif
@@ -1240,6 +1328,70 @@ int main(int argc, char* argv[]) {
 #else
     if (http_mode) {
         std::cerr << "Error: HTTP mode not available. Rebuild with -DIDASQL_WITH_HTTP=ON\n";
+        db.close();
+        return 1;
+    }
+#endif
+
+    // MCP server mode (standalone, not interactive REPL)
+#ifdef IDASQL_HAS_AI_AGENT
+    if (mcp_mode) {
+        // SQL executor - will be called on main thread via wait()
+        idasql::QueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
+            auto result = db.query(sql);
+            if (result.success) {
+                return result.to_string();
+            }
+            return "Error: " + result.error;
+        };
+
+        // Create MCP agent for natural language queries
+        auto mcp_agent = std::make_unique<idasql::AIAgent>(sql_cb);
+        mcp_agent->start();
+
+        idasql::AskCallback ask_cb = [&mcp_agent](const std::string& question) -> std::string {
+            if (!mcp_agent) return "Error: AI agent not available";
+            return mcp_agent->query(question);
+        };
+
+        // Create and start MCP server with use_queue=true
+        idasql::IDAMCPServer mcp_server;
+        int port = mcp_server.start(mcp_port, sql_cb, ask_cb,
+                                    bind_addr.empty() ? "127.0.0.1" : bind_addr, true);
+        if (port <= 0) {
+            std::cerr << "Error: Failed to start MCP server\n";
+            db.close();
+            return 1;
+        }
+
+        std::cout << idasql::format_mcp_info(port, true);
+        std::cout << "Press Ctrl+C to stop...\n\n";
+        std::cout.flush();
+
+        // Set up signal handler
+        g_quit_requested.store(false);
+        std::signal(SIGINT, signal_handler);
+#ifdef _WIN32
+        std::signal(SIGBREAK, signal_handler);
+#endif
+
+        // Set interrupt check
+        mcp_server.set_interrupt_check([]() {
+            return g_quit_requested.load();
+        });
+
+        // Enter wait loop - processes MCP commands on main thread
+        mcp_server.run_until_stopped();
+
+        std::signal(SIGINT, SIG_DFL);
+        mcp_agent->stop();
+        std::cout << "\nMCP server stopped.\n";
+        db.close();
+        return 0;
+    }
+#else
+    if (mcp_mode) {
+        std::cerr << "Error: MCP mode not available. Rebuild with -DIDASQL_WITH_AI_AGENT=ON\n";
         db.close();
         return 1;
     }

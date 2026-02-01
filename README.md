@@ -408,6 +408,54 @@ idasql --remote localhost:13337 --token <token> -q "SELECT * FROM funcs LIMIT 5"
 idasql --remote localhost:13337 --token <token> -i  # Interactive
 ```
 
+## HTTP REST API
+
+Stateless HTTP server for simple integration. No protocol overhead.
+
+```bash
+idasql -s database.i64 --http 8081
+```
+
+```bash
+curl http://localhost:8081/status
+curl -X POST http://localhost:8081/query -d "SELECT name FROM funcs LIMIT 5"
+```
+
+For multiple databases, run separate instances:
+
+```bash
+idasql -s malware.i64 --http 8081
+idasql -s kernel.i64 --http 8082
+```
+
+Endpoints: `/status`, `/help`, `/query`, `/shutdown`
+
+## MCP Server
+
+For MCP-compatible clients (Claude Desktop, etc.):
+
+```bash
+# Standalone mode
+idasql -s database.i64 --mcp
+idasql -s database.i64 --mcp 9500  # specific port
+
+# Or in interactive mode
+idasql -s database.i64 -i
+.mcp start
+```
+
+Configure your MCP client:
+
+```json
+{
+  "mcpServers": {
+    "idasql": { "url": "http://127.0.0.1:<port>/sse" }
+  }
+}
+```
+
+Tools: `idasql_query` (direct SQL), `idasql_agent` (natural language)
+
 ## Integration with Coding Agents
 
 The CLI is designed for integration with coding agents (Claude Code, Cursor, Aider, Cline, etc.). Agents can query IDA databases directly without writing IDAPython or understanding IDA's API.
