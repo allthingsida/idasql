@@ -1,6 +1,5 @@
 # Auto detect text files and normalize line endings to LF
 * text=auto eol=lf
-
 # Explicit text files
 *.cpp text eol=lf
 *.hpp text eol=lf
@@ -13,7 +12,6 @@
 *.py text eol=lf
 *.sh text eol=lf
 CMakeLists.txt text eol=lf
-
 # Binary files
 *.exe binary
 *.dll binary

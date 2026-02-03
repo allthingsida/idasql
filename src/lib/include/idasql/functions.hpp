@@ -51,10 +51,18 @@
 
 #include <sqlite3.h>
 #include <xsql/database.hpp>
+#include <xsql/json.hpp>
 #include <string>
 #include <sstream>
 #include <iomanip>
 #include <vector>
+
+// macOS: Undefine Mach kernel types before IDA headers
+// (system headers define processor_t and token_t as typedefs)
+#ifdef __APPLE__
+#undef processor_t
+#undef token_t
+#endif
 
 // IDA SDK headers (order matters)
 #include <ida.hpp>
@@ -73,10 +81,9 @@
 #include <strlist.hpp>  // String list functions
 #include <nalt.hpp>     // String type constants
 
-// Hex-Rays decompiler (optional)
-#ifdef HAS_HEXRAYS
+// Hex-Rays decompiler - always included, runtime detection
 #include <hexrays.hpp>
-#endif
+#include <idasql/decompiler.hpp>  // For hexrays_available()
 
 namespace idasql {
 namespace functions {
@@ -356,19 +363,13 @@ static void sql_xrefs_to(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
 
     ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
 
-    std::ostringstream json;
-    json << "[";
-    bool first = true;
-
+    xsql::json arr = xsql::json::array();
     xrefblk_t xb;
     for (bool ok = xb.first_to(ea, XREF_ALL); ok; ok = xb.next_to()) {
-        if (!first) json << ",";
-        first = false;
-        json << "{\"from\":" << xb.from << ",\"type\":" << static_cast<int>(xb.type) << "}";
+        arr.push_back({{"from", xb.from}, {"type", static_cast<int>(xb.type)}});
     }
 
-    json << "]";
-    std::string str = json.str();
+    std::string str = arr.dump();
     sqlite3_result_text(ctx, str.c_str(), -1, SQLITE_TRANSIENT);
 }
 
@@ -381,19 +382,13 @@ static void sql_xrefs_from(sqlite3_context* ctx, int argc, sqlite3_value** argv)
 
     ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
 
-    std::ostringstream json;
-    json << "[";
-    bool first = true;
-
+    xsql::json arr = xsql::json::array();
     xrefblk_t xb;
     for (bool ok = xb.first_from(ea, XREF_ALL); ok; ok = xb.next_from()) {
-        if (!first) json << ",";
-        first = false;
-        json << "{\"to\":" << xb.to << ",\"type\":" << static_cast<int>(xb.type) << "}";
+        arr.push_back({{"to", xb.to}, {"type", static_cast<int>(xb.type)}});
     }
 
-    json << "]";
-    std::string str = json.str();
+    std::string str = arr.dump();
     sqlite3_result_text(ctx, str.c_str(), -1, SQLITE_TRANSIENT);
 }
 
@@ -401,11 +396,17 @@ static void sql_xrefs_from(sqlite3_context* ctx, int argc, sqlite3_value** argv)
 // Decompiler Functions (Optional - requires Hex-Rays)
 // ============================================================================
 
-#ifdef HAS_HEXRAYS
-// decompile(address) - Get decompiled pseudocode
+// decompile(address) - Get decompiled pseudocode (runtime Hex-Rays detection)
+// Uses decompiler::hexrays_available() set during DecompilerRegistry::register_all()
 static void sql_decompile(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
     if (argc < 1) {
         sqlite3_result_error(ctx, "decompile requires 1 argument (address)", -1);
+        return;
+    }
+
+    // Check cached Hex-Rays availability (set during DecompilerRegistry::register_all)
+    if (!decompiler::hexrays_available()) {
+        sqlite3_result_error(ctx, "Decompiler not available (requires Hex-Rays license)", -1);
         return;
     }
 
@@ -437,12 +438,6 @@ static void sql_decompile(sqlite3_context* ctx, int argc, sqlite3_value** argv) 
     std::string str = result.str();
     sqlite3_result_text(ctx, str.c_str(), -1, SQLITE_TRANSIENT);
 }
-#else
-// Stub when Hex-Rays not available
-static void sql_decompile(sqlite3_context* ctx, int, sqlite3_value**) {
-    sqlite3_result_error(ctx, "Decompiler not available (requires Hex-Rays)", -1);
-}
-#endif
 
 // ============================================================================
 // Address Utility Functions
@@ -672,53 +667,39 @@ static void sql_decode_insn(sqlite3_context* ctx, int argc, sqlite3_value** argv
     qstring mnem;
     print_insn_mnem(&mnem, ea);
 
-    // Build JSON
-    std::ostringstream json;
-    json << "{";
-    json << "\"ea\":" << insn.ea << ",";
-    json << "\"itype\":" << insn.itype << ",";
-    json << "\"size\":" << insn.size << ",";
-    json << "\"mnemonic\":\"" << mnem.c_str() << "\",";
+    // Build JSON using xsql::json
+    xsql::json result = {
+        {"ea", insn.ea},
+        {"itype", insn.itype},
+        {"size", insn.size},
+        {"mnemonic", mnem.c_str()}
+    };
 
     // Operands array
-    json << "\"operands\":[";
-    bool first_op = true;
+    xsql::json ops = xsql::json::array();
     for (int i = 0; i < UA_MAXOP; i++) {
         const op_t& op = insn.ops[i];
         if (op.type == o_void) break;
-
-        if (!first_op) json << ",";
-        first_op = false;
 
         // Get operand text
         qstring op_text;
         print_operand(&op_text, ea, i);
         tag_remove(&op_text);
 
-        json << "{";
-        json << "\"n\":" << i << ",";
-        json << "\"type\":" << static_cast<int>(op.type) << ",";
-        json << "\"type_name\":\"" << get_optype_name(op.type) << "\",";
-        json << "\"dtype\":" << static_cast<int>(op.dtype) << ",";
-        json << "\"reg\":" << op.reg << ",";
-        json << "\"addr\":" << op.addr << ",";
-        json << "\"value\":" << op.value << ",";
-
-        // Escape quotes in operand text
-        std::string escaped;
-        for (char c : std::string(op_text.c_str())) {
-            if (c == '"') escaped += "\\\"";
-            else if (c == '\\') escaped += "\\\\";
-            else escaped += c;
-        }
-        json << "\"text\":\"" << escaped << "\"";
-        json << "}";
+        ops.push_back({
+            {"n", i},
+            {"type", static_cast<int>(op.type)},
+            {"type_name", get_optype_name(op.type)},
+            {"dtype", static_cast<int>(op.dtype)},
+            {"reg", op.reg},
+            {"addr", op.addr},
+            {"value", op.value},
+            {"text", op_text.c_str()}  // nlohmann auto-escapes
+        });
     }
-    json << "]";
+    result["operands"] = ops;
 
-    json << "}";
-
-    std::string str = json.str();
+    std::string str = result.dump();
     sqlite3_result_text(ctx, str.c_str(), -1, SQLITE_TRANSIENT);
 }
 
@@ -1109,7 +1090,6 @@ static void sql_gen_schema_dot(sqlite3_context* ctx, int argc, sqlite3_value** a
 // Decompiler Lvar Functions (requires Hex-Rays)
 // ============================================================================
 
-#ifdef HAS_HEXRAYS
 // rename_lvar(func_addr, lvar_idx, new_name) - Rename a local variable
 // Returns JSON with result details for debugging the API
 static void sql_rename_lvar(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
@@ -1127,22 +1107,24 @@ static void sql_rename_lvar(sqlite3_context* ctx, int argc, sqlite3_value** argv
         return;
     }
 
-    std::ostringstream result;
-    result << "{\"func_addr\":" << func_addr << ",\"lvar_idx\":" << lvar_idx;
-    result << ",\"new_name\":\"" << new_name << "\"";
+    xsql::json result = {
+        {"func_addr", func_addr},
+        {"lvar_idx", lvar_idx},
+        {"new_name", new_name}
+    };
 
-    // Initialize Hex-Rays
-    if (!init_hexrays_plugin()) {
-        result << ",\"error\":\"Hex-Rays not available\"}";
-        sqlite3_result_text(ctx, result.str().c_str(), -1, SQLITE_TRANSIENT);
+    // Check cached Hex-Rays availability
+    if (!decompiler::hexrays_available()) {
+        result["error"] = "Hex-Rays not available";
+        sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
         return;
     }
 
     // Get function
     func_t* f = get_func(func_addr);
     if (!f) {
-        result << ",\"error\":\"Function not found\"}";
-        sqlite3_result_text(ctx, result.str().c_str(), -1, SQLITE_TRANSIENT);
+        result["error"] = "Function not found";
+        sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
         return;
     }
 
@@ -1150,26 +1132,26 @@ static void sql_rename_lvar(sqlite3_context* ctx, int argc, sqlite3_value** argv
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile(f, &hf);
     if (!cfunc) {
-        result << ",\"error\":\"Decompilation failed: " << hf.str.c_str() << "\"}";
-        sqlite3_result_text(ctx, result.str().c_str(), -1, SQLITE_TRANSIENT);
+        result["error"] = std::string("Decompilation failed: ") + hf.str.c_str();
+        sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
         return;
     }
 
     // Get lvars
     lvars_t* lvars = cfunc->get_lvars();
     if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size()) {
-        result << ",\"error\":\"Invalid lvar index (count=" << (lvars ? lvars->size() : 0) << ")\"}";
-        sqlite3_result_text(ctx, result.str().c_str(), -1, SQLITE_TRANSIENT);
+        result["error"] = "Invalid lvar index (count=" + std::to_string(lvars ? lvars->size() : 0) + ")";
+        sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
         return;
     }
 
     lvar_t& lv = (*lvars)[lvar_idx];
     std::string old_name = lv.name.c_str();
-    result << ",\"old_name\":\"" << old_name << "\"";
+    result["old_name"] = old_name;
 
-    // Try approach 1: rename_lvar (cfunc, lvar, name)
-    bool success1 = rename_lvar(cfunc.get(), &lv, new_name);
-    result << ",\"rename_lvar_result\":" << (success1 ? "true" : "false");
+    // Try approach 1: rename_lvar (func_addr, old_name, new_name)
+    bool success1 = rename_lvar(func_addr, old_name.c_str(), new_name);
+    result["rename_lvar_result"] = success1;
 
     // Try approach 2: modify_user_lvar_info
     lvar_saved_info_t lsi;
@@ -1178,19 +1160,19 @@ static void sql_rename_lvar(sqlite3_context* ctx, int argc, sqlite3_value** argv
     lsi.flags = 0;  // No special LVINF_* flags needed
 
     bool success2 = modify_user_lvar_info(func_addr, MLI_NAME, lsi);
-    result << ",\"modify_user_lvar_info_result\":" << (success2 ? "true" : "false");
+    result["modify_user_lvar_info_result"] = success2;
 
     // Verify by re-decompiling
     cfuncptr_t cfunc2 = decompile(f, &hf);
     if (cfunc2) {
         lvars_t* lvars2 = cfunc2->get_lvars();
         if (lvars2 && static_cast<size_t>(lvar_idx) < lvars2->size()) {
-            result << ",\"verified_name\":\"" << (*lvars2)[lvar_idx].name.c_str() << "\"";
+            result["verified_name"] = (*lvars2)[lvar_idx].name.c_str();
         }
     }
 
-    result << ",\"success\":" << ((success1 || success2) ? "true" : "false") << "}";
-    sqlite3_result_text(ctx, result.str().c_str(), -1, SQLITE_TRANSIENT);
+    result["success"] = (success1 || success2);
+    sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
 }
 
 // list_lvars(func_addr) - List local variables for a function as JSON
@@ -1202,8 +1184,8 @@ static void sql_list_lvars(sqlite3_context* ctx, int argc, sqlite3_value** argv)
 
     ea_t func_addr = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
 
-    // Initialize Hex-Rays
-    if (!init_hexrays_plugin()) {
+    // Check cached Hex-Rays availability
+    if (!decompiler::hexrays_available()) {
         sqlite3_result_error(ctx, "Hex-Rays not available", -1);
         return;
     }
@@ -1228,35 +1210,25 @@ static void sql_list_lvars(sqlite3_context* ctx, int argc, sqlite3_value** argv)
         return;
     }
 
-    std::ostringstream json;
-    json << "[";
+    xsql::json arr = xsql::json::array();
     for (size_t i = 0; i < lvars->size(); i++) {
         const lvar_t& lv = (*lvars)[i];
-        if (i > 0) json << ",";
 
         qstring type_str;
         lv.type().print(&type_str);
 
-        json << "{\"idx\":" << i;
-        json << ",\"name\":\"" << lv.name.c_str() << "\"";
-        json << ",\"type\":\"" << type_str.c_str() << "\"";
-        json << ",\"size\":" << lv.width;
-        json << ",\"is_arg\":" << (lv.is_arg_var() ? "true" : "false");
-        json << ",\"is_result\":" << (lv.is_result_var() ? "true" : "false");
-        json << "}";
+        arr.push_back({
+            {"idx", i},
+            {"name", lv.name.c_str()},
+            {"type", type_str.c_str()},
+            {"size", lv.width},
+            {"is_arg", lv.is_arg_var()},
+            {"is_result", lv.is_result_var()}
+        });
     }
-    json << "]";
 
-    sqlite3_result_text(ctx, json.str().c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_result_text(ctx, arr.dump().c_str(), -1, SQLITE_TRANSIENT);
 }
-#else
-static void sql_rename_lvar(sqlite3_context* ctx, int, sqlite3_value**) {
-    sqlite3_result_error(ctx, "rename_lvar requires Hex-Rays decompiler", -1);
-}
-static void sql_list_lvars(sqlite3_context* ctx, int, sqlite3_value**) {
-    sqlite3_result_error(ctx, "list_lvars requires Hex-Rays decompiler", -1);
-}
-#endif
 
 // ============================================================================
 // Jump Search Functions (unified entity search)
@@ -1370,14 +1342,9 @@ static void sql_jump_search(sqlite3_context* ctx, int argc, sqlite3_value** argv
         return;
     }
 
-    std::ostringstream json;
-    json << "[";
-    bool first = true;
+    xsql::json arr = xsql::json::array();
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        if (!first) json << ",";
-        first = false;
-
         const char* name = (const char*)sqlite3_column_text(stmt, 0);
         const char* kind = (const char*)sqlite3_column_text(stmt, 1);
         int64_t address = sqlite3_column_int64(stmt, 2);
@@ -1385,31 +1352,33 @@ static void sql_jump_search(sqlite3_context* ctx, int argc, sqlite3_value** argv
         const char* parent = (const char*)sqlite3_column_text(stmt, 4);
         const char* full_name = (const char*)sqlite3_column_text(stmt, 5);
 
-        json << "{";
-        json << "\"name\":\"" << (name ? name : "") << "\",";
-        json << "\"kind\":\"" << (kind ? kind : "") << "\",";
+        xsql::json obj = {
+            {"name", name ? name : ""},
+            {"kind", kind ? kind : ""},
+            {"full_name", full_name ? full_name : ""}
+        };
 
+        // Handle nullable fields
         if (sqlite3_column_type(stmt, 2) != SQLITE_NULL) {
-            json << "\"address\":" << address << ",";
+            obj["address"] = address;
         } else {
-            json << "\"address\":null,";
+            obj["address"] = nullptr;
         }
 
         if (sqlite3_column_type(stmt, 3) != SQLITE_NULL) {
-            json << "\"ordinal\":" << ordinal << ",";
+            obj["ordinal"] = ordinal;
         } else {
-            json << "\"ordinal\":null,";
+            obj["ordinal"] = nullptr;
         }
 
-        json << "\"parent_name\":" << (parent ? ("\"" + std::string(parent) + "\"") : "null") << ",";
-        json << "\"full_name\":\"" << (full_name ? full_name : "") << "\"";
-        json << "}";
+        obj["parent_name"] = parent ? xsql::json(parent) : xsql::json(nullptr);
+
+        arr.push_back(obj);
     }
 
-    json << "]";
     sqlite3_finalize(stmt);
 
-    std::string result = json.str();
+    std::string result = arr.dump();
     sqlite3_result_text(ctx, result.c_str(), -1, SQLITE_TRANSIENT);
 }
 
@@ -1488,6 +1457,9 @@ static void sql_rebuild_strings(sqlite3_context* ctx, int argc, sqlite3_value** 
     // Clear and rebuild with new settings
     clear_strlist();
     build_strlist();
+
+    // Invalidate the strings virtual table cache so queries see new data
+    entities::TableRegistry::invalidate_strings_cache_global();
 
     // Return the count
     size_t count = get_strlist_qty();

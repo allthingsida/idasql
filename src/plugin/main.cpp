@@ -46,11 +46,6 @@
     #define CLOSE_SOCKET close
 #endif
 
-// When building with AI Agent support, include nlohmann/json BEFORE IDA headers
-#ifdef IDASQL_HAS_AI_AGENT
-#include <nlohmann/json.hpp>
-#endif
-
 // Standard library includes
 #include <memory>
 #include <thread>
@@ -66,21 +61,32 @@
 #include <random>
 #include <iomanip>
 
-// IDA SDK headers
+// Platform-specific include order:
+// - Windows: json before IDA (IDA poisons stdlib functions)
+// - macOS: IDA before json (system headers define processor_t typedef)
+#ifdef __APPLE__
+// IDA SDK headers first on macOS
 #include <ida.hpp>
 #include <idp.hpp>
 #include <loader.hpp>
 #include <kernwin.hpp>
-
-// IDASQL library
 #include <idasql/database.hpp>
+#include <xsql/json.hpp>
+#else
+// JSON first on Windows/Linux
+#include <xsql/json.hpp>
+#include <ida.hpp>
+#include <idp.hpp>
+#include <loader.hpp>
+#include <kernwin.hpp>
+#include <idasql/database.hpp>
+#endif
 
 // IDASQL CLI (command line interface)
 #include "../common/idasql_cli.hpp"
 
 // Plugin control codes (shared with test harness)
 #include "../common/plugin_control.hpp"
-#include "../common/json_utils.hpp"
 
 // MCP server (when AI agent is enabled)
 #ifdef IDASQL_HAS_AI_AGENT
@@ -94,43 +100,24 @@
 
 namespace {
 
-std::string json_escape(const std::string& s)
-{
-    return idasql::escape_json(s);
-}
-
 std::string result_to_json(const idasql::QueryResult& result)
 {
-    std::ostringstream json;
-    json << "{";
-    json << "\"success\":" << (result.success ? "true" : "false");
+    xsql::json j = {{"success", result.success}};
 
     if (result.success) {
-        json << ",\"columns\":[";
-        for (size_t i = 0; i < result.columns.size(); i++) {
-            if (i > 0) json << ",";
-            json << "\"" << json_escape(result.columns[i]) << "\"";
-        }
-        json << "]";
+        j["columns"] = result.columns;
 
-        json << ",\"rows\":[";
-        for (size_t r = 0; r < result.rows.size(); r++) {
-            if (r > 0) json << ",";
-            json << "[";
-            for (size_t c = 0; c < result.rows[r].size(); c++) {
-                if (c > 0) json << ",";
-                json << "\"" << json_escape(result.rows[r][c]) << "\"";
-            }
-            json << "]";
+        xsql::json rows = xsql::json::array();
+        for (const auto& row : result.rows) {
+            rows.push_back(row.values);  // Row::values is std::vector<std::string>
         }
-        json << "]";
-        json << ",\"row_count\":" << result.row_count();
+        j["rows"] = rows;
+        j["row_count"] = result.row_count();
     } else {
-        json << ",\"error\":\"" << json_escape(result.error) << "\"";
+        j["error"] = result.error;
     }
 
-    json << "}";
-    return json.str();
+    return j.dump();
 }
 
 std::string extract_field(const std::string& json, const char* field)
@@ -392,14 +379,14 @@ private:
         while (running_ && recv_message(client, request)) {
             std::string sql = extract_sql(request);
             if (sql.empty()) {
-                send_message(client, "{\"success\":false,\"error\":\"Invalid request: missing sql field\"}");
+                send_message(client, xsql::json{{"success", false}, {"error", "Invalid request: missing sql field"}}.dump());
                 continue;
             }
 
             if (!auth_token_.empty()) {
                 std::string token = extract_token(request);
                 if (token != auth_token_) {
-                    send_message(client, "{\"success\":false,\"error\":\"Unauthorized\"}");
+                    send_message(client, xsql::json{{"success", false}, {"error", "Unauthorized"}}.dump());
                     continue;
                 }
             }

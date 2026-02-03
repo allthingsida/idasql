@@ -83,3 +83,6 @@ if(IDASQL_WITH_HTTP)
 
     message(STATUS "idasql_cli: HTTP server support enabled")
 endif()
+
+# Note: idasql.exe is NOT bundled with Claude plugin.
+# Users must install idasql.exe next to ida.exe manually.

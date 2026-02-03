@@ -24,15 +24,25 @@
 
 #include <sqlite3.h>
 #include <xsql/database.hpp>
+#include <xsql/json.hpp>
 #include <string>
 #include <vector>
 #include <functional>
 #include <memory>
 
+// macOS: Undefine Mach kernel types before IDA headers
+// (system headers define processor_t and token_t as typedefs)
+#ifdef __APPLE__
+#undef processor_t
+#undef token_t
+#endif
+
 // IDA SDK
 #include <ida.hpp>
 #include <idalib.hpp>
 #include <auto.hpp>
+#include <strlist.hpp>
+#include <algorithm>
 
 // IDASQL components
 #include <idasql/entities.hpp>
@@ -267,9 +277,7 @@ private:
     std::unique_ptr<extended::ExtendedRegistry> extended_;
     std::unique_ptr<disassembly::DisassemblyRegistry> disassembly_;
     std::unique_ptr<types::TypesRegistry> types_;
-#ifdef USE_HEXRAYS
-    std::unique_ptr<decompiler::DecompilerRegistry> decompiler_;
-#endif
+    std::unique_ptr<decompiler::DecompilerRegistry> decompiler_;  // Runtime detection
 
     void init() {
         // db_ auto-opens :memory: via xsql::Database constructor
@@ -293,10 +301,9 @@ private:
         functions::register_sql_functions(db_);
         search::register_search_bytes(db_);
 
-#ifdef USE_HEXRAYS
+        // Decompiler registry - register_all() handles runtime Hex-Rays detection
         decompiler_ = std::make_unique<decompiler::DecompilerRegistry>();
         decompiler_->register_all(db_);
-#endif
     }
 };
 
@@ -355,6 +362,30 @@ public:
 
         // Wait for auto-analysis
         auto_wait();
+
+        // For new analysis (exe/dll/etc), build strings after auto-analysis completes
+        // For existing databases (i64/idb), strings are already saved
+        std::string path_lower = idb_path;
+        std::transform(path_lower.begin(), path_lower.end(), path_lower.begin(), ::tolower);
+        auto ends_with = [](const std::string& s, const std::string& suffix) {
+            return s.size() >= suffix.size() &&
+                   s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+        bool is_new_analysis = !(
+            ends_with(path_lower, ".i64") ||
+            ends_with(path_lower, ".idb")
+        );
+        if (is_new_analysis) {
+            // Configure and build string list with sensible defaults
+            strwinsetup_t* opts = const_cast<strwinsetup_t*>(get_strlist_options());
+            opts->strtypes.clear();
+            opts->strtypes.push_back(STRTYPE_C);      // ASCII
+            opts->strtypes.push_back(STRTYPE_C_16);   // UTF-16
+            opts->minlen = 5;
+            opts->only_7bit = 0;
+            clear_strlist();  // Clear before building (like rebuild_strings)
+            build_strlist();
+        }
 
         // Create query engine
         engine_ = std::make_unique<QueryEngine>();

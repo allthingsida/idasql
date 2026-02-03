@@ -40,6 +40,8 @@
 #include <csignal>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
+#include <queue>
 #include <thread>
 #include <chrono>
 
@@ -416,8 +418,18 @@ SQL queries end with semicolon (;)
 // ============================================================================
 // From here on, code may call IDA functions. On Windows with /DELAYLOAD,
 // ida.dll and idalib.dll are loaded on first use.
+//
+// Platform-specific include order:
+// - Windows: json before IDA (IDA poisons stdlib functions)
+// - macOS: IDA before json (system headers define processor_t typedef)
 
+#ifdef __APPLE__
 #include <idasql/database.hpp>
+#include <xsql/json.hpp>
+#else
+#include <xsql/json.hpp>
+#include <idasql/database.hpp>
+#endif
 
 // ============================================================================
 // REPL - Interactive Mode (Local)
@@ -833,66 +845,86 @@ static bool execute_file(idasql::Database& db, const char* path) {
 
 #ifdef IDASQL_HAS_HTTP
 static xsql::thinclient::server* g_http_server = nullptr;
+static std::atomic<bool> g_http_stop_requested{false};
 
 static void http_signal_handler(int) {
+    g_http_stop_requested.store(true);
     if (g_http_server) g_http_server->stop();
 }
 
-static std::string json_escape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 10);
-    for (char ch : s) {
-        switch (ch) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default:
-                if (static_cast<unsigned char>(ch) < 0x20) {
-                    std::ostringstream oss;
-                    oss << "\\u" << std::hex << std::setfill('0') << std::setw(4) << static_cast<unsigned>(ch);
-                    out += oss.str();
-                } else {
-                    out += ch;
-                }
+// Command queue for main-thread execution (needed for Hex-Rays decompiler)
+struct HttpPendingCommand {
+    std::string sql;
+    std::string result;
+    bool completed = false;
+    std::mutex* done_mutex = nullptr;
+    std::condition_variable* done_cv = nullptr;
+};
+
+static std::mutex g_http_queue_mutex;
+static std::condition_variable g_http_queue_cv;
+static std::queue<HttpPendingCommand*> g_http_pending_commands;
+static std::atomic<bool> g_http_running{false};
+
+// Queue a command and wait for main thread to execute it
+static std::string http_queue_and_wait(const std::string& sql) {
+    if (!g_http_running.load()) {
+        return xsql::json{{"success", false}, {"error", "Server not running"}}.dump();
+    }
+
+    HttpPendingCommand cmd;
+    cmd.sql = sql;
+    cmd.completed = false;
+
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    cmd.done_mutex = &done_mutex;
+    cmd.done_cv = &done_cv;
+
+    {
+        std::lock_guard<std::mutex> lock(g_http_queue_mutex);
+        g_http_pending_commands.push(&cmd);
+    }
+    g_http_queue_cv.notify_one();
+
+    // Wait for completion - cleanup code will signal if server stops
+    // Timeout after 60s as safety net against shutdown race conditions
+    {
+        std::unique_lock<std::mutex> lock(done_mutex);
+        int wait_count = 0;
+        while (!cmd.completed && wait_count < 600) {  // 60 seconds max
+            done_cv.wait_for(lock, std::chrono::milliseconds(100));
+            wait_count++;
+        }
+        if (!cmd.completed) {
+            // Timed out - likely shutdown race, remove from queue if still there
+            std::lock_guard<std::mutex> qlock(g_http_queue_mutex);
+            // Can't easily remove from std::queue, but server is stopping anyway
+            return xsql::json{{"success", false}, {"error", "Request timed out"}}.dump();
         }
     }
-    return out;
+
+    return cmd.result;
 }
 
 static std::string query_result_to_json(idasql::Database& db, const std::string& sql) {
     auto result = db.query(sql);
-    std::ostringstream json;
-    json << "{";
-    json << "\"success\":" << (result.success ? "true" : "false");
+    xsql::json j = {{"success", result.success}};
 
     if (result.success) {
-        json << ",\"columns\":[";
-        for (size_t i = 0; i < result.columns.size(); i++) {
-            if (i > 0) json << ",";
-            json << "\"" << json_escape(result.columns[i]) << "\"";
-        }
-        json << "]";
+        j["columns"] = result.columns;
 
-        json << ",\"rows\":[";
-        for (size_t i = 0; i < result.rows.size(); i++) {
-            if (i > 0) json << ",";
-            json << "[";
-            for (size_t c = 0; c < result.rows[i].size(); c++) {
-                if (c > 0) json << ",";
-                json << "\"" << json_escape(result.rows[i][c]) << "\"";
-            }
-            json << "]";
+        xsql::json rows = xsql::json::array();
+        for (const auto& row : result.rows) {
+            rows.push_back(row.values);  // Row::values is std::vector<std::string>
         }
-        json << "]";
-        json << ",\"row_count\":" << result.rows.size();
+        j["rows"] = rows;
+        j["row_count"] = result.rows.size();
     } else {
-        json << ",\"error\":\"" << json_escape(result.error) << "\"";
+        j["error"] = result.error;
     }
 
-    json << "}";
-    return json.str();
+    return j.dump();
 }
 
 static const char* IDASQL_HELP_TEXT = R"(IDASQL HTTP REST API
@@ -957,9 +989,7 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
         }
     }
 
-    std::mutex query_mutex;
-
-    cfg.setup_routes = [&db, &auth_token, &query_mutex, port](httplib::Server& svr) {
+    cfg.setup_routes = [&auth_token, port](httplib::Server& svr) {
         svr.Get("/", [port](const httplib::Request&, httplib::Response& res) {
             std::string welcome = "IDASQL HTTP Server\n\nEndpoints:\n"
                 "  GET  /help     - API documentation\n"
@@ -974,7 +1004,9 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
             res.set_content(IDASQL_HELP_TEXT, "text/plain");
         });
 
-        svr.Post("/query", [&db, &auth_token, &query_mutex](const httplib::Request& req, httplib::Response& res) {
+        // POST /query - Queue command for main thread execution
+        // This is necessary because IDA's Hex-Rays decompiler has thread affinity
+        svr.Post("/query", [&auth_token](const httplib::Request& req, httplib::Response& res) {
             if (!auth_token.empty()) {
                 std::string token;
                 if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
@@ -984,20 +1016,21 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                 }
                 if (token != auth_token) {
                     res.status = 401;
-                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    res.set_content(xsql::json{{"success", false}, {"error", "Unauthorized"}}.dump(), "application/json");
                     return;
                 }
             }
             if (req.body.empty()) {
                 res.status = 400;
-                res.set_content("{\"success\":false,\"error\":\"Empty query\"}", "application/json");
+                res.set_content(xsql::json{{"success", false}, {"error", "Empty query"}}.dump(), "application/json");
                 return;
             }
-            std::lock_guard<std::mutex> lock(query_mutex);
-            res.set_content(query_result_to_json(db, req.body), "application/json");
+            // Queue command for main thread execution
+            res.set_content(http_queue_and_wait(req.body), "application/json");
         });
 
-        svr.Get("/status", [&db, &auth_token](const httplib::Request& req, httplib::Response& res) {
+        // GET /status - Also needs main thread for db.query()
+        svr.Get("/status", [&auth_token](const httplib::Request& req, httplib::Response& res) {
             if (!auth_token.empty()) {
                 std::string token;
                 if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
@@ -1007,17 +1040,26 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                 }
                 if (token != auth_token) {
                     res.status = 401;
-                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    res.set_content(xsql::json{{"success", false}, {"error", "Unauthorized"}}.dump(), "application/json");
                     return;
                 }
             }
-            auto result = db.query("SELECT COUNT(*) FROM funcs");
-            std::string count = result.success && !result.empty() ? result.rows[0][0] : "?";
-            res.set_content("{\"success\":true,\"status\":\"ok\",\"tool\":\"idasql\",\"functions\":" + count + "}", "application/json");
+            // Queue for main thread
+            std::string result = http_queue_and_wait("SELECT COUNT(*) FROM funcs");
+            // Parse result to extract count
+            try {
+                auto j = xsql::json::parse(result);
+                if (j.value("success", false) && j.contains("rows") && !j["rows"].empty()) {
+                    int count = std::stoi(j["rows"][0][0].get<std::string>());
+                    res.set_content(xsql::json{{"success", true}, {"status", "ok"}, {"tool", "idasql"}, {"functions", count}}.dump(), "application/json");
+                    return;
+                }
+            } catch (...) {}
+            res.set_content(xsql::json{{"success", true}, {"status", "ok"}, {"tool", "idasql"}, {"functions", "?"}}.dump(), "application/json");
         });
 
         // GET /health - Alias for /status
-        svr.Get("/health", [&db, &auth_token](const httplib::Request& req, httplib::Response& res) {
+        svr.Get("/health", [&auth_token](const httplib::Request& req, httplib::Response& res) {
             if (!auth_token.empty()) {
                 std::string token;
                 if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
@@ -1027,13 +1069,21 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                 }
                 if (token != auth_token) {
                     res.status = 401;
-                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    res.set_content(xsql::json{{"success", false}, {"error", "Unauthorized"}}.dump(), "application/json");
                     return;
                 }
             }
-            auto result = db.query("SELECT COUNT(*) FROM funcs");
-            std::string count = result.success && !result.empty() ? result.rows[0][0] : "?";
-            res.set_content("{\"success\":true,\"status\":\"ok\",\"tool\":\"idasql\",\"functions\":" + count + "}", "application/json");
+            // Queue for main thread
+            std::string result = http_queue_and_wait("SELECT COUNT(*) FROM funcs");
+            try {
+                auto j = xsql::json::parse(result);
+                if (j.value("success", false) && j.contains("rows") && !j["rows"].empty()) {
+                    int count = std::stoi(j["rows"][0][0].get<std::string>());
+                    res.set_content(xsql::json{{"success", true}, {"status", "ok"}, {"tool", "idasql"}, {"functions", count}}.dump(), "application/json");
+                    return;
+                }
+            } catch (...) {}
+            res.set_content(xsql::json{{"success", true}, {"status", "ok"}, {"tool", "idasql"}, {"functions", "?"}}.dump(), "application/json");
         });
 
         svr.Post("/shutdown", [&svr, &auth_token](const httplib::Request& req, httplib::Response& res) {
@@ -1046,11 +1096,13 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                 }
                 if (token != auth_token) {
                     res.status = 401;
-                    res.set_content("{\"success\":false,\"error\":\"Unauthorized\"}", "application/json");
+                    res.set_content(xsql::json{{"success", false}, {"error", "Unauthorized"}}.dump(), "application/json");
                     return;
                 }
             }
-            res.set_content("{\"success\":true,\"message\":\"Shutting down\"}", "application/json");
+            res.set_content(xsql::json{{"success", true}, {"message", "Shutting down"}}.dump(), "application/json");
+            g_http_stop_requested.store(true);
+            g_http_queue_cv.notify_all();
             std::thread([&svr] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 svr.stop();
@@ -1060,6 +1112,8 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
 
     xsql::thinclient::server http_server(cfg);
     g_http_server = &http_server;
+    g_http_running.store(true);
+    g_http_stop_requested.store(false);
 
     auto old_handler = std::signal(SIGINT, http_signal_handler);
 #ifdef _WIN32
@@ -1075,7 +1129,65 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     std::cout << "Press Ctrl+C to stop.\n\n";
     std::cout.flush();
 
-    http_server.run();
+    // Start HTTP server on a background thread
+    std::thread http_thread([&http_server]() {
+        http_server.run();
+    });
+
+    // Main thread processes the command queue (required for Hex-Rays thread affinity)
+    while (g_http_running.load() && !g_http_stop_requested.load()) {
+        HttpPendingCommand* cmd = nullptr;
+
+        {
+            std::unique_lock<std::mutex> lock(g_http_queue_mutex);
+            if (g_http_queue_cv.wait_for(lock, std::chrono::milliseconds(100),
+                                          []() { return !g_http_pending_commands.empty() ||
+                                                        g_http_stop_requested.load(); })) {
+                if (!g_http_pending_commands.empty()) {
+                    cmd = g_http_pending_commands.front();
+                    g_http_pending_commands.pop();
+                }
+            }
+        }
+
+        if (cmd) {
+            // Execute query on main thread - safe for Hex-Rays decompiler
+            cmd->result = query_result_to_json(db, cmd->sql);
+            if (cmd->done_mutex && cmd->done_cv) {
+                {
+                    std::lock_guard<std::mutex> lock(*cmd->done_mutex);
+                    cmd->completed = true;
+                }
+                cmd->done_cv->notify_one();
+            }
+        }
+    }
+
+    // Cleanup
+    g_http_running.store(false);
+    g_http_queue_cv.notify_all();
+
+    // Complete any pending commands with error
+    {
+        std::lock_guard<std::mutex> lock(g_http_queue_mutex);
+        while (!g_http_pending_commands.empty()) {
+            HttpPendingCommand* cmd = g_http_pending_commands.front();
+            g_http_pending_commands.pop();
+            if (!cmd || !cmd->done_mutex || !cmd->done_cv) continue;
+            cmd->result = xsql::json{{"success", false}, {"error", "Server stopped"}}.dump();
+            {
+                std::lock_guard<std::mutex> dlock(*cmd->done_mutex);
+                cmd->completed = true;
+            }
+            cmd->done_cv->notify_one();
+        }
+    }
+
+    // Stop HTTP server and wait for thread
+    http_server.stop();
+    if (http_thread.joinable()) {
+        http_thread.join();
+    }
 
     std::signal(SIGINT, old_handler);
 #ifdef _WIN32
@@ -1312,7 +1424,7 @@ int main(int argc, char* argv[]) {
     }
 
     //=========================================================================
-    // Local mode - requires IDA SDK (delay-loaded on Windows)
+    // Local mode - requires IDA SDK
     //=========================================================================
     std::cerr << "Opening: " << db_path << "..." << std::endl;
     idasql::Database db;

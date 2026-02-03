@@ -23,6 +23,13 @@
 #include <vector>
 #include <map>
 
+// macOS: Undefine Mach kernel types before IDA headers
+// (system headers define processor_t and token_t as typedefs)
+#ifdef __APPLE__
+#undef processor_t
+#undef token_t
+#endif
+
 // IDA SDK headers
 #include <ida.hpp>
 #include <auto.hpp>
@@ -1414,8 +1421,11 @@ struct DecompilerRegistry {
 
     void register_all(xsql::Database& db) {
         // Initialize Hex-Rays decompiler ONCE at startup
-        // If unavailable, tables will return empty results (no crash)
-        init_hexrays();
+        // If unavailable, skip registering decompiler tables entirely
+        if (!init_hexrays()) {
+            // Hex-Rays not available - don't register decompiler tables
+            return;
+        }
 
         // Index-based tables
         db.register_table("ida_pseudocode", &pseudocode);

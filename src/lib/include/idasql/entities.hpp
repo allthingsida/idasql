@@ -19,6 +19,13 @@
 #include <xsql/database.hpp>
 #include <idasql/entities_search.hpp>
 
+// macOS: Undefine Mach kernel types before IDA headers
+// (system headers define processor_t and token_t as typedefs)
+#ifdef __APPLE__
+#undef processor_t
+#undef token_t
+#endif
+
 // IDA SDK headers
 #include <ida.hpp>
 #include <idp.hpp>
@@ -1222,6 +1229,9 @@ struct TableRegistry {
     CachedTableDef<ImportInfo> imports;
     CachedTableDef<string_info_t> strings;
 
+    // Global pointer for cache invalidation from SQL functions
+    static inline TableRegistry* g_instance = nullptr;
+
     TableRegistry()
         : funcs(define_funcs())
         , segments(define_segments())
@@ -1235,7 +1245,23 @@ struct TableRegistry {
         , blocks(define_blocks())
         , imports(define_imports())
         , strings(define_strings())
-    {}
+    {
+        g_instance = this;
+    }
+
+    ~TableRegistry() {
+        if (g_instance == this) g_instance = nullptr;
+    }
+
+    // Invalidate the strings cache (call after rebuild_strings)
+    void invalidate_strings_cache() {
+        strings.invalidate_cache();
+    }
+
+    // Static method for SQL functions to invalidate strings cache
+    static void invalidate_strings_cache_global() {
+        if (g_instance) g_instance->invalidate_strings_cache();
+    }
 
     void register_all(xsql::Database& db) {
         // Index-based tables (use IDA's indexed access)
