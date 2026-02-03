@@ -66,6 +66,12 @@
 #include <random>
 #include <iomanip>
 
+// macOS: Undefine Mach kernel's processor_t before IDA headers
+// (nlohmann/json pulls in system headers that define it as unsigned int)
+#ifdef __APPLE__
+#undef processor_t
+#endif
+
 // IDA SDK headers
 #include <ida.hpp>
 #include <idp.hpp>
