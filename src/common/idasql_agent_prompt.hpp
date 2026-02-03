@@ -1,5 +1,5 @@
 // Auto-generated from idasql_agent.md
-// Generated: 2026-01-29T19:48:30.049515
+// Generated: 2026-02-01T17:48:50.279873
 // DO NOT EDIT - regenerate with: python scripts/embed_prompt.py
 
 #pragma once
@@ -71,26 +71,107 @@ The **Hex-Rays decompiler** converts assembly to C-like **pseudocode**:
 
 ---
 
-## CLI Usage
+## Command-Line Interface
 
+IDASQL provides SQL access to IDA databases via command line or as a server.
+
+### Invocation Modes
+
+**1. Single Query (Local)**
 ```bash
-# Single query
 idasql -s database.i64 -q "SELECT * FROM funcs LIMIT 10"
-
-# Execute SQL file
-idasql -s database.i64 -f script.sql
-
-# Interactive mode
-idasql -s database.i64 -i
-
-# Output as JSON
-idasql -s database.i64 -q "SELECT * FROM funcs" --format=json
-
-# Export tables to SQL
-idasql -s database.i64 --export out.sql
+idasql -s database.i64 -c "SELECT COUNT(*) FROM funcs"  # -c is alias for -q
 ```
 
-**Note:** The `-s` flag specifies the IDA database file (`.i64` for 64-bit, `.idb` for 32-bit).
+**2. SQL File Execution**
+```bash
+idasql -s database.i64 -f analysis.sql
+```
+
+**3. Interactive REPL**
+```bash
+idasql -s database.i64 -i
+```
+
+**4. Remote Mode** (connect to running server)
+```bash
+idasql --remote localhost:8080 -q "SELECT * FROM funcs"
+idasql --remote localhost:8080 -i  # Remote interactive
+```
+
+**5. HTTP Server Mode**
+```bash
+idasql -s database.i64 --http 8080
+# Then query via: curl -X POST http://localhost:8080/query -d "SELECT * FROM funcs"
+```
+
+**6. Export Mode**
+```bash
+idasql -s database.i64 --export dump.sql
+idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
+```
+
+### CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `-s <file>` | IDA database file (.idb/.i64) |
+| `--remote <host:port>` | Connect to IDASQL server |
+| `--token <token>` | Auth token for remote/server mode |
+| `-q <sql>` | Execute single SQL query |
+| `-c <sql>` | Alias for -q (Python-style) |
+| `-f <file>` | Execute SQL from file |
+| `-i` | Interactive REPL mode |
+| `-w, --write` | Save database changes on exit |
+| `--export <file>` | Export tables to SQL file |
+| `--export-tables=X` | Tables to export: `*` (all) or `table1,table2,...` |
+| `--http [port]` | Start HTTP REST server (default: 8080) |
+| `--bind <addr>` | Bind address for server (default: 127.0.0.1) |
+| `-h, --help` | Show help |
+
+### REPL Commands
+
+| Command | Description |
+|---------|-------------|
+| `.tables` | List all virtual tables |
+| `.schema [table]` | Show table schema |
+| `.info` | Show database metadata |
+| `.clear` | Clear session |
+| `.quit` / `.exit` | Exit REPL |
+| `.help` | Show available commands |
+
+### Performance Strategy
+
+**Single queries:** Use `-q` directly.
+```bash
+idasql -s database.i64 -q "SELECT COUNT(*) FROM funcs"
+```
+
+**Multiple queries / exploration:** Start a server once, then query as a client.
+
+Opening an IDA database has startup overhead (idalib initialization, auto-analysis). If you plan to run many queries—exploring the database, experimenting with different queries, or iterating on analysis—avoid re-opening the database each time.
+
+**Recommended workflow for iterative analysis:**
+```bash
+# Terminal 1: Start server (opens database once)
+idasql -s database.i64 --http 8080
+
+# Terminal 2: Query repeatedly via remote client (instant responses)
+idasql --remote localhost:8080 -q "SELECT * FROM funcs LIMIT 5"
+idasql --remote localhost:8080 -q "SELECT * FROM strings WHERE content LIKE '%error%'"
+idasql --remote localhost:8080 -q "SELECT name, size FROM funcs ORDER BY size DESC"
+# ... as many queries as needed, no startup cost
+```
+
+Or use interactive mode on the remote connection:
+```bash
+idasql --remote localhost:8080 -i
+idasql> SELECT COUNT(*) FROM funcs;
+idasql> SELECT * FROM xrefs WHERE to_ea = 0x401000;
+idasql> .quit
+```
+
+This approach is significantly faster for iterative analysis since the database remains open and queries go directly through the already-initialized session.
 
 ---
 
@@ -235,7 +316,7 @@ SELECT type_name, layout_name, COUNT(*) as count
 FROM strings GROUP BY type_name, layout_name ORDER BY count DESC;
 ```
 
-**Important:** IDA's string list is cached. If you see 0 strings, use `rebuild_strings()` to rebuild the list. To change string types/settings, use IDA's Strings window (Shift+F12 → Setup). See the String List Functions section below.
+**Important:** For new analysis (exe/dll), strings are auto-built. For existing databases (i64/idb), strings are already saved. If you see 0 strings unexpectedly, run `SELECT rebuild_strings()` once to rebuild the list. See String List Functions section below.
 
 #### xrefs
 Cross-references - the most important table for understanding code relationships.
@@ -274,6 +355,74 @@ SELECT func_at(func_ea) as name, COUNT(*) as blocks
 FROM blocks GROUP BY func_ea ORDER BY blocks DESC LIMIT 10;
 ```
 
+### Convenience Views
+
+Pre-built views for common xref analysis patterns. These simplify caller/callee queries.
+
+#### callers
+Who calls each function. Use this instead of manual xref JOINs.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `func_addr` | INT | Target function address |
+| `caller_addr` | INT | Xref source address |
+| `caller_name` | TEXT | Calling function name |
+| `caller_func_addr` | INT | Calling function start |
+
+```sql
+-- Who calls function at 0x401000?
+SELECT caller_name, printf('0x%X', caller_addr) as from_addr
+FROM callers WHERE func_addr = 0x401000;
+
+-- Most called functions
+SELECT printf('0x%X', func_addr) as addr, COUNT(*) as callers
+FROM callers GROUP BY func_addr ORDER BY callers DESC LIMIT 10;
+```
+
+#### callees
+What each function calls. Inverse of callers view.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `func_addr` | INT | Calling function address |
+| `func_name` | TEXT | Calling function name |
+| `callee_addr` | INT | Called address |
+| `callee_name` | TEXT | Called function/symbol name |
+
+```sql
+-- What does main call?
+SELECT callee_name, printf('0x%X', callee_addr) as addr
+FROM callees WHERE func_name LIKE '%main%';
+
+-- Functions making most calls
+SELECT func_name, COUNT(*) as call_count
+FROM callees GROUP BY func_addr ORDER BY call_count DESC LIMIT 10;
+```
+
+#### string_refs
+Which functions reference which strings. Great for finding functions by string content.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `string_addr` | INT | String address |
+| `string_value` | TEXT | String content |
+| `string_length` | INT | String length |
+| `ref_addr` | INT | Reference address |
+| `func_addr` | INT | Referencing function |
+| `func_name` | TEXT | Function name |
+
+```sql
+-- Find functions using error strings
+SELECT func_name, string_value
+FROM string_refs
+WHERE string_value LIKE '%error%' OR string_value LIKE '%fail%';
+
+-- Functions with most string references
+SELECT func_name, COUNT(*) as string_count
+FROM string_refs WHERE func_name IS NOT NULL
+GROUP BY func_addr ORDER BY string_count DESC LIMIT 10;
+```
+
 ### Instruction Tables
 
 #### instructions
@@ -305,8 +454,8 @@ WHERE func_addr = 0x401000 AND mnemonic = 'call';
 
 #### disasm_calls
 All call instructions with resolved targets.
-
-| Column | Type | Description |
+)PROMPT"
+    R"PROMPT(| Column | Type | Description |
 |--------|------|-------------|
 | `func_addr` | INT | Function containing the call |
 | `ea` | INT | Call instruction address |
@@ -321,25 +470,71 @@ FROM disasm_calls WHERE callee_name LIKE '%malloc%';
 
 ### Database Modification
 
-**Note:** IDASQL currently modifies the database via SQL functions rather than writable virtual tables.
+The following tables support SQL UPDATE and DELETE:
 
-#### Modification Functions
+| Table | UPDATE columns | DELETE |
+|-------|---------------|--------|
+| `funcs` | `name` | No |
+| `names` | `name` | Yes |
+| `comments` | `comment`, `rep_comment` | Yes |
+| `bookmarks` | `description` | Yes |
+| `ctree_lvars` | `name`, `type` | No |
 
+**Examples:**
 ```sql
--- Rename a function or set a name at address
-SELECT set_name(0x401000, 'my_main');
+-- Rename a function
+UPDATE funcs SET name = 'my_main' WHERE address = 0x401000;
 
--- Add a regular comment
-SELECT set_comment(0x401050, 'Check return value');
+-- Rename any named address
+UPDATE names SET name = 'my_global' WHERE address = 0x404000;
 
--- Add a repeatable comment (shows everywhere address is referenced)
-SELECT set_comment(0x404000, 'Global config', 1);
+-- Add/update comment
+UPDATE comments SET comment = 'Check return value' WHERE address = 0x401050;
 
--- Rename a local variable in decompiled code
-SELECT rename_lvar(0x401000, 'v1', 'buffer_size');
+-- Add repeatable comment
+UPDATE comments SET rep_comment = 'Global config' WHERE address = 0x404000;
+
+-- Delete a name
+DELETE FROM names WHERE address = 0x401000;
 ```
 
-**Future:** Live virtual tables (`funcs_live`, `names_live`, `comments_live`) with UPDATE/DELETE support are planned but not yet implemented.
+**Decompiler local variables (requires Hex-Rays):**
+```sql
+-- Rename a local variable
+UPDATE ctree_lvars SET name = 'buffer_size'
+WHERE func_addr = 0x401000 AND name = 'v1';
+
+-- Change variable type
+UPDATE ctree_lvars SET type = 'char *'
+WHERE func_addr = 0x401000 AND idx = 2;
+```
+
+### Persisting Changes
+
+Changes to the database (UPDATE, set_name, etc.) are held in memory by default.
+
+**To persist changes:**
+```sql
+-- Explicit save (recommended for scripts)
+SELECT save_database();  -- Returns 1 on success, 0 on failure
+```
+
+**CLI flag for auto-save:**
+```bash
+# Auto-save on exit (use with caution)
+idasql -s db.i64 -q "UPDATE funcs SET name='main' WHERE address=0x401000" -w
+```
+
+**Best practice for batch operations:**
+```sql
+-- Make multiple changes
+UPDATE funcs SET name = 'init_config' WHERE address = 0x401000;
+UPDATE names SET name = 'g_settings' WHERE address = 0x402000;
+-- Persist once at the end
+SELECT save_database();
+```
+
+> Without `save_database()` or `-w`, changes are lost when the session ends.
 
 ### Decompiler Tables (Hex-Rays Required)
 
@@ -451,8 +646,8 @@ WHERE return_op = 'cot_num' AND return_num = 0;
 SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
 WHERE return_op = 'cot_num' AND return_num = -1;
 
--- Functions that return their argument (pass-through))PROMPT"
-    R"PROMPT(SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+-- Functions that return their argument (pass-through)
+SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
 WHERE returns_arg = 1;
 ```
 
@@ -761,9 +956,30 @@ LIMIT 10;
 -- First match only
 SELECT printf('0x%llX', search_first('CC CC CC'));
 
--- Search with alternatives
-SELECT search_bytes('E8 (01 02 03 04)');
+-- Search with alternatives)PROMPT"
+    R"PROMPT(SELECT search_bytes('E8 (01 02 03 04)');
 ```
+
+**Optimization Pattern: Find functions using specific instruction**
+
+To answer "How many functions use RDTSC instruction?" efficiently:
+```sql
+-- Count unique functions containing RDTSC (opcode: 0F 31)
+SELECT COUNT(DISTINCT func_start(json_extract(value, '$.address'))) as count
+FROM json_each(search_bytes('0F 31'))
+WHERE func_start(json_extract(value, '$.address')) IS NOT NULL;
+
+-- List those functions with names
+SELECT DISTINCT
+    func_start(json_extract(value, '$.address')) as func_ea,
+    name_at(func_start(json_extract(value, '$.address'))) as func_name
+FROM json_each(search_bytes('0F 31'))
+WHERE func_start(json_extract(value, '$.address')) IS NOT NULL;
+```
+
+This is **much faster** than scanning all disassembly lines because:
+- `search_bytes()` uses native binary search
+- `func_start()` is O(1) lookup in IDA's function index
 
 ### Names & Functions
 | Function | Description |
@@ -958,8 +1174,8 @@ WHERE j.kind = 'function';
 
 | Parameter | Description |
 |-----------|-------------|
-| `pattern` | Search pattern (required) |)PROMPT"
-    R"PROMPT(| `mode` | `'prefix'` or `'contains'` |
+| `pattern` | Search pattern (required) |
+| `mode` | `'prefix'` or `'contains'` |
 
 ### Columns
 
@@ -1266,8 +1482,8 @@ SELECT DISTINCT type_name, arg_type FROM types_func_args
 WHERE is_ptr = 0 AND is_ptr_resolved = 1;
 
 -- Functions returning void pointers
-SELECT type_name FROM types_func_args
-WHERE arg_index = -1 AND is_ptr_resolved = 1 AND is_void_resolved = 1;
+SELECT type_name FROM types_func_args)PROMPT"
+    R"PROMPT(WHERE arg_index = -1 AND is_ptr_resolved = 1 AND is_void_resolved = 1;
 ```
 
 ### Loops with System Calls (Performance/Security Hotspots)
@@ -1556,8 +1772,8 @@ WHERE length > 5;
 ```sql
 -- Comprehensive security audit in one query
 SELECT 'dangerous_func' as check_type, func_at(func_addr) as location, callee_name as detail
-FROM disasm_calls)PROMPT"
-    R"PROMPT(WHERE callee_name IN ('strcpy', 'strcat', 'sprintf', 'gets', 'scanf')
+FROM disasm_calls
+WHERE callee_name IN ('strcpy', 'strcat', 'sprintf', 'gets', 'scanf')
 
 UNION ALL
 
@@ -1886,8 +2102,8 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 |------|----------------|
 | List all functions | `funcs` |
 | Functions by return type | `funcs WHERE return_is_integral = 1` |
-| Functions by arg count | `funcs WHERE arg_count >= N` |
-| Void functions | `funcs WHERE return_is_void = 1` |
+| Functions by arg count | `funcs WHERE arg_count >= N` |)PROMPT"
+    R"PROMPT(| Void functions | `funcs WHERE return_is_void = 1` |
 | Pointer-returning functions | `funcs WHERE return_is_ptr = 1` |
 | Functions by calling convention | `funcs WHERE calling_conv = 'fastcall'` |
 | Find who calls what | `xrefs` with `is_code = 1` |
@@ -1906,6 +2122,8 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Wrapper functions | `ctree_v_returns WHERE returns_call_result = 1` |
 | Variable analysis | `ctree_lvars WHERE func_addr = X` |
 | Type information | `types`, `types_members` |
+| Function signatures | `types_func_args` (with type classification) |
+| Functions by return type | `types_func_args WHERE arg_index = -1` |
 | Typedef-aware type queries | `types_func_args` (surface vs resolved) |
 | Hidden pointer types | `types_func_args WHERE is_ptr = 0 AND is_ptr_resolved = 1` |
 | Modify database | `*_live` tables |

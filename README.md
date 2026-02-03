@@ -524,6 +524,48 @@ Agent then queries for error handling patterns in those functions...
 
 The agent never needs to write IDAPython. SQL queries are self-contained and portable.
 
+## Claude Code Plugin (WIP)
+
+> **Note:** This feature is under active development and testing.
+
+IDASQL is available as a Claude Code plugin, allowing Claude to query IDA databases directly within your coding workflow.
+
+### Prerequisites
+
+1. **IDA Pro** installed with `ida.exe` directory in your PATH
+2. **idasql.exe** downloaded from [Releases](https://github.com/allthingsida/idasql/releases) and placed next to `ida.exe`
+3. Verify setup: `idasql --version` should work from command line
+
+### Installation
+
+```bash
+# Add the marketplace (one-time)
+/plugin marketplace add 0xeb/anthropic-marketplace
+
+# Install idasql
+/plugin install idasql@0xeb-tools
+```
+
+### Usage
+
+Once installed, invoke the idasql agent:
+
+```
+"Using the idasql agent, count functions in myfile.i64"
+"Using the idasql agent, decompile main in test.i64"
+"Using the idasql agent, find strings containing 'password'"
+```
+
+### Troubleshooting
+
+**SSH Permission Denied**
+
+If you see `git@github.com: Permission denied (publickey)` during install, configure git to use HTTPS:
+
+```bash
+git config --global url."https://github.com/".insteadOf "git@github.com:"
+```
+
 ## Built With
 
 - **[libxsql](https://github.com/0xeb/libxsql)** - Header-only C++17 library for exposing C++ data structures as SQLite virtual tables. Provides the fluent builder API for defining tables, constraint pushdown, and the socket server/client protocol.

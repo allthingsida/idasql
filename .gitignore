@@ -1,3 +1,4 @@
+claude-skill/bin/idasql.exe
 # Build directories
 **/sqlite3.build/*
 build*/

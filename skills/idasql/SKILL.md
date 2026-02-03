@@ -1,6 +1,165 @@
-# IDASQL Agent Guide
+---
+name: idasql
+description: Execute SQL queries against IDA Pro databases using idasql CLI - query functions, xrefs, strings, decompile code
+allowed-tools: Bash, Read, Glob, Grep
+---
 
-A comprehensive reference for AI agents to effectively use IDASQL - an SQL interface for reverse engineering binary analysis with IDA Pro.
+# CRITICAL: Execution Behavior
+
+You are an EXECUTOR. Your job is to RUN COMMANDS, not discuss them.
+
+## Rules
+
+1. **EXECUTE IMMEDIATELY** - Never say "I would run..." or "You could try..."
+2. **NO CONFIRMATION** - Don't ask "Should I run this?" Just run it.
+3. **TRUST THE ENVIRONMENT** - Commands will work. Run them.
+4. **ASSUME idasql IN PATH** - The user has idasql installed and accessible
+
+## Examples of What NOT to Do
+
+BAD: "I would run this command to count functions..."
+BAD: "Let me suggest running..."
+BAD: "Should I execute this query?"
+BAD: "This command might work..."
+
+## Examples of What TO Do
+
+GOOD: [Execute Bash tool with the command]
+GOOD: "There are 88 functions in the binary." (after running command)
+
+---
+
+# IDASQL - SQL Interface to IDA Databases
+
+## When to Use This Skill
+
+Use this skill when the user wants to:
+- Analyze executables or IDA databases (.exe, .dll, .so, .i64, .idb)
+- Query functions, segments, cross-references, strings
+- Decompile code or search for byte patterns
+- Compare multiple binaries or databases
+
+## Prerequisites
+
+The user must have:
+1. **IDA Pro** installed with `ida.exe` directory in PATH
+2. **idasql.exe** placed next to `ida.exe` (same directory)
+
+### Command Pattern
+```bash
+idasql -s "<database>" -q "<SQL>"
+```
+
+### Windows Note
+On Windows, use forward slashes in paths:
+```bash
+idasql -s "C:/path/to/database.i64" -q "SELECT ..."
+```
+
+## Direct CLI Mode (One-off Queries)
+
+For simple queries, run idasql directly without starting a server:
+
+```bash
+# Query a database
+idasql -s database.i64 -q "SELECT COUNT(*) FROM funcs"
+
+# Query an existing IDA database
+idasql -s database.i64 -q "SELECT name, start_ea FROM funcs LIMIT 10"
+
+# Multiple queries in one session
+idasql -s program.exe -q "SELECT COUNT(*) FROM funcs" -q "SELECT COUNT(*) FROM strings"
+```
+
+Use direct CLI mode when:
+- Running a single query or a few queries
+- Analyzing a file for the first time
+- No need to keep the database open
+
+## HTTP Server Mode (Persistent Queries)
+
+Use HTTP mode when:
+- Running many queries against the same database
+- Comparing multiple databases simultaneously (up to 6 on ports 17200-17205)
+- Keeping analysis results cached between queries
+
+### Starting a Server
+
+```bash
+# Start server for a single database
+idasql -s /path/to/database.i64 --http 17200
+
+# With authentication token
+idasql -s database.i64 --http 17200 --token mysecret
+
+# Bind to all interfaces (for remote access)
+idasql -s database.i64 --http 17200 --bind 0.0.0.0
+```
+
+### Querying via curl
+
+```bash
+# Execute SQL query
+curl -X POST http://localhost:17200/query -d "SELECT name, size FROM funcs LIMIT 5"
+
+# With authentication
+curl -X POST http://localhost:17200/query \
+     -H "Authorization: Bearer mysecret" \
+     -d "SELECT * FROM funcs"
+
+# Check server status
+curl http://localhost:17200/status
+```
+
+### Response Format
+
+```json
+{"success": true, "columns": ["name", "size"], "rows": [["main", "500"]], "row_count": 1}
+```
+
+```json
+{"success": false, "error": "no such table: bad_table"}
+```
+
+### Multiple Databases (Ports 17200-17205)
+
+Start up to 6 databases on different ports:
+
+```bash
+# Terminal/background processes
+idasql -s first.i64 --http 17200 &
+idasql -s second.i64 --http 17201 &
+idasql -s third.i64 --http 17202 &
+```
+
+Query each database by port:
+```bash
+curl -X POST http://localhost:17200/query -d "SELECT name FROM funcs"
+curl -X POST http://localhost:17201/query -d "SELECT name FROM funcs"
+```
+
+### Shutdown Servers
+
+```bash
+curl -X POST http://localhost:17200/shutdown
+curl -X POST http://localhost:17201/shutdown
+```
+
+### HTTP Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Welcome message |
+| `/help` | GET | API documentation |
+| `/query` | POST | Execute SQL (body = raw SQL) |
+| `/status` | GET | Health check with stats |
+| `/shutdown` | POST | Stop server gracefully |
+
+---
+
+# IDASQL Skill Guide
+
+A comprehensive reference for using IDASQL - an SQL interface for reverse engineering binary analysis with IDA Pro.
 
 ---
 
@@ -532,7 +691,7 @@ SELECT save_database();
 **CRITICAL:** Always filter by `func_addr`. Without constraint, these tables will decompile EVERY function - extremely slow!
 
 #### pseudocode
-Decompiled C-like code lines.
+Decompiled C-like code lines. **Use `decompile(addr)` function instead for simple decompilation!**
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -542,8 +701,11 @@ Decompiled C-like code lines.
 | `ea` | INT | Corresponding assembly address |
 
 ```sql
--- Get pseudocode for a specific function (FAST)
-SELECT line FROM pseudocode WHERE func_addr = 0x401000 ORDER BY line_num;
+-- PREFERRED: Use decompile() function for full pseudocode
+SELECT decompile(0x401000);
+
+-- Only use pseudocode table when you need line-level details (ea mapping, etc.)
+SELECT line_num, line, ea FROM pseudocode WHERE func_addr = 0x401000;
 ```
 
 #### ctree
@@ -1037,11 +1199,19 @@ SELECT decode_insn(0x401000);
 ### Decompilation
 | Function | Description |
 |----------|-------------|
-| `decompile(addr)` | Full pseudocode (requires Hex-Rays) |
+| `decompile(addr)` | **PREFERRED** - Full pseudocode as single text (requires Hex-Rays) |
 | `list_lvars(addr)` | List local variables as JSON |
 | `rename_lvar(addr, old, new)` | Rename a local variable |
 
+**IMPORTANT:** To decompile a function, use `decompile(addr)` - NOT the pseudocode table!
+
 ```sql
+-- CORRECT: Get full decompilation in one call
+SELECT decompile(0x401000);
+
+-- WRONG: Inefficient line-by-line approach (avoid this!)
+-- SELECT line FROM pseudocode WHERE func_addr = 0x401000 ORDER BY line_num;
+
 -- Get all local variables in a function
 SELECT list_lvars(0x401000);
 
@@ -1132,7 +1302,7 @@ SELECT rebuild_strings();
 SELECT * FROM strings WHERE content LIKE '%error%';
 ```
 
-**IMPORTANT - Agent Behavior for String Queries:**
+**IMPORTANT - String Query Behavior:**
 When the user asks about strings (e.g., "show me the strings", "what strings are in this binary"):
 1. First run `SELECT rebuild_strings()` to ensure strings are detected
 2. Then query the `strings` table
@@ -2122,84 +2292,3 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Entity search (JSON) | `jump_search('pattern', 'mode', limit, offset)` |
 
 **Remember:** Always use `func_addr = X` constraints on instruction and decompiler tables for acceptable performance.
-
----
-
-## Server Modes
-
-IDASQL supports two server protocols for remote queries: **HTTP REST** (recommended) and raw TCP.
-
----
-
-### HTTP REST Server (Recommended)
-
-Standard REST API that works with curl, any HTTP client, or LLM tools.
-
-**Starting the server:**
-```bash
-# Default port 8081
-idasql -s database.i64 --http
-
-# Custom port and bind address
-idasql -s database.i64 --http 9000 --bind 0.0.0.0
-
-# With authentication
-idasql -s database.i64 --http 8081 --token mysecret
-```
-
-**HTTP Endpoints:**
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/` | GET | No | Welcome message |
-| `/help` | GET | No | API documentation (for LLM discovery) |
-| `/query` | POST | Yes* | Execute SQL (body = raw SQL) |
-| `/status` | GET | Yes* | Health check |
-| `/health` | GET | Yes* | Alias for /status |
-| `/shutdown` | POST | Yes* | Stop server |
-
-*Auth required only if `--token` was specified.
-
-**Example with curl:**
-```bash
-# Get API documentation
-curl http://localhost:8081/help
-
-# Execute SQL query
-curl -X POST http://localhost:8081/query -d "SELECT name, size FROM funcs LIMIT 5"
-
-# With authentication
-curl -X POST http://localhost:8081/query \
-     -H "Authorization: Bearer mysecret" \
-     -d "SELECT * FROM funcs"
-
-# Check status
-curl http://localhost:8081/status
-```
-
-**Response Format (JSON):**
-```json
-{"success": true, "columns": ["name", "size"], "rows": [["main", "500"]], "row_count": 1}
-```
-
-```json
-{"success": false, "error": "no such table: bad_table"}
-```
-
----
-
-### Raw TCP Server (Legacy)
-
-Binary protocol with length-prefixed JSON. Use only when HTTP is not available.
-
-**Starting the server:**
-```bash
-idasql -s database.i64 --server 13337
-idasql -s database.i64 --server 13337 --token mysecret
-```
-
-**Connecting as client:**
-```bash
-idasql --remote localhost:13337 -q "SELECT name FROM funcs LIMIT 5"
-idasql --remote localhost:13337 -i
-```

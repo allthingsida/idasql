@@ -27,6 +27,7 @@
 
 #include <sqlite3.h>
 #include <xsql/database.hpp>
+#include <xsql/json.hpp>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -169,17 +170,16 @@ static void sql_search_bytes_1(sqlite3_context* ctx, int argc, sqlite3_value** a
     find_byte_pattern(pattern, start_ea, end_ea, results);
 
     // Build JSON array
-    std::ostringstream json;
-    json << "[";
-    for (size_t i = 0; i < results.size(); i++) {
-        if (i > 0) json << ",";
-        json << "{\"address\":" << results[i].address;
-        json << ",\"matched_hex\":\"" << results[i].matched_hex << "\"";
-        json << ",\"size\":" << results[i].matched_bytes.size() << "}";
+    xsql::json arr = xsql::json::array();
+    for (const auto& r : results) {
+        arr.push_back({
+            {"address", r.address},
+            {"matched_hex", r.matched_hex},
+            {"size", r.matched_bytes.size()}
+        });
     }
-    json << "]";
 
-    std::string result = json.str();
+    std::string result = arr.dump();
     sqlite3_result_text(ctx, result.c_str(), -1, SQLITE_TRANSIENT);
 }
 
@@ -203,17 +203,16 @@ static void sql_search_bytes_3(sqlite3_context* ctx, int argc, sqlite3_value** a
     find_byte_pattern(pattern, start_ea, end_ea, results);
 
     // Build JSON array
-    std::ostringstream json;
-    json << "[";
-    for (size_t i = 0; i < results.size(); i++) {
-        if (i > 0) json << ",";
-        json << "{\"address\":" << results[i].address;
-        json << ",\"matched_hex\":\"" << results[i].matched_hex << "\"";
-        json << ",\"size\":" << results[i].matched_bytes.size() << "}";
+    xsql::json arr = xsql::json::array();
+    for (const auto& r : results) {
+        arr.push_back({
+            {"address", r.address},
+            {"matched_hex", r.matched_hex},
+            {"size", r.matched_bytes.size()}
+        });
     }
-    json << "]";
 
-    std::string result = json.str();
+    std::string result = arr.dump();
     sqlite3_result_text(ctx, result.c_str(), -1, SQLITE_TRANSIENT);
 }
 

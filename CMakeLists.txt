@@ -25,7 +25,7 @@ find_package(idasdk REQUIRED)
 # HTTP Server Support (optional) - must be set BEFORE libxsql
 # ============================================================================
 
-option(IDASQL_WITH_HTTP "Build with HTTP REST server support" OFF)
+option(IDASQL_WITH_HTTP "Build with HTTP REST server support" ON)
 
 if(IDASQL_WITH_HTTP)
     message(STATUS "idasql: Building with HTTP server support")

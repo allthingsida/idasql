@@ -1414,8 +1414,11 @@ struct DecompilerRegistry {
 
     void register_all(xsql::Database& db) {
         // Initialize Hex-Rays decompiler ONCE at startup
-        // If unavailable, tables will return empty results (no crash)
-        init_hexrays();
+        // If unavailable, skip registering decompiler tables entirely
+        if (!init_hexrays()) {
+            // Hex-Rays not available - don't register decompiler tables
+            return;
+        }
 
         // Index-based tables
         db.register_table("ida_pseudocode", &pseudocode);
