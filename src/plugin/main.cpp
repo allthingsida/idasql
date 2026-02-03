@@ -21,6 +21,8 @@
 // with MSVC standard library (__msvc_filebuf.hpp uses fgetc/fputc).
 // =============================================================================
 
+#include <idasql/platform.hpp>
+
 // Platform-specific socket includes - MUST come first on Windows
 #ifdef _WIN32
     #include <winsock2.h>
@@ -63,23 +65,23 @@
 
 // Platform-specific include order:
 // - Windows: json before IDA (IDA poisons stdlib functions)
-// - macOS: IDA before json (system headers define processor_t typedef)
-#ifdef __APPLE__
-// IDA SDK headers first on macOS
+// - macOS/Linux: IDA before json
+#include <idasql/platform_undef.hpp>
+
+#ifdef _WIN32
+#include <xsql/json.hpp>
 #include <ida.hpp>
 #include <idp.hpp>
 #include <loader.hpp>
 #include <kernwin.hpp>
 #include <idasql/database.hpp>
-#include <xsql/json.hpp>
 #else
-// JSON first on Windows/Linux
-#include <xsql/json.hpp>
 #include <ida.hpp>
 #include <idp.hpp>
 #include <loader.hpp>
 #include <kernwin.hpp>
 #include <idasql/database.hpp>
+#include <xsql/json.hpp>
 #endif
 
 // IDASQL CLI (command line interface)

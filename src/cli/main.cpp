@@ -28,6 +28,8 @@
  *   data symbol imports like callui).
  */
 
+#include <idasql/platform.hpp>
+
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -421,14 +423,15 @@ SQL queries end with semicolon (;)
 //
 // Platform-specific include order:
 // - Windows: json before IDA (IDA poisons stdlib functions)
-// - macOS: IDA before json (system headers define processor_t typedef)
+// - macOS/Linux: IDA before json
+#include <idasql/platform_undef.hpp>
 
-#ifdef __APPLE__
-#include <idasql/database.hpp>
+#ifdef _WIN32
 #include <xsql/json.hpp>
+#include <idasql/database.hpp>
 #else
-#include <xsql/json.hpp>
 #include <idasql/database.hpp>
+#include <xsql/json.hpp>
 #endif
 
 // ============================================================================

@@ -35,7 +35,7 @@ jobs:
         run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=ON -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Build
         run: cmake --build build --config Release
@@ -67,10 +67,8 @@ jobs:
       - name: Setup IDA SDK
         run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
 
-      # Note: AI Agent and HTTP disabled on macOS due to processor_t/token_t typedef
-      # conflicts with system headers (socket headers include mach_types.h).
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=OFF -DIDASQL_WITH_HTTP=OFF
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=ON -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Build
         run: cmake --build build --config Release
@@ -105,7 +103,7 @@ jobs:
         run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
 
       - name: Configure
-        run: cmake -B build -DIDASQL_WITH_AI_AGENT=ON
+        run: cmake -B build -DIDASQL_WITH_AI_AGENT=ON -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Build
         run: cmake --build build --config Release

@@ -1,6 +1,6 @@
 # examples/CMakeLists.txt - IDASQL Example Programs
 #
-# Build:
+# Standalone build:
 #   cmake -B build
 #   cmake --build build --config Release
 #
@@ -9,14 +9,17 @@
 #            build\Release\example_basic.exe database.i64
 #   Linux:   LD_LIBRARY_PATH=$IDASDK/src/bin ./build/example_basic database.i64
 
-cmake_minimum_required(VERSION 3.20)
-project(idasql_examples VERSION 1.0 LANGUAGES C CXX)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# Standalone mode: set up project and dependencies
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    cmake_minimum_required(VERSION 3.20)
+    project(idasql_examples VERSION 1.0 LANGUAGES C CXX)
+    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Include IDA SDK bootstrap
-include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
-find_package(idasdk REQUIRED)
+    # Include IDA SDK bootstrap
+    include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
+    find_package(idasdk REQUIRED)
+endif()
 
 # ============================================================================
 # xsql dependency (provides SQLite)

@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <idasql/platform.hpp>
+
 #include <idasql/vtable.hpp>
 #include <xsql/database.hpp>
 
@@ -23,12 +25,7 @@
 #include <vector>
 #include <map>
 
-// macOS: Undefine Mach kernel types before IDA headers
-// (system headers define processor_t and token_t as typedefs)
-#ifdef __APPLE__
-#undef processor_t
-#undef token_t
-#endif
+#include <idasql/platform_undef.hpp>
 
 // IDA SDK headers
 #include <ida.hpp>
