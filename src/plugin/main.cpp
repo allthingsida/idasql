@@ -46,11 +46,6 @@
     #define CLOSE_SOCKET close
 #endif
 
-// When building with AI Agent support, include nlohmann/json BEFORE IDA headers
-#ifdef IDASQL_HAS_AI_AGENT
-#include <nlohmann/json.hpp>
-#endif
-
 // Standard library includes
 #include <memory>
 #include <thread>
@@ -66,21 +61,26 @@
 #include <random>
 #include <iomanip>
 
-// macOS: Undefine Mach kernel's processor_t before IDA headers
-// (nlohmann/json pulls in system headers that define it as unsigned int)
+// Platform-specific include order:
+// - Windows: json before IDA (IDA poisons stdlib functions)
+// - macOS: IDA before json (system headers define processor_t typedef)
 #ifdef __APPLE__
-#undef processor_t
-#endif
-
-// IDA SDK headers
+// IDA SDK headers first on macOS
 #include <ida.hpp>
 #include <idp.hpp>
 #include <loader.hpp>
 #include <kernwin.hpp>
-
-// IDASQL library
 #include <idasql/database.hpp>
 #include <xsql/json.hpp>
+#else
+// JSON first on Windows/Linux
+#include <xsql/json.hpp>
+#include <ida.hpp>
+#include <idp.hpp>
+#include <loader.hpp>
+#include <kernwin.hpp>
+#include <idasql/database.hpp>
+#endif
 
 // IDASQL CLI (command line interface)
 #include "../common/idasql_cli.hpp"

@@ -67,8 +67,10 @@ jobs:
       - name: Setup IDA SDK
         run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
 
+      # Note: AI Agent and HTTP disabled on macOS due to processor_t/token_t typedef
+      # conflicts with system headers (socket headers include mach_types.h).
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=OFF -DIDASQL_WITH_HTTP=OFF
 
       - name: Build
         run: cmake --build build --config Release
@@ -121,76 +123,12 @@ jobs:
           path: build/bin/Release/idasql.exe
 
   # ============================================================================
-  # Tests
-  # Note: Tests are in xsql monorepo (tests/idasql), not here. Skips gracefully.
-  # ============================================================================
-  build-tests:
-    name: Tests (${{ matrix.os }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: Linux
-            runner: ubuntu-latest
-          - os: macOS
-            runner: macos-latest
-          - os: Windows
-            runner: windows-latest
-    env:
-      IDASDK: ${{ github.workspace }}/ida-sdk
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Check if tests directory exists
-        id: check_tests
-        shell: bash
-        run: |
-          if [ -d "tests" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Tests directory not found - skipping (tests are in xsql monorepo)"
-          fi
-
-      - name: Checkout submodules
-        if: steps.check_tests.outputs.exists == 'true'
-        shell: bash
-        run: git submodule update --init --recursive
-
-      - name: Setup IDA SDK
-        if: steps.check_tests.outputs.exists == 'true'
-        shell: bash
-        run: |
-          git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
-          mv "${IDASDK}/src/include/regex.h" "${IDASDK}/src/include/ida_regex.h"
-
-      - name: Configure
-        if: steps.check_tests.outputs.exists == 'true'
-        shell: bash
-        working-directory: tests
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        if: steps.check_tests.outputs.exists == 'true'
-        shell: bash
-        working-directory: tests
-        run: cmake --build build --config Release
-
-      - name: Test
-        if: steps.check_tests.outputs.exists == 'true'
-        shell: bash
-        working-directory: tests
-        run: ctest --test-dir build -C Release --output-on-failure
-
-  # ============================================================================
   # Release
   # ============================================================================
   publish-release:
     name: Publish Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build-linux, build-macos, build-windows, build-tests]
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

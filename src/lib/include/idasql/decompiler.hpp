@@ -23,6 +23,13 @@
 #include <vector>
 #include <map>
 
+// macOS: Undefine Mach kernel types before IDA headers
+// (system headers define processor_t and token_t as typedefs)
+#ifdef __APPLE__
+#undef processor_t
+#undef token_t
+#endif
+
 // IDA SDK headers
 #include <ida.hpp>
 #include <auto.hpp>

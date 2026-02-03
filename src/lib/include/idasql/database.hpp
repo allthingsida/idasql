@@ -30,10 +30,11 @@
 #include <functional>
 #include <memory>
 
-// macOS: Undefine Mach kernel's processor_t before IDA headers
-// (nlohmann/json pulls in system headers that define it as unsigned int)
+// macOS: Undefine Mach kernel types before IDA headers
+// (system headers define processor_t and token_t as typedefs)
 #ifdef __APPLE__
 #undef processor_t
+#undef token_t
 #endif
 
 // IDA SDK

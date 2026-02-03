@@ -53,7 +53,6 @@
 
 // Socket client for remote mode (shared library, no IDA dependency)
 #include <xsql/socket/client.hpp>
-#include <xsql/json.hpp>
 #ifdef IDASQL_HAS_HTTP
 #include <xsql/thinclient/server.hpp>
 #endif
@@ -419,8 +418,18 @@ SQL queries end with semicolon (;)
 // ============================================================================
 // From here on, code may call IDA functions. On Windows with /DELAYLOAD,
 // ida.dll and idalib.dll are loaded on first use.
+//
+// Platform-specific include order:
+// - Windows: json before IDA (IDA poisons stdlib functions)
+// - macOS: IDA before json (system headers define processor_t typedef)
 
+#ifdef __APPLE__
 #include <idasql/database.hpp>
+#include <xsql/json.hpp>
+#else
+#include <xsql/json.hpp>
+#include <idasql/database.hpp>
+#endif
 
 // ============================================================================
 // REPL - Interactive Mode (Local)
