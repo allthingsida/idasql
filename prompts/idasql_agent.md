@@ -130,6 +130,10 @@ idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
 | `.clear` | Clear session |
 | `.quit` / `.exit` | Exit REPL |
 | `.help` | Show available commands |
+| `.http start` | Start HTTP server on random port |
+| `.http stop` | Stop HTTP server |
+| `.http status` | Show HTTP server status |
+| `.agent` | Start AI agent mode |
 
 ### Performance Strategy
 
