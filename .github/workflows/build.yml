@@ -44,7 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: plugin-linux
-          path: ${{ env.IDASDK }}/src/bin/plugins/idasql_plugin.so
+          path: ${{ env.IDASDK }}/src/bin/plugins/idasql.so
 
       - name: Upload CLI
         uses: actions/upload-artifact@v4
@@ -77,7 +77,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: plugin-macos
-          path: ${{ env.IDASDK }}/src/bin/plugins/idasql_plugin.dylib
+          path: ${{ env.IDASDK }}/src/bin/plugins/idasql.dylib
 
       - name: Upload CLI
         uses: actions/upload-artifact@v4
@@ -112,7 +112,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: plugin-windows
-          path: ${{ env.IDASDK }}/src/bin/plugins/idasql_plugin.dll
+          path: ${{ env.IDASDK }}/src/bin/plugins/idasql.dll
 
       - name: Upload CLI
         uses: actions/upload-artifact@v4
@@ -162,9 +162,9 @@ jobs:
           mkdir -p release/plugin
           mkdir -p release/cli/{windows,linux,macos}
           # Plugin (flat, IDA-compatible)
-          cp plugins/idasql_plugin.dll release/plugin/ || true
-          cp plugins/idasql_plugin.so release/plugin/ || true
-          cp plugins/idasql_plugin.dylib release/plugin/ || true
+          cp plugins/idasql.dll release/plugin/ || true
+          cp plugins/idasql.so release/plugin/ || true
+          cp plugins/idasql.dylib release/plugin/ || true
           cp ida-plugin.json release/plugin/
           # CLI (organized by platform)
           cp cli-windows/idasql.exe release/cli/windows/ || true
