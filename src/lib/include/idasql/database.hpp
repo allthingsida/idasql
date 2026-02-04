@@ -295,12 +295,13 @@ private:
         types_ = std::make_unique<types::TypesRegistry>();
         types_->register_all(db_);
 
-        functions::register_sql_functions(db_);
-        search::register_search_bytes(db_);
-
         // Decompiler registry - register_all() handles runtime Hex-Rays detection
+        // Must be registered before SQL functions so hexrays_available() is set
         decompiler_ = std::make_unique<decompiler::DecompilerRegistry>();
         decompiler_->register_all(db_);
+
+        functions::register_sql_functions(db_);
+        search::register_search_bytes(db_);
     }
 };
 

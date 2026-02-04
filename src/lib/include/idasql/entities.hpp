@@ -41,6 +41,8 @@
 #include <ua.hpp>      // For instructions (insn_t, decode_insn)
 #include <moves.hpp>   // For bookmarks
 
+#include <idasql/decompiler.hpp>  // For invalidate_decompiler_cache
+
 namespace idasql {
 namespace entities {
 
@@ -125,6 +127,7 @@ inline VTableDef define_funcs() {
                 func_t* f = getn_func(i);
                 if (!f) return false;
                 bool ok = set_name(f->start_ea, new_name, SN_CHECK) != 0;
+                if (ok) decompiler::invalidate_decompiler_cache(f->start_ea);
                 auto_wait();
                 return ok;
             })
@@ -136,10 +139,19 @@ inline VTableDef define_funcs() {
             func_t* f = getn_func(i);
             return f ? static_cast<int64_t>(f->end_ea) : 0;
         })
-        .column_int64("flags", [](size_t i) -> int64_t {
-            func_t* f = getn_func(i);
-            return f ? static_cast<int64_t>(f->flags) : 0;
-        })
+        .column_int64_rw("flags",
+            [](size_t i) -> int64_t {
+                func_t* f = getn_func(i);
+                return f ? static_cast<int64_t>(f->flags) : 0;
+            },
+            [](size_t i, int64_t new_flags) -> bool {
+                func_t* f = getn_func(i);
+                if (!f) return false;
+                f->flags = static_cast<ushort>(new_flags);
+                bool ok = update_func(f);
+                if (ok) decompiler::invalidate_decompiler_cache(f->start_ea);
+                return ok;
+            })
         // Prototype columns - return type
         .column_text("return_type", [](size_t i) -> std::string {
             func_t* f = getn_func(i);
@@ -270,6 +282,7 @@ inline VTableDef define_names() {
                 ea_t ea = get_nlist_ea(i);
                 if (ea == BADADDR) return false;
                 bool ok = set_name(ea, new_name, SN_CHECK) != 0;
+                if (ok) decompiler::invalidate_decompiler_cache(ea);
                 auto_wait();
                 return ok;
             })

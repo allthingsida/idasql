@@ -37,6 +37,13 @@ struct CommandCallbacks {
     std::function<std::string()> mcp_status;      // Get MCP status
     std::function<std::string()> mcp_start;       // Start MCP server
     std::function<std::string()> mcp_stop;        // Stop MCP server
+
+#ifdef IDASQL_HAS_HTTP
+    // HTTP server callbacks (optional)
+    std::function<std::string()> http_status;     // Get HTTP server status
+    std::function<std::string()> http_start;      // Start HTTP server
+    std::function<std::string()> http_stop;       // Stop HTTP server
+#endif
 };
 
 /**
@@ -98,6 +105,14 @@ inline CommandResult handle_command(
                  "  .mcp start      Start MCP server\n"
                  "  .mcp stop       Stop MCP server\n"
                  "  .mcp help       Show MCP help\n"
+#endif
+#ifdef IDASQL_HAS_HTTP
+                 "\n"
+                 "HTTP Server:\n"
+                 "  .http           Show status or start if not running\n"
+                 "  .http start     Start HTTP server\n"
+                 "  .http stop      Stop HTTP server\n"
+                 "  .http help      Show HTTP help\n"
 #endif
                  "\n"
                  "SQL:\n"
@@ -169,6 +184,62 @@ inline CommandResult handle_command(
         }
 #else
         output = "MCP server requires AI agent support. Rebuild with -DIDASQL_WITH_AI_AGENT=ON";
+#endif
+        return CommandResult::HANDLED;
+    }
+
+    // .http commands (HTTP server control)
+    if (input.rfind(".http", 0) == 0) {
+#ifdef IDASQL_HAS_HTTP
+        std::string subargs = input.length() > 5 ? input.substr(5) : "";
+        // Trim leading whitespace
+        size_t start = subargs.find_first_not_of(" \t");
+        if (start != std::string::npos)
+            subargs = subargs.substr(start);
+
+        if (subargs.empty()) {
+            // .http - show status, start if not running
+            if (callbacks.http_status) {
+                output = callbacks.http_status();
+            } else {
+                output = "HTTP server not available";
+            }
+        }
+        else if (subargs == "start") {
+            if (callbacks.http_start) {
+                output = callbacks.http_start();
+            } else {
+                output = "HTTP server not available";
+            }
+        }
+        else if (subargs == "stop") {
+            if (callbacks.http_stop) {
+                output = callbacks.http_stop();
+            } else {
+                output = "HTTP server not available";
+            }
+        }
+        else if (subargs == "help") {
+            output = "HTTP Server Commands:\n"
+                     "  .http            Show status, start if not running\n"
+                     "  .http start      Start HTTP server on random port\n"
+                     "  .http stop       Stop HTTP server\n"
+                     "  .http help       Show this help\n"
+                     "\n"
+                     "Endpoints:\n"
+                     "  GET  /help       API documentation\n"
+                     "  POST /query      Execute SQL (body = raw SQL)\n"
+                     "  GET  /status     Health check\n"
+                     "  POST /shutdown   Stop server\n"
+                     "\n"
+                     "Example:\n"
+                     "  curl -X POST http://127.0.0.1:<port>/query -d \"SELECT name FROM funcs LIMIT 5\"\n";
+        }
+        else {
+            output = "Unknown HTTP command: " + subargs + "\nUse '.http help' for available commands.";
+        }
+#else
+        output = "HTTP server not compiled in. Rebuild with -DIDASQL_WITH_HTTP=ON";
 #endif
         return CommandResult::HANDLED;
     }

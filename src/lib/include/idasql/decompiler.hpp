@@ -67,6 +67,16 @@ inline bool init_hexrays() {
     return hexrays_available();
 }
 
+// Invalidate decompiler cache for the function containing ea.
+// Safe to call even if Hex-Rays is unavailable or ea is not in a function.
+inline void invalidate_decompiler_cache(ea_t ea) {
+    if (!hexrays_available()) return;
+    func_t* f = get_func(ea);
+    if (f) {
+        mark_cfunc_dirty(f->start_ea, false);
+    }
+}
+
 // ============================================================================
 // Data Structures
 // ============================================================================
@@ -166,7 +176,7 @@ inline std::string get_full_ctype_name(ctype_t op) {
 inline bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_addr) {
     lines.clear();
 
-    if (!init_hexrays()) return false;
+    if (!hexrays_available()) return false;
 
     func_t* f = get_func(func_addr);
     if (!f) return false;
@@ -197,7 +207,7 @@ inline bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_add
 inline void collect_all_pseudocode(std::vector<PseudocodeLine>& lines) {
     lines.clear();
 
-    if (!init_hexrays()) return;
+    if (!hexrays_available()) return;
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {

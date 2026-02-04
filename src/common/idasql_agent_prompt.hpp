@@ -177,18 +177,18 @@ This approach is significantly faster for iterative analysis since the database 
 
 ## Tables Reference
 
-### Entity Tables (Read-Only)
+### Entity Tables
 
 #### funcs
 All detected functions in the binary with prototype information.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Function start address |
-| `name` | TEXT | Function name |
-| `size` | INT | Function size in bytes |
-| `end_ea` | INT | Function end address |
-| `flags` | INT | Function flags |
+| Column | Type | Writable | Description |
+|--------|------|----------|-------------|
+| `address` | INT | | Function start address |
+| `name` | TEXT | YES | Function name |
+| `size` | INT | | Function size in bytes |
+| `end_ea` | INT | | Function end address |
+| `flags` | INT | YES | Function flags (FUNC_NORET, FUNC_FRAME, etc.) |
 
 **Prototype columns** (populated when type info available):
 
@@ -474,7 +474,7 @@ The following tables support SQL UPDATE and DELETE:
 
 | Table | UPDATE columns | DELETE |
 |-------|---------------|--------|
-| `funcs` | `name` | No |
+| `funcs` | `name`, `flags` | No |
 | `names` | `name` | Yes |
 | `comments` | `comment`, `rep_comment` | Yes |
 | `bookmarks` | `description` | Yes |
@@ -484,6 +484,9 @@ The following tables support SQL UPDATE and DELETE:
 ```sql
 -- Rename a function
 UPDATE funcs SET name = 'my_main' WHERE address = 0x401000;
+
+-- Update function flags (e.g., mark as noreturn)
+UPDATE funcs SET flags = flags | 4 WHERE address = 0x401000;
 
 -- Rename any named address
 UPDATE names SET name = 'my_global' WHERE address = 0x404000;
@@ -1047,15 +1050,21 @@ SELECT decode_insn(0x401000);
 | Function | Description |
 |----------|-------------|
 | `decompile(addr)` | Full pseudocode (requires Hex-Rays) |
+| `decompile(addr, 1)` | Full pseudocode with cache refresh |
 | `list_lvars(addr)` | List local variables as JSON |
-| `rename_lvar(addr, old, new)` | Rename a local variable |
+| `rename_lvar(addr, idx, new)` | Rename a local variable by index |
+
+**Note:** The decompiler cache is automatically invalidated when you rename functions or update function flags via SQL. You can still use `SELECT decompile(addr, 1)` to force a refresh if needed.
 
 ```sql
 -- Get all local variables in a function
 SELECT list_lvars(0x401000);
 
--- Rename a variable
-SELECT rename_lvar(0x401000, 'v1', 'buffer_size');
+-- Rename a variable by index
+SELECT rename_lvar(0x401000, 2, 'buffer_size');
+
+-- Decompile will reflect changes automatically
+SELECT decompile(0x401000);
 ```
 
 ### File Generation
