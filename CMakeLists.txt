@@ -57,15 +57,6 @@ endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/lib/include)
 
-# Option to build idalib-based tests (requires IDASDK)
-option(BUILD_IDALIB "Build idalib-based tests (test3)" OFF)
-
-# Unit tests (no IDA dependency)
-option(IDASQL_BUILD_TESTS "Build IDASQL unit tests" ON)
-if(IDASQL_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests")
-    add_subdirectory(tests)
-endif()
-
 # ============================================================================
 # AI Agent Support (libagents - optional)
 # ============================================================================
@@ -112,7 +103,7 @@ endif()
 add_subdirectory(src)
 
 # Examples (optional)
-option(IDASQL_BUILD_EXAMPLES "Build IDASQL example programs" OFF)
+option(IDASQL_BUILD_EXAMPLES "Build IDASQL example programs" ON)
 if(IDASQL_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples")
     add_subdirectory(examples)
 endif()

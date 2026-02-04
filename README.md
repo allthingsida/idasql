@@ -76,6 +76,8 @@ idasql> SELECT COUNT(*) FROM strings;
 idasql> SELECT name FROM funcs WHERE size > 1000;
 idasql> .tables          -- list available tables
 idasql> .schema funcs    -- show table schema
+idasql> .http start      -- start HTTP server from REPL
+idasql> .mcp start       -- start MCP server from REPL
 idasql> .quit            -- exit
 ```
 
@@ -429,6 +431,29 @@ idasql -s kernel.i64 --http 8082
 ```
 
 Endpoints: `/status`, `/help`, `/query`, `/shutdown`
+
+### HTTP Server from REPL
+
+Start an HTTP server interactively from the REPL or IDA plugin CLI:
+
+```
+idasql -s database.i64 -i
+idasql> .http start
+HTTP server started on port 8142
+URL: http://127.0.0.1:8142
+...
+Press Ctrl+C to stop and return to REPL.
+```
+
+In IDA plugin (non-blocking):
+```
+idasql> .http start
+HTTP server started on port 8142
+idasql> .http stop
+HTTP server stopped
+```
+
+The server uses a random port (8100-8199) to avoid conflicts with `--http`.
 
 ## MCP Server
 

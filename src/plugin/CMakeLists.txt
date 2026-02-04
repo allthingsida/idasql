@@ -65,3 +65,29 @@ if(IDASQL_WITH_AI_AGENT)
 
     message(STATUS "idasql_plugin: AI agent support enabled")
 endif()
+
+# ============================================================================
+# HTTP Server support (from parent project)
+# ============================================================================
+
+if(IDASQL_WITH_HTTP)
+    target_sources(idasql_plugin PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common/http_server.cpp
+    )
+    target_include_directories(idasql_plugin PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common
+    )
+    target_compile_definitions(idasql_plugin PRIVATE IDASQL_HAS_HTTP XSQL_HAS_THINCLIENT)
+
+    # Fetch cpp-httplib if not already available
+    include(FetchContent)
+    FetchContent_Declare(
+        cpp_httplib
+        GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+        GIT_TAG v0.15.3
+    )
+    FetchContent_MakeAvailable(cpp_httplib)
+    target_include_directories(idasql_plugin PRIVATE ${cpp_httplib_SOURCE_DIR})
+
+    message(STATUS "idasql_plugin: HTTP server support enabled")
+endif()

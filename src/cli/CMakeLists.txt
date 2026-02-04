@@ -69,6 +69,9 @@ endif()
 
 # HTTP server support
 if(IDASQL_WITH_HTTP)
+    target_sources(idasql_cli PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../common/http_server.cpp
+    )
     target_compile_definitions(idasql_cli PRIVATE IDASQL_HAS_HTTP XSQL_HAS_THINCLIENT)
 
     # Fetch cpp-httplib if not already available

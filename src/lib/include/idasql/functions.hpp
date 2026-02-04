@@ -282,6 +282,7 @@ static void sql_set_name(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
     const char* name = (const char*)sqlite3_value_text(argv[1]);
 
     bool success = set_name(ea, name, SN_CHECK) != 0;
+    if (success) decompiler::invalidate_decompiler_cache(ea);
     sqlite3_result_int(ctx, success ? 1 : 0);
 }
 
@@ -413,6 +414,54 @@ static void sql_decompile(sqlite3_context* ctx, int argc, sqlite3_value** argv) 
     if (!func) {
         sqlite3_result_error(ctx, "No function at address", -1);
         return;
+    }
+
+    hexrays_failure_t hf;
+    cfuncptr_t cfunc = decompile(func, &hf);
+    if (!cfunc) {
+        std::string err = "Decompilation failed: " + std::string(hf.desc().c_str());
+        sqlite3_result_error(ctx, err.c_str(), -1);
+        return;
+    }
+
+    const strvec_t& sv = cfunc->get_pseudocode();
+    std::ostringstream result;
+    for (size_t i = 0; i < sv.size(); i++) {
+        qstring line = sv[i].line;
+        tag_remove(&line);
+        if (i > 0) result << "\n";
+        result << line.c_str();
+    }
+
+    std::string str = result.str();
+    sqlite3_result_text(ctx, str.c_str(), -1, SQLITE_TRANSIENT);
+}
+
+// decompile(address, refresh) - Get decompiled pseudocode with optional cache invalidation
+// When refresh=1, invalidates the cached decompilation before decompiling.
+// Use after renaming functions or local variables to get fresh pseudocode.
+static void sql_decompile_2(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+    if (argc < 2) {
+        sqlite3_result_error(ctx, "decompile requires 2 arguments (address, refresh)", -1);
+        return;
+    }
+
+    if (!decompiler::hexrays_available()) {
+        sqlite3_result_error(ctx, "Decompiler not available (requires Hex-Rays license)", -1);
+        return;
+    }
+
+    ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
+    int refresh = sqlite3_value_int(argv[1]);
+
+    func_t* func = get_func(ea);
+    if (!func) {
+        sqlite3_result_error(ctx, "No function at address", -1);
+        return;
+    }
+
+    if (refresh) {
+        mark_cfunc_dirty(func->start_ea, false);
     }
 
     hexrays_failure_t hf;
@@ -1088,7 +1137,8 @@ static void sql_gen_schema_dot(sqlite3_context* ctx, int argc, sqlite3_value** a
 // ============================================================================
 
 // rename_lvar(func_addr, lvar_idx, new_name) - Rename a local variable
-// Returns JSON with result details for debugging the API
+// Uses locator-based rename_lvar_at() for precise identification by index.
+// Returns JSON with result details.
 static void sql_rename_lvar(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
     if (argc < 3) {
         sqlite3_result_error(ctx, "rename_lvar requires 3 arguments (func_addr, lvar_idx, new_name)", -1);
@@ -1104,71 +1154,17 @@ static void sql_rename_lvar(sqlite3_context* ctx, int argc, sqlite3_value** argv
         return;
     }
 
+    bool success = decompiler::rename_lvar_at(func_addr, lvar_idx, new_name);
+
     xsql::json result = {
         {"func_addr", func_addr},
         {"lvar_idx", lvar_idx},
-        {"new_name", new_name}
+        {"new_name", new_name},
+        {"success", success}
     };
-
-    // Check cached Hex-Rays availability
-    if (!decompiler::hexrays_available()) {
-        result["error"] = "Hex-Rays not available";
-        sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
-        return;
+    if (!success) {
+        result["error"] = "rename failed";
     }
-
-    // Get function
-    func_t* f = get_func(func_addr);
-    if (!f) {
-        result["error"] = "Function not found";
-        sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
-        return;
-    }
-
-    // Decompile
-    hexrays_failure_t hf;
-    cfuncptr_t cfunc = decompile(f, &hf);
-    if (!cfunc) {
-        result["error"] = std::string("Decompilation failed: ") + hf.str.c_str();
-        sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
-        return;
-    }
-
-    // Get lvars
-    lvars_t* lvars = cfunc->get_lvars();
-    if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size()) {
-        result["error"] = "Invalid lvar index (count=" + std::to_string(lvars ? lvars->size() : 0) + ")";
-        sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
-        return;
-    }
-
-    lvar_t& lv = (*lvars)[lvar_idx];
-    std::string old_name = lv.name.c_str();
-    result["old_name"] = old_name;
-
-    // Try approach 1: rename_lvar (func_addr, old_name, new_name)
-    bool success1 = rename_lvar(func_addr, old_name.c_str(), new_name);
-    result["rename_lvar_result"] = success1;
-
-    // Try approach 2: modify_user_lvar_info
-    lvar_saved_info_t lsi;
-    lsi.ll = lv;  // Copy lvar_locator_t
-    lsi.name = new_name;
-    lsi.flags = 0;  // No special LVINF_* flags needed
-
-    bool success2 = modify_user_lvar_info(func_addr, MLI_NAME, lsi);
-    result["modify_user_lvar_info_result"] = success2;
-
-    // Verify by re-decompiling
-    cfuncptr_t cfunc2 = decompile(f, &hf);
-    if (cfunc2) {
-        lvars_t* lvars2 = cfunc2->get_lvars();
-        if (lvars2 && static_cast<size_t>(lvar_idx) < lvars2->size()) {
-            result["verified_name"] = (*lvars2)[lvar_idx].name.c_str();
-        }
-    }
-
-    result["success"] = (success1 || success2);
     sqlite3_result_text(ctx, result.dump().c_str(), -1, SQLITE_TRANSIENT);
 }
 
@@ -1515,10 +1511,13 @@ inline bool register_sql_functions(xsql::Database& db) {
     sqlite3_create_function(db.handle(), "xrefs_to", 1, SQLITE_UTF8, nullptr, sql_xrefs_to, nullptr, nullptr);
     sqlite3_create_function(db.handle(), "xrefs_from", 1, SQLITE_UTF8, nullptr, sql_xrefs_from, nullptr, nullptr);
 
-    // Decompiler
-    sqlite3_create_function(db.handle(), "decompile", 1, SQLITE_UTF8, nullptr, sql_decompile, nullptr, nullptr);
-    sqlite3_create_function(db.handle(), "list_lvars", 1, SQLITE_UTF8, nullptr, sql_list_lvars, nullptr, nullptr);
-    sqlite3_create_function(db.handle(), "rename_lvar", 3, SQLITE_UTF8, nullptr, sql_rename_lvar, nullptr, nullptr);
+    // Decompiler (only registered if Hex-Rays is available)
+    if (decompiler::hexrays_available()) {
+        sqlite3_create_function(db.handle(), "decompile", 1, SQLITE_UTF8, nullptr, sql_decompile, nullptr, nullptr);
+        sqlite3_create_function(db.handle(), "decompile", 2, SQLITE_UTF8, nullptr, sql_decompile_2, nullptr, nullptr);
+        sqlite3_create_function(db.handle(), "list_lvars", 1, SQLITE_UTF8, nullptr, sql_list_lvars, nullptr, nullptr);
+        sqlite3_create_function(db.handle(), "rename_lvar", 3, SQLITE_UTF8, nullptr, sql_rename_lvar, nullptr, nullptr);
+    }
 
     // Address utilities
     sqlite3_create_function(db.handle(), "next_head", 1, SQLITE_UTF8, nullptr, sql_next_head, nullptr, nullptr);

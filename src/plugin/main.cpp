@@ -96,6 +96,11 @@
 #include "../common/ai_agent.hpp"
 #endif
 
+// HTTP server for .http REPL command
+#ifdef IDASQL_HAS_HTTP
+#include "../common/http_server.hpp"
+#endif
+
 //=============================================================================
 // JSON Protocol Helpers
 //=============================================================================
@@ -509,6 +514,10 @@ struct idasql_plugmod_t : public plugmod_t
     std::unique_ptr<idasql::AIAgent> mcp_agent_;  // AI agent for MCP
 #endif
 
+#ifdef IDASQL_HAS_HTTP
+    idasql::IDAHTTPServer http_server_;
+#endif
+
     idasql_plugmod_t()
     {
         engine_ = std::make_unique<idasql::QueryEngine>();
@@ -592,6 +601,30 @@ struct idasql_plugmod_t : public plugmod_t
             };
 #endif
 
+#ifdef IDASQL_HAS_HTTP
+            // Setup HTTP server callbacks
+            cli_->session().callbacks().http_status = [this]() -> std::string {
+                if (http_server_.is_running()) {
+                    return idasql::format_http_status(http_server_.port(), true);
+                } else {
+                    return "HTTP server not running\nUse '.http start' to start\n";
+                }
+            };
+
+            cli_->session().callbacks().http_start = [this]() -> std::string {
+                return start_http_server();
+            };
+
+            cli_->session().callbacks().http_stop = [this]() -> std::string {
+                if (http_server_.is_running()) {
+                    http_server_.stop();
+                    return "HTTP server stopped";
+                } else {
+                    return "HTTP server not running";
+                }
+            };
+#endif
+
             // Auto-install CLI so it's available immediately
             // User can still toggle it off with run(23) if desired
             cli_->install();
@@ -639,6 +672,43 @@ struct idasql_plugmod_t : public plugmod_t
     }
 #endif
 
+#ifdef IDASQL_HAS_HTTP
+    std::string start_http_server()
+    {
+        if (http_server_.is_running()) {
+            return idasql::format_http_status(http_server_.port(), true);
+        }
+
+        // SQL executor that uses execute_sync for thread safety and returns JSON
+        idasql::HTTPQueryCallback sql_cb = [this](const std::string& sql) -> std::string {
+            query_request_t req(engine_.get(), sql);
+            execute_sync(req, MFF_WRITE);
+
+            xsql::json j = {{"success", req.result.success}};
+            if (req.result.success) {
+                j["columns"] = req.result.columns;
+                xsql::json rows = xsql::json::array();
+                for (const auto& row : req.result.rows) {
+                    rows.push_back(row.values);
+                }
+                j["rows"] = rows;
+                j["row_count"] = req.result.rows.size();
+            } else {
+                j["error"] = req.result.error;
+            }
+            return j.dump();
+        };
+
+        // Start HTTP server with random port (port=0), no queue (plugin mode)
+        int port = http_server_.start(0, sql_cb);
+        if (port <= 0) {
+            return "Error: Failed to start HTTP server";
+        }
+
+        return idasql::format_http_info(port);
+    }
+#endif
+
     ~idasql_plugmod_t()
     {
 #ifdef IDASQL_HAS_AI_AGENT
@@ -647,6 +717,12 @@ struct idasql_plugmod_t : public plugmod_t
             mcp_server_.stop();
         }
         mcp_agent_.reset();
+#endif
+#ifdef IDASQL_HAS_HTTP
+        // Stop HTTP server before destroying engine
+        if (http_server_.is_running()) {
+            http_server_.stop();
+        }
 #endif
         if (cli_) cli_->uninstall();
         server_.stop();

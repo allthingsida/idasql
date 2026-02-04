@@ -57,6 +57,7 @@
 #include <xsql/socket/client.hpp>
 #ifdef IDASQL_HAS_HTTP
 #include <xsql/thinclient/server.hpp>
+#include "../common/http_server.hpp"
 #endif
 
 #include "../common/sqlite_utils.hpp"
@@ -73,6 +74,9 @@ namespace {
     idasql::AIAgent* g_agent = nullptr;
     std::unique_ptr<idasql::IDAMCPServer> g_mcp_server;
     std::unique_ptr<idasql::AIAgent> g_mcp_agent;
+#ifdef IDASQL_HAS_HTTP
+    std::unique_ptr<idasql::IDAHTTPServer> g_repl_http_server;
+#endif
 }
 
 extern "C" void signal_handler(int sig) {
@@ -500,6 +504,11 @@ static std::string execute_sql_to_string(idasql::Database& db, const std::string
     }
 }
 
+// Forward declaration (defined in HTTP section below)
+#ifdef IDASQL_HAS_HTTP
+static std::string query_result_to_json(idasql::Database& db, const std::string& sql);
+#endif
+
 #ifdef IDASQL_HAS_AI_AGENT
 static void run_repl(idasql::Database& db, bool agent_mode, bool verbose,
                      const std::string& provider_override = "") {
@@ -648,6 +657,13 @@ static void run_repl(idasql::Database& db) {
                 std::cout << "Press Ctrl+C to stop MCP server and return to REPL...\n\n";
                 std::cout.flush();
 
+                // Install signal handler so Ctrl+C sets g_quit_requested
+                g_quit_requested.store(false);
+                auto old_handler = std::signal(SIGINT, signal_handler);
+#ifdef _WIN32
+                auto old_break_handler = std::signal(SIGBREAK, signal_handler);
+#endif
+
                 // Set interrupt check to stop on Ctrl+C
                 g_mcp_server->set_interrupt_check([]() {
                     return g_quit_requested.load();
@@ -657,7 +673,11 @@ static void run_repl(idasql::Database& db) {
                 // This blocks until Ctrl+C or .mcp stop via another client
                 g_mcp_server->run_until_stopped();
 
-                // Cleanup
+                // Restore previous signal handler
+                std::signal(SIGINT, old_handler);
+#ifdef _WIN32
+                std::signal(SIGBREAK, old_break_handler);
+#endif
                 g_mcp_agent.reset();
                 g_quit_requested.store(false);  // Reset for continued REPL use
 
@@ -672,6 +692,75 @@ static void run_repl(idasql::Database& db) {
                 }
                 return "MCP server not running\n";
             };
+
+#ifdef IDASQL_HAS_HTTP
+            // HTTP server callbacks
+            callbacks.http_status = []() -> std::string {
+                if (g_repl_http_server && g_repl_http_server->is_running()) {
+                    return idasql::format_http_status(g_repl_http_server->port(), true);
+                }
+                return "HTTP server not running\nUse '.http start' to start\n";
+            };
+
+            callbacks.http_start = [&db]() -> std::string {
+                if (g_repl_http_server && g_repl_http_server->is_running()) {
+                    return idasql::format_http_status(g_repl_http_server->port(), true);
+                }
+
+                // Create HTTP server if needed
+                if (!g_repl_http_server) {
+                    g_repl_http_server = std::make_unique<idasql::IDAHTTPServer>();
+                }
+
+                // SQL executor - called on main thread via run_until_stopped()
+                idasql::HTTPQueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
+                    return query_result_to_json(db, sql);
+                };
+
+                // Start with use_queue=true (CLI mode), port=0 (random 8100-8199)
+                int port = g_repl_http_server->start(0, sql_cb, "127.0.0.1", true);
+                if (port <= 0) {
+                    return "Error: Failed to start HTTP server\n";
+                }
+
+                // Print info
+                std::cout << idasql::format_http_info(port);
+                std::cout.flush();
+
+                // Install signal handler so Ctrl+C sets g_quit_requested
+                g_quit_requested.store(false);
+                auto old_handler = std::signal(SIGINT, signal_handler);
+#ifdef _WIN32
+                auto old_break_handler = std::signal(SIGBREAK, signal_handler);
+#endif
+
+                // Set interrupt check to stop on Ctrl+C
+                g_repl_http_server->set_interrupt_check([]() {
+                    return g_quit_requested.load();
+                });
+
+                // Enter wait loop - processes HTTP commands on main thread
+                // This blocks until Ctrl+C or /shutdown
+                g_repl_http_server->run_until_stopped();
+
+                // Restore previous signal handler
+                std::signal(SIGINT, old_handler);
+#ifdef _WIN32
+                std::signal(SIGBREAK, old_break_handler);
+#endif
+                g_quit_requested.store(false);  // Reset for continued REPL use
+
+                return "HTTP server stopped. Returning to REPL.\n";
+            };
+
+            callbacks.http_stop = []() -> std::string {
+                if (g_repl_http_server && g_repl_http_server->is_running()) {
+                    g_repl_http_server->stop();
+                    return "HTTP server stopped\n";
+                }
+                return "HTTP server not running\n";
+            };
+#endif // IDASQL_HAS_HTTP
 
             std::string output;
             auto result = idasql::handle_command(line, callbacks, output);
