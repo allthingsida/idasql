@@ -103,7 +103,7 @@ endif()
 add_subdirectory(src)
 
 # Examples (optional)
-option(IDASQL_BUILD_EXAMPLES "Build IDASQL example programs" OFF)
+option(IDASQL_BUILD_EXAMPLES "Build IDASQL example programs" ON)
 if(IDASQL_BUILD_EXAMPLES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples")
     add_subdirectory(examples)
 endif()
