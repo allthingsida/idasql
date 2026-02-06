@@ -16,6 +16,8 @@ target_compile_definitions(idasql_cli PRIVATE USE_IDA_SDK)
 set_target_properties(idasql_cli PROPERTIES
     OUTPUT_NAME "idasql"
     RUNTIME_OUTPUT_DIRECTORY "${IDABIN}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${IDABIN}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${IDABIN}"
 )
 
 # Add Windows manifest for UTF-8 support (Windows 10 1903+)
