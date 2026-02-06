@@ -70,7 +70,7 @@ if(IDASQL_WITH_AI_AGENT)
     set(LIBAGENTS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(LIBAGENTS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(LIBAGENTS_BUILD_CLI OFF CACHE BOOL "" FORCE)
-    set(LIBAGENTS_BUILD_COPILOT OFF CACHE BOOL "" FORCE)
+    set(LIBAGENTS_BUILD_COPILOT ON CACHE BOOL "" FORCE)
 
     # FetchContent from GitHub (with recursive submodules for fastmcpp, SDKs)
     message(STATUS "idasql: Fetching libagents from GitHub...")
