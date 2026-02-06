@@ -12,8 +12,11 @@ target_link_libraries(idasql_cli PRIVATE xsql::xsql)
 target_include_directories(idasql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include)
 target_compile_definitions(idasql_cli PRIVATE USE_IDA_SDK)
 
-# Output name: idasql (not idasql_cli)
-set_target_properties(idasql_cli PROPERTIES OUTPUT_NAME "idasql")
+# Output name: idasql (not idasql_cli), placed next to ida.exe for idalib
+set_target_properties(idasql_cli PROPERTIES
+    OUTPUT_NAME "idasql"
+    RUNTIME_OUTPUT_DIRECTORY "${IDABIN}"
+)
 
 # Add Windows manifest for UTF-8 support (Windows 10 1903+)
 if(WIN32)
@@ -87,5 +90,4 @@ if(IDASQL_WITH_HTTP)
     message(STATUS "idasql_cli: HTTP server support enabled")
 endif()
 
-# Note: idasql.exe is NOT bundled with Claude plugin.
-# Users must install idasql.exe next to ida.exe manually.
+# idasql.exe is placed next to ida.exe via RUNTIME_OUTPUT_DIRECTORY above.

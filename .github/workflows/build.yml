@@ -50,7 +50,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cli-linux
-          path: build/bin/idasql
+          path: ${{ env.IDASDK }}/src/bin/idasql
 
   build-macos:
     name: Build (macOS)
@@ -83,7 +83,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cli-macos
-          path: build/bin/idasql
+          path: ${{ env.IDASDK }}/src/bin/idasql
 
   build-windows:
     name: Build (Windows)
@@ -118,7 +118,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cli-windows
-          path: build/bin/Release/idasql.exe
+          path: ${{ env.IDASDK }}/src/bin/idasql.exe
 
   # ============================================================================
   # Release
