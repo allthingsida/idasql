@@ -1007,7 +1007,9 @@ inline bool rename_lvar_at(ea_t func_addr, int lvar_idx, const char* new_name) {
     lsi.name = new_name;
     lsi.flags = 0;  // No special flags needed
 
-    return modify_user_lvar_info(func_addr, MLI_NAME, lsi);
+    bool ok = modify_user_lvar_info(func_addr, MLI_NAME, lsi);
+    if (ok) invalidate_decompiler_cache(func_addr);
+    return ok;
 }
 
 // Helper: Set lvar type by func_addr and lvar index
@@ -1047,7 +1049,9 @@ inline bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str)
     lsi.type = tif;
     lsi.flags = 0;  // No special flags needed
 
-    return modify_user_lvar_info(func_addr, MLI_TYPE, lsi);
+    bool ok = modify_user_lvar_info(func_addr, MLI_TYPE, lsi);
+    if (ok) invalidate_decompiler_cache(func_addr);
+    return ok;
 }
 
 inline VTableDef define_ctree_lvars() {
