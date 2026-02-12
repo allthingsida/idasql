@@ -49,6 +49,7 @@
 #include <idasql/functions.hpp>
 #include <idasql/disassembly.hpp>
 #include <idasql/search_bytes.hpp>
+#include <idasql/entities_dbg.hpp>
 
 // Optional: Decompiler (may not be available)
 #ifdef USE_HEXRAYS
@@ -274,6 +275,7 @@ private:
     std::unique_ptr<extended::ExtendedRegistry> extended_;
     std::unique_ptr<disassembly::DisassemblyRegistry> disassembly_;
     std::unique_ptr<types::TypesRegistry> types_;
+    std::unique_ptr<debugger::DebuggerRegistry> debugger_;
     std::unique_ptr<decompiler::DecompilerRegistry> decompiler_;  // Runtime detection
 
     void init() {
@@ -294,6 +296,9 @@ private:
 
         types_ = std::make_unique<types::TypesRegistry>();
         types_->register_all(db_);
+
+        debugger_ = std::make_unique<debugger::DebuggerRegistry>();
+        debugger_->register_all(db_);
 
         // Decompiler registry - register_all() handles runtime Hex-Rays detection
         // Must be registered before SQL functions so hexrays_available() is set

@@ -5,6 +5,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Silence CMake policy warnings from dependencies
+cmake_policy(SET CMP0135 NEW)                     # Use extraction time for DOWNLOAD_EXTRACT_TIMESTAMP
+set(CMAKE_POLICY_DEFAULT_CMP0169 OLD CACHE STRING "" FORCE) # Allow FetchContent_Populate() in dependencies
+
 include(FetchContent)
 
 # Output directories (only set if building standalone)
@@ -48,7 +52,8 @@ else()
     message(STATUS "idasql: Fetching libxsql from GitHub...")
     FetchContent_Declare(libxsql
         GIT_REPOSITORY https://github.com/0xeb/libxsql.git
-        GIT_TAG        main
+        GIT_TAG        fc9ceff39645a4957e0fd40403664e4cd23b00d4
+        GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(libxsql)
 endif()
@@ -76,10 +81,40 @@ if(IDASQL_WITH_AI_AGENT)
     message(STATUS "idasql: Fetching libagents from GitHub...")
     FetchContent_Declare(libagents
         GIT_REPOSITORY https://github.com/0xeb/libagents.git
-        GIT_TAG        main
+        GIT_TAG        708eddb9a622777c49a5da6a055b02ea00cb10f2
+        GIT_SHALLOW    TRUE
         GIT_SUBMODULES_RECURSE TRUE
     )
     FetchContent_MakeAvailable(libagents)
+
+    # ========================================================================
+    # Build speed: enable MSVC parallel compilation for dependency targets.
+    # IDA SDK's /MP only applies to ida_add_plugin/ida_add_idalib targets;
+    # FetchContent dependencies compile their files sequentially without this.
+    # ========================================================================
+    if(MSVC)
+        foreach(_dep_target fastmcpp_core copilot_sdk_cpp claude_sdk libagents)
+            if(TARGET ${_dep_target})
+                target_compile_options(${_dep_target} PRIVATE /MP)
+            endif()
+        endforeach()
+    endif()
+
+    # Build speed: merge translation units to reduce header re-parsing.
+    # Note: fastmcpp_core is excluded — its server files use duplicate
+    # anonymous-namespace symbols that conflict under unity builds.
+    foreach(_dep_target copilot_sdk_cpp claude_sdk libagents)
+        if(TARGET ${_dep_target})
+            set_target_properties(${_dep_target} PROPERTIES UNITY_BUILD ON)
+        endif()
+    endforeach()
+
+    # Exclude unused targets from default build (e.g. claude-sdk debug tool)
+    foreach(_unused_target debug)
+        if(TARGET ${_unused_target})
+            set_target_properties(${_unused_target} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+        endif()
+    endforeach()
 
     # Generate prompt header if needed (conditional on source file age)
     find_package(Python3 COMPONENTS Interpreter)

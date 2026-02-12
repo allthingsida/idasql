@@ -227,6 +227,38 @@ inline VTableDef define_funcs() {
             auto_wait();
             return ok;
         })
+        .insertable([](int argc, sqlite3_value** argv) -> bool {
+            // address (col 0) is required
+            if (argc < 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL)
+                return false;
+
+            ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
+
+            // Check if function already exists at this address
+            if (get_func(ea) != nullptr)
+                return false;
+
+            auto_wait();
+            // end_ea from col 3 if provided, else BADADDR (IDA auto-detects)
+            ea_t end = BADADDR;
+            if (argc > 3 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
+                end = static_cast<ea_t>(sqlite3_value_int64(argv[3]));
+
+            bool ok = add_func(ea, end);
+            auto_wait();
+
+            if (!ok) return false;
+
+            // Optional: set name (col 1) after creation
+            if (argc > 1 && sqlite3_value_type(argv[1]) != SQLITE_NULL) {
+                const char* name = reinterpret_cast<const char*>(
+                    sqlite3_value_text(argv[1]));
+                if (name && name[0])
+                    set_name(ea, name, SN_CHECK);
+            }
+
+            return true;
+        })
         .build();
 }
 
@@ -245,17 +277,59 @@ inline VTableDef define_segments() {
             segment_t* s = getnseg(static_cast<int>(i));
             return s ? static_cast<int64_t>(s->end_ea) : 0;
         })
-        .column_text("name", [](size_t i) -> std::string {
+        .column_text_rw("name",
+            // Getter
+            [](size_t i) -> std::string {
+                segment_t* s = getnseg(static_cast<int>(i));
+                return safe_segm_name(s);
+            },
+            // Setter - rename segment
+            [](size_t i, const char* new_name) -> bool {
+                auto_wait();
+                segment_t* s = getnseg(static_cast<int>(i));
+                if (!s) return false;
+                bool ok = set_segm_name(s, new_name) != 0;
+                auto_wait();
+                return ok;
+            })
+        .column_text_rw("class",
+            // Getter
+            [](size_t i) -> std::string {
+                segment_t* s = getnseg(static_cast<int>(i));
+                return safe_segm_class(s);
+            },
+            // Setter - change segment class
+            [](size_t i, const char* new_class) -> bool {
+                auto_wait();
+                segment_t* s = getnseg(static_cast<int>(i));
+                if (!s) return false;
+                bool ok = set_segm_class(s, new_class) != 0;
+                auto_wait();
+                return ok;
+            })
+        .column_int_rw("perm",
+            // Getter
+            [](size_t i) -> int {
+                segment_t* s = getnseg(static_cast<int>(i));
+                return s ? s->perm : 0;
+            },
+            // Setter - change segment permissions
+            [](size_t i, int new_perm) -> bool {
+                auto_wait();
+                segment_t* s = getnseg(static_cast<int>(i));
+                if (!s) return false;
+                s->perm = static_cast<uchar>(new_perm);
+                bool ok = s->update();
+                auto_wait();
+                return ok;
+            })
+        .deletable([](size_t i) -> bool {
+            auto_wait();
             segment_t* s = getnseg(static_cast<int>(i));
-            return safe_segm_name(s);
-        })
-        .column_text("class", [](size_t i) -> std::string {
-            segment_t* s = getnseg(static_cast<int>(i));
-            return safe_segm_class(s);
-        })
-        .column_int("perm", [](size_t i) -> int {
-            segment_t* s = getnseg(static_cast<int>(i));
-            return s ? s->perm : 0;
+            if (!s) return false;
+            bool ok = del_segm(s->start_ea, SEGMOD_KILL) != 0;
+            auto_wait();
+            return ok;
         })
         .build();
 }
@@ -298,6 +372,24 @@ inline VTableDef define_names() {
             ea_t ea = get_nlist_ea(i);
             if (ea == BADADDR) return false;
             bool ok = set_name(ea, "", SN_NOWARN) != 0;
+            auto_wait();
+            return ok;
+        })
+        .insertable([](int argc, sqlite3_value** argv) -> bool {
+            // address (col 0) and name (col 1) are both required
+            if (argc < 2
+                || sqlite3_value_type(argv[0]) == SQLITE_NULL
+                || sqlite3_value_type(argv[1]) == SQLITE_NULL)
+                return false;
+
+            ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
+            const char* name = reinterpret_cast<const char*>(
+                sqlite3_value_text(argv[1]));
+            if (!name || !name[0]) return false;
+
+            auto_wait();
+            bool ok = set_name(ea, name, SN_CHECK) != 0;
+            if (ok) decompiler::invalidate_decompiler_cache(ea);
             auto_wait();
             return ok;
         })
@@ -413,6 +505,39 @@ inline VTableDef define_comments() {
             set_cmt(ea, "", true);   // Delete repeatable
             auto_wait();
             return true;
+        })
+        .insertable([](int argc, sqlite3_value** argv) -> bool {
+            // address (col 0) is required, plus at least one comment column
+            if (argc < 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL)
+                return false;
+
+            ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
+
+            bool did_something = false;
+            auto_wait();
+
+            // Regular comment (col 1)
+            if (argc > 1 && sqlite3_value_type(argv[1]) != SQLITE_NULL) {
+                const char* cmt = reinterpret_cast<const char*>(
+                    sqlite3_value_text(argv[1]));
+                if (cmt) {
+                    set_cmt(ea, cmt, false);
+                    did_something = true;
+                }
+            }
+
+            // Repeatable comment (col 2)
+            if (argc > 2 && sqlite3_value_type(argv[2]) != SQLITE_NULL) {
+                const char* rpt = reinterpret_cast<const char*>(
+                    sqlite3_value_text(argv[2]));
+                if (rpt) {
+                    set_cmt(ea, rpt, true);
+                    did_something = true;
+                }
+            }
+
+            auto_wait();
+            return did_something;
         })
         .build();
 }
@@ -958,6 +1083,35 @@ inline VTableDef define_bookmarks() {
             auto_wait();
             return ok;
         })
+        .insertable([](int argc, sqlite3_value** argv) -> bool {
+            // address (col 1) is required
+            if (argc < 2 || sqlite3_value_type(argv[1]) == SQLITE_NULL)
+                return false;
+
+            ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[1]));
+
+            const char* desc = "";
+            if (argc > 2 && sqlite3_value_type(argv[2]) != SQLITE_NULL) {
+                desc = reinterpret_cast<const char*>(sqlite3_value_text(argv[2]));
+                if (!desc) desc = "";
+            }
+
+            auto_wait();
+
+            idaplace_t place(ea, 0);
+            renderer_info_t rinfo;
+            lochist_entry_t loc(&place, rinfo);
+
+            // slot (col 0): use provided slot or auto-assign next
+            uint32_t slot = bookmarks_t::size(loc, nullptr);
+            if (argc > 0 && sqlite3_value_type(argv[0]) != SQLITE_NULL)
+                slot = static_cast<uint32_t>(sqlite3_value_int(argv[0]));
+
+            uint32_t result = bookmarks_t::mark(loc, slot, nullptr, desc, nullptr);
+            auto_wait();
+
+            return result != BADADDR32;
+        })
         .build();
 }
 
@@ -1210,6 +1364,16 @@ inline VTableDef define_instructions() {
             if (i >= cache.size()) return 0;
             func_t* f = get_func(cache[i]);
             return f ? f->start_ea : 0;
+        })
+        .deletable([](size_t i) -> bool {
+            auto_wait();
+            auto& cache = InstructionsCache::get();
+            if (i >= cache.size()) return false;
+            ea_t ea = cache[i];
+            asize_t sz = get_item_size(ea);
+            bool ok = del_items(ea, DELIT_SIMPLE, sz);
+            auto_wait();
+            return ok;
         })
         // Constraint pushdown: func_addr = X uses optimized iterator
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {

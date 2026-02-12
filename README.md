@@ -186,16 +186,17 @@ SELECT name, printf('0x%X', address) as addr FROM funcs WHERE size > 1000;
 
 | Table | Description |
 |-------|-------------|
-| `funcs` | Functions - name, address, size, end address, flags |
-| `segments` | Segments - name, start/end address, permissions, class |
-| `names` | Named locations - address, name, flags |
+| `funcs` | Functions - name, address, size, end address, flags (INSERT/UPDATE/DELETE) |
+| `segments` | Segments - name, start/end address, permissions, class (UPDATE/DELETE) |
+| `names` | Named locations - address, name, flags (INSERT/UPDATE/DELETE) |
 | `imports` | Imports - module, name, address, ordinal |
 | `exports` | Exports - name, address, ordinal |
 | `strings` | Strings - address, content, length, type |
 | `xrefs` | Cross-references - from/to address, type, is_code |
-| `instructions` | Disassembly - address, mnemonic, operands, itype, func_addr |
+| `instructions` | Disassembly - address, mnemonic, operands, itype, func_addr (DELETE) |
 | `blocks` | Basic blocks - start/end address, func_ea, size |
-| `types` | Type library - structs, unions, enums with members |
+| `types` | Type library - structs, unions, enums with members (INSERT/UPDATE/DELETE) |
+| `breakpoints` | Breakpoints - address, type, enabled, condition (full CRUD) |
 | `jump_entities(pattern, mode)` | Unified search across all entities (see below) |
 
 ### Unified Entity Search
@@ -308,6 +309,107 @@ SELECT func_at(func_addr) as name,
 FROM instructions
 GROUP BY func_addr
 HAVING pushes > 20 AND ABS(pushes - pops) > 5;
+```
+
+### Breakpoint Management
+
+The `breakpoints` table supports full CRUD: SELECT, INSERT, UPDATE, DELETE. Breakpoints persist in the IDB even without an active debugger session.
+
+```sql
+-- List all breakpoints
+SELECT printf('0x%08X', address) as addr, type_name, enabled, condition
+FROM breakpoints;
+
+-- Add a software breakpoint
+INSERT INTO breakpoints (address) VALUES (0x401000);
+
+-- Add a hardware write watchpoint (type=1, size=4)
+INSERT INTO breakpoints (address, type, size) VALUES (0x402000, 1, 4);
+
+-- Add a conditional breakpoint
+INSERT INTO breakpoints (address, condition) VALUES (0x401000, 'eax == 0');
+
+-- Disable a breakpoint
+UPDATE breakpoints SET enabled = 0 WHERE address = 0x401000;
+
+-- Update condition
+UPDATE breakpoints SET condition = 'ecx > 5' WHERE address = 0x401000;
+
+-- Delete a breakpoint
+DELETE FROM breakpoints WHERE address = 0x401000;
+
+-- Join with functions to see which functions have breakpoints
+SELECT b.address, f.name, b.type_name, b.enabled
+FROM breakpoints b
+JOIN funcs f ON b.address >= f.address AND b.address < f.end_ea;
+```
+
+**Breakpoint types:** `0` = software, `1` = hardware write, `2` = hardware read, `3` = hardware rdwr, `4` = hardware exec
+
+**Writable columns:** `enabled`, `type`, `size`, `flags`, `pass_count`, `condition`, `group`
+
+### Database Modification
+
+Several tables support INSERT, UPDATE, and DELETE operations:
+
+| Table | INSERT | UPDATE | DELETE |
+|-------|--------|--------|--------|
+| `breakpoints` | Yes | Yes | Yes |
+| `funcs` | Yes | `name`, `flags` | Yes |
+| `names` | Yes | `name` | Yes |
+| `comments` | Yes | `comment`, `rpt_comment` | Yes |
+| `bookmarks` | Yes | `description` | Yes |
+| `segments` | — | `name`, `class`, `perm` | Yes |
+| `instructions` | — | — | Yes |
+| `types` | Yes | Yes | Yes |
+| `types_members` | Yes | Yes | Yes |
+| `types_enum_values` | Yes | Yes | Yes |
+
+```sql
+-- Create a function at an address (IDA auto-detects boundaries)
+INSERT INTO funcs (address) VALUES (0x401000);
+
+-- Create a function with explicit end address and name
+INSERT INTO funcs (address, name, end_ea) VALUES (0x401000, 'my_func', 0x401050);
+
+-- Set a name at an address
+INSERT INTO names (address, name) VALUES (0x401000, 'main');
+
+-- Add a comment
+INSERT INTO comments (address, comment) VALUES (0x401000, 'entry point');
+
+-- Add both regular and repeatable comments
+INSERT INTO comments (address, comment, rpt_comment) VALUES (0x401000, 'regular', 'repeatable');
+
+-- Add a bookmark (slot auto-assigned)
+INSERT INTO bookmarks (address, description) VALUES (0x401000, 'interesting function');
+
+-- Add a bookmark at a specific slot
+INSERT INTO bookmarks (slot, address, description) VALUES (5, 0x401000, 'slot 5 bookmark');
+
+-- Rename a segment
+UPDATE segments SET name = '.mytext' WHERE start_ea = 0x401000;
+
+-- Change segment permissions (R=4, W=2, X=1)
+UPDATE segments SET perm = 5 WHERE name = '.text';
+
+-- Delete a segment
+DELETE FROM segments WHERE name = '.rdata';
+
+-- Delete an instruction (convert to unexplored bytes)
+DELETE FROM instructions WHERE address = 0x401000;
+
+-- Create a new struct type
+INSERT INTO types (name, kind) VALUES ('my_struct', 'struct');
+
+-- Create an enum type
+INSERT INTO types (name, kind) VALUES ('my_flags', 'enum');
+
+-- Add a member to a struct
+INSERT INTO types_members (type_ordinal, member_name, member_type) VALUES (42, 'field1', 'int');
+
+-- Add an enum value
+INSERT INTO types_enum_values (type_ordinal, value_name, value) VALUES (15, 'FLAG_ACTIVE', 1);
 ```
 
 ## AI Agent

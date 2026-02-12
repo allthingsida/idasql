@@ -82,10 +82,12 @@ inline void rebuild_types_cache() {
     til_t* ti = get_idati();
     if (!ti) return;
 
-    uint32_t ord = 1;
-    while (true) {
+    uint32_t max_ord = get_ordinal_limit(ti);
+    if (max_ord == 0 || max_ord == uint32_t(-1)) return;
+
+    for (uint32_t ord = 1; ord < max_ord; ++ord) {
         const char* name = get_numbered_type_name(ti, ord);
-        if (!name) break;
+        if (!name) continue;  // Skip gaps in ordinal space
 
         TypeEntry entry;
         entry.ordinal = ord;
@@ -141,7 +143,6 @@ inline void rebuild_types_cache() {
         }
 
         cache.push_back(entry);
-        ++ord;
     }
 }
 
@@ -238,6 +239,52 @@ inline VTableDef define_types() {
 
             return del_numbered_type(ti, cache[i].ordinal);
         })
+        .insertable([](int argc, sqlite3_value** argv) -> bool {
+            // Column layout: ordinal(0), name(1), kind(2), ...
+            // name (col 1) is required
+            if (argc < 2 || sqlite3_value_type(argv[1]) == SQLITE_NULL)
+                return false;
+
+            const char* name = reinterpret_cast<const char*>(
+                sqlite3_value_text(argv[1]));
+            if (!name || !name[0]) return false;
+
+            // kind (col 2): defaults to "struct"
+            std::string kind = "struct";
+            if (argc > 2 && sqlite3_value_type(argv[2]) != SQLITE_NULL) {
+                const char* k = reinterpret_cast<const char*>(
+                    sqlite3_value_text(argv[2]));
+                if (k && k[0]) kind = k;
+            }
+
+            til_t* ti = get_idati();
+            if (!ti) return false;
+
+            // Check if type with this name already exists
+            if (get_type_ordinal(ti, name) != 0)
+                return false;
+
+            uint32_t ord = alloc_type_ordinal(ti);
+            if (ord == 0) return false;
+
+            tinfo_t tif;
+            if (kind == "struct") {
+                udt_type_data_t udt;
+                udt.is_union = false;
+                tif.create_udt(udt);
+            } else if (kind == "union") {
+                udt_type_data_t udt;
+                udt.is_union = true;
+                tif.create_udt(udt);
+            } else if (kind == "enum") {
+                enum_type_data_t ei;
+                tif.create_enum(ei);
+            } else {
+                return false;
+            }
+
+            return tif.set_numbered_type(ti, ord, NTF_REPLACE, name) == TERR_OK;
+        })
         .build();
 }
 
@@ -317,10 +364,12 @@ inline void rebuild_members_cache() {
     til_t* ti = get_idati();
     if (!ti) return;
 
-    uint32_t ord = 1;
-    while (true) {
+    uint32_t max_ord = get_ordinal_limit(ti);
+    if (max_ord == 0 || max_ord == uint32_t(-1)) return;
+
+    for (uint32_t ord = 1; ord < max_ord; ++ord) {
         const char* name = get_numbered_type_name(ti, ord);
-        if (!name) break;
+        if (!name) continue;  // Skip gaps in ordinal space
 
         tinfo_t tif;
         if (tif.get_numbered_type(ti, ord)) {
@@ -356,7 +405,6 @@ inline void rebuild_members_cache() {
                 }
             }
         }
-        ++ord;
     }
 }
 
@@ -601,6 +649,66 @@ inline VTableDef define_types_members() {
             ref.udt.erase(ref.udt.begin() + idx);
             return ref.save();
         })
+        .insertable([](int argc, sqlite3_value** argv) -> bool {
+            // Column layout: type_ordinal(0), type_name(1), member_index(2),
+            //                 member_name(3), offset(4), ..., member_type(8), ..., comment(11)
+            // type_ordinal (col 0) and member_name (col 3) are required
+            if (argc < 4
+                || sqlite3_value_type(argv[0]) == SQLITE_NULL
+                || sqlite3_value_type(argv[3]) == SQLITE_NULL)
+                return false;
+
+            uint32_t ordinal = static_cast<uint32_t>(sqlite3_value_int(argv[0]));
+            const char* member_name = reinterpret_cast<const char*>(
+                sqlite3_value_text(argv[3]));
+            if (!member_name || !member_name[0]) return false;
+
+            TypeMemberRef ref(ordinal);
+            if (!ref.valid) return false;
+
+            // Build the new member
+            udm_t new_member;
+            new_member.name = member_name;
+
+            // member_type (col 8): parse type string, default to "int"
+            std::string type_str = "int";
+            if (argc > 8 && sqlite3_value_type(argv[8]) != SQLITE_NULL) {
+                const char* mt = reinterpret_cast<const char*>(
+                    sqlite3_value_text(argv[8]));
+                if (mt && mt[0]) type_str = mt;
+            }
+
+            // Parse the type string into a tinfo_t
+            tinfo_t member_type;
+            qstring parsed_name;
+            if (parse_decl(&member_type, &parsed_name, nullptr,
+                           (type_str + " x;").c_str(), PT_SIL)) {
+                new_member.type = member_type;
+                new_member.size = member_type.get_size() * 8;  // size in bits
+            } else {
+                // Fallback: default to int (4 bytes)
+                new_member.type = tinfo_t(BT_INT32);
+                new_member.size = 32;
+            }
+
+            // comment (col 11)
+            if (argc > 11 && sqlite3_value_type(argv[11]) != SQLITE_NULL) {
+                const char* cmt = reinterpret_cast<const char*>(
+                    sqlite3_value_text(argv[11]));
+                if (cmt) new_member.cmt = cmt;
+            }
+
+            // Compute offset: append after last member
+            if (!ref.udt.empty()) {
+                const udm_t& last = ref.udt.back();
+                new_member.offset = last.offset + last.size;
+            } else {
+                new_member.offset = 0;
+            }
+
+            ref.udt.push_back(new_member);
+            return ref.save();
+        })
         // Constraint pushdown: type_ordinal = X
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<MembersInTypeIterator>(static_cast<uint32_t>(ordinal));
@@ -634,10 +742,12 @@ inline void rebuild_enum_values_cache() {
     til_t* ti = get_idati();
     if (!ti) return;
 
-    uint32_t ord = 1;
-    while (true) {
+    uint32_t max_ord = get_ordinal_limit(ti);
+    if (max_ord == 0 || max_ord == uint32_t(-1)) return;
+
+    for (uint32_t ord = 1; ord < max_ord; ++ord) {
         const char* name = get_numbered_type_name(ti, ord);
-        if (!name) break;
+        if (!name) continue;  // Skip gaps in ordinal space
 
         tinfo_t tif;
         if (tif.get_numbered_type(ti, ord)) {
@@ -659,7 +769,6 @@ inline void rebuild_enum_values_cache() {
                 }
             }
         }
-        ++ord;
     }
 }
 
@@ -847,6 +956,49 @@ inline VTableDef define_types_enum_values() {
             ref.ei.erase(ref.ei.begin() + idx);
             return ref.save();
         })
+        .insertable([](int argc, sqlite3_value** argv) -> bool {
+            // Column layout: type_ordinal(0), type_name(1), value_index(2),
+            //                 value_name(3), value(4), uvalue(5), comment(6)
+            // type_ordinal (col 0) and value_name (col 3) are required
+            if (argc < 4
+                || sqlite3_value_type(argv[0]) == SQLITE_NULL
+                || sqlite3_value_type(argv[3]) == SQLITE_NULL)
+                return false;
+
+            uint32_t ordinal = static_cast<uint32_t>(sqlite3_value_int(argv[0]));
+            const char* value_name = reinterpret_cast<const char*>(
+                sqlite3_value_text(argv[3]));
+            if (!value_name || !value_name[0]) return false;
+
+            EnumTypeRef ref(ordinal);
+            if (!ref.valid) return false;
+
+            // Build the new enum member
+            edm_t new_edm;
+            new_edm.name = value_name;
+
+            // value (col 4): default to 0
+            if (argc > 4 && sqlite3_value_type(argv[4]) != SQLITE_NULL) {
+                new_edm.value = static_cast<uint64_t>(sqlite3_value_int64(argv[4]));
+            } else {
+                // Auto-assign: next value after last member
+                if (!ref.ei.empty()) {
+                    new_edm.value = ref.ei.back().value + 1;
+                } else {
+                    new_edm.value = 0;
+                }
+            }
+
+            // comment (col 6)
+            if (argc > 6 && sqlite3_value_type(argv[6]) != SQLITE_NULL) {
+                const char* cmt = reinterpret_cast<const char*>(
+                    sqlite3_value_text(argv[6]));
+                if (cmt) new_edm.cmt = cmt;
+            }
+
+            ref.ei.push_back(new_edm);
+            return ref.save();
+        })
         // Constraint pushdown: type_ordinal = X
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<EnumValuesInTypeIterator>(static_cast<uint32_t>(ordinal));
@@ -1030,10 +1182,12 @@ inline void rebuild_func_args_cache() {
     til_t* ti = get_idati();
     if (!ti) return;
 
-    uint32_t ord = 1;
-    while (true) {
+    uint32_t max_ord = get_ordinal_limit(ti);
+    if (max_ord == 0 || max_ord == uint32_t(-1)) return;
+
+    for (uint32_t ord = 1; ord < max_ord; ++ord) {
         const char* name = get_numbered_type_name(ti, ord);
-        if (!name) break;
+        if (!name) continue;  // Skip gaps in ordinal space
 
         tinfo_t tif;
         if (tif.get_numbered_type(ti, ord)) {
@@ -1073,7 +1227,6 @@ inline void rebuild_func_args_cache() {
                 }
             }
         }
-        ++ord;
     }
 }
 
