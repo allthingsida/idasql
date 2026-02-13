@@ -82,7 +82,6 @@ if(IDASQL_WITH_AI_AGENT)
     FetchContent_Declare(libagents
         GIT_REPOSITORY https://github.com/0xeb/libagents.git
         GIT_TAG        ae162192d49126da6328254aab73417d673379cc
-        GIT_SHALLOW    TRUE
         GIT_SUBMODULES_RECURSE TRUE
     )
     FetchContent_MakeAvailable(libagents)
