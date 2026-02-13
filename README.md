@@ -651,9 +651,7 @@ Agent then queries for error handling patterns in those functions...
 
 The agent never needs to write IDAPython. SQL queries are self-contained and portable.
 
-## Claude Code Plugin (WIP)
-
-> **Note:** This feature is under active development and testing.
+## Claude Code Plugin
 
 IDASQL is available as a Claude Code plugin, allowing Claude to query IDA databases directly within your coding workflow.
 
@@ -667,20 +665,26 @@ IDASQL is available as a Claude Code plugin, allowing Claude to query IDA databa
 
 ```bash
 # Add the marketplace (one-time)
-/plugin marketplace add 0xeb/anthropic-marketplace
+/plugin marketplace add 0xeb/anthropic-xsql-tools-plugin
 
-# Install idasql
+# Install idasql plugin
 /plugin install idasql@0xeb-tools
 ```
 
 ### Usage
 
-Once installed, invoke the idasql agent:
+Once installed, the skill is automatically available:
 
 ```
-"Using the idasql agent, count functions in myfile.i64"
-"Using the idasql agent, decompile main in test.i64"
-"Using the idasql agent, find strings containing 'password'"
+"Using idasql, count functions in myfile.i64"
+"Using idasql, decompile main in test.i64"
+"Using idasql, find strings containing 'password'"
+```
+
+### Updating
+
+```bash
+/plugin update idasql
 ```
 
 ### Troubleshooting
