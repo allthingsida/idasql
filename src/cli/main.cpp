@@ -60,7 +60,7 @@
 #include "../common/http_server.hpp"
 #endif
 
-#include "../common/sqlite_utils.hpp"
+#include <xsql/script.hpp>
 
 // AI Agent integration (optional, enabled via IDASQL_WITH_AI_AGENT)
 #ifdef IDASQL_HAS_AI_AGENT
@@ -339,7 +339,7 @@ static int run_remote_mode(const std::string& host, int port,
 
         std::vector<std::string> statements;
         std::string parse_error;
-        if (!idasql::collect_statements(nullptr, content, statements, parse_error)) {
+        if (!xsql::collect_statements(nullptr, content, statements, parse_error)) {
             std::cerr << "Error parsing SQL file: " << parse_error << "\n";
             return 1;
         }
@@ -885,7 +885,7 @@ static bool export_to_sql(idasql::Database& db, const char* path,
     }
 
     std::string error;
-    if (!idasql::export_tables(db.handle(), tables, path, error)) {
+    if (!xsql::export_tables(db.handle(), tables, path, error)) {
         std::cerr << "Error: " << error << "\n";
         return false;
     }
@@ -909,9 +909,9 @@ static bool execute_file(idasql::Database& db, const char* path) {
     buffer << file.rdbuf();
     std::string content = buffer.str();
 
-    std::vector<idasql::StatementResult> results;
+    std::vector<xsql::StatementResult> results;
     std::string error;
-    if (!idasql::execute_script(db.handle(), content, results, error)) {
+    if (!xsql::execute_script(db.handle(), content, results, error)) {
         std::cerr << "Error: " << error << "\n";
         return false;
     }

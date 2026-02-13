@@ -705,7 +705,7 @@ struct idasql_plugmod_t : public plugmod_t
             return "Error: Failed to start HTTP server";
         }
 
-        return idasql::format_http_info(port);
+        return idasql::format_http_info(port, "Type '.http stop' to stop the server.");
     }
 #endif
 

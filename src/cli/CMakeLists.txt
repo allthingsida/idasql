@@ -6,7 +6,6 @@ ida_add_idalib(idasql_cli
     TYPE EXECUTABLE
     SOURCES
         main.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/../common/sqlite_utils.cpp
 )
 target_link_libraries(idasql_cli PRIVATE xsql::xsql)
 target_include_directories(idasql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include)

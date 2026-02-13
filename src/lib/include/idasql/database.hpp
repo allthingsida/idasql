@@ -24,7 +24,6 @@
 
 #include <idasql/platform.hpp>
 
-#include <sqlite3.h>
 #include <xsql/database.hpp>
 #include <xsql/json.hpp>
 #include <string>

@@ -34,6 +34,7 @@
 #include <name.hpp>
 
 // Hex-Rays decompiler headers
+#include <lines.hpp>
 #include <hexrays.hpp>
 
 namespace idasql {
@@ -81,12 +82,49 @@ inline void invalidate_decompiler_cache(ea_t ea) {
 // Data Structures
 // ============================================================================
 
+// ITP name ↔ enum helpers
+inline const char* itp_to_name(item_preciser_t itp) {
+    switch (itp) {
+        case ITP_SEMI:   return "semi";
+        case ITP_BLOCK1: return "block1";
+        case ITP_BLOCK2: return "block2";
+        case ITP_CURLY1: return "curly1";
+        case ITP_CURLY2: return "curly2";
+        case ITP_BRACE1: return "brace1";
+        case ITP_BRACE2: return "brace2";
+        case ITP_COLON:  return "colon";
+        case ITP_CASE:   return "case";
+        case ITP_ELSE:   return "else";
+        case ITP_DO:     return "do";
+        case ITP_ASM:    return "asm";
+        default:         return "semi";
+    }
+}
+
+inline item_preciser_t name_to_itp(const char* name) {
+    if (!name || !name[0]) return ITP_SEMI;
+    if (stricmp(name, "block1") == 0) return ITP_BLOCK1;
+    if (stricmp(name, "block2") == 0) return ITP_BLOCK2;
+    if (stricmp(name, "curly1") == 0) return ITP_CURLY1;
+    if (stricmp(name, "curly2") == 0) return ITP_CURLY2;
+    if (stricmp(name, "brace1") == 0) return ITP_BRACE1;
+    if (stricmp(name, "brace2") == 0) return ITP_BRACE2;
+    if (stricmp(name, "colon") == 0)  return ITP_COLON;
+    if (stricmp(name, "case") == 0)   return ITP_CASE;
+    if (stricmp(name, "else") == 0)   return ITP_ELSE;
+    if (stricmp(name, "do") == 0)     return ITP_DO;
+    if (stricmp(name, "asm") == 0)    return ITP_ASM;
+    return ITP_SEMI;  // default
+}
+
 // Pseudocode line data
 struct PseudocodeLine {
     ea_t func_addr;
     int line_num;
     std::string text;
-    ea_t ea;  // Associated address
+    ea_t ea;              // Associated address (from COLOR_ADDR anchor)
+    std::string comment;  // User comment at this ea (from restore_user_cmts)
+    item_preciser_t comment_placement = ITP_SEMI;  // Comment placement type
 };
 
 // Local variable data
@@ -172,6 +210,34 @@ inline std::string get_full_ctype_name(ctype_t op) {
     }
 }
 
+// Extract the first COLOR_ADDR anchor ea from a raw pseudocode line.
+// Returns BADADDR if no anchor found.
+inline ea_t extract_line_ea(cfunc_t* cfunc, const qstring& raw_line) {
+    const char* p = raw_line.c_str();
+    while (*p) {
+        if (*p == COLOR_ON && *(p + 1) == COLOR_ADDR) {
+            p += 2;  // skip COLOR_ON + COLOR_ADDR
+            // Read 16 hex chars
+            char hex[17] = {};
+            for (int i = 0; i < 16; i++) {
+                if (!p[i]) return BADADDR;
+                hex[i] = p[i];
+            }
+            uint64_t val = strtoull(hex, nullptr, 16);
+            uint32_t anchor = static_cast<uint32_t>(val);
+            // ANCHOR_CITEM = type 0 (bits 31-30)
+            uint32_t anchor_type = (anchor >> 30) & 0x3;
+            if (anchor_type != 0) return BADADDR;
+            uint32_t idx = anchor & 0x3FFFFFFF;
+            if (idx >= cfunc->treeitems.size()) return BADADDR;
+            citem_t* item = cfunc->treeitems[idx];
+            return item ? item->ea : BADADDR;
+        }
+        p++;
+    }
+    return BADADDR;
+}
+
 // Collect pseudocode for a single function
 inline bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_addr) {
     lines.clear();
@@ -192,12 +258,32 @@ inline bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_add
         pl.func_addr = func_addr;
         pl.line_num = i;
 
+        // Extract ea from COLOR_ADDR anchor BEFORE stripping tags
+        pl.ea = extract_line_ea(&*cfunc, sv[i].line);
+
         qstring clean;
         tag_remove(&clean, sv[i].line);
         pl.text = clean.c_str();
-        pl.ea = BADADDR;
 
         lines.push_back(pl);
+    }
+
+    // Read stored comments and match to lines by ea
+    user_cmts_t* cmts = restore_user_cmts(func_addr);
+    if (cmts) {
+        for (auto it = user_cmts_begin(cmts); it != user_cmts_end(cmts); it = user_cmts_next(it)) {
+            const treeloc_t& loc = user_cmts_first(it);
+            const citem_cmt_t& cmt = user_cmts_second(it);
+            // Match comment to first line with this ea
+            for (auto& pl : lines) {
+                if (pl.ea == loc.ea && pl.comment.empty()) {
+                    pl.comment = cmt.c_str();
+                    pl.comment_placement = loc.itp;
+                    break;
+                }
+            }
+        }
+        user_cmts_free(cmts);
     }
 
     return true;
@@ -630,14 +716,6 @@ inline void collect_all_call_args(std::vector<CallArgInfo>& args) {
 // Caches for full scans
 // ============================================================================
 
-struct PseudocodeCache {
-    static std::vector<PseudocodeLine>& get() {
-        static std::vector<PseudocodeLine> cache;
-        return cache;
-    }
-    static void rebuild() { collect_all_pseudocode(get()); }
-};
-
 struct LvarsCache {
     static std::vector<LvarInfo>& get() {
         static std::vector<LvarInfo> cache;
@@ -686,8 +764,16 @@ public:
             case 1: sqlite3_result_int(ctx, line.line_num); break;
             case 2: sqlite3_result_text(ctx, line.text.c_str(), -1, SQLITE_TRANSIENT); break;
             case 3:
-                if (line.ea != BADADDR) sqlite3_result_int64(ctx, line.ea);
-                else sqlite3_result_null(ctx);
+                sqlite3_result_int64(ctx, line.ea != BADADDR ? line.ea : 0);
+                break;
+            case 4:
+                if (!line.comment.empty())
+                    sqlite3_result_text(ctx, line.comment.c_str(), -1, SQLITE_TRANSIENT);
+                else
+                    sqlite3_result_null(ctx);
+                break;
+            case 5:
+                sqlite3_result_text(ctx, itp_to_name(line.comment_placement), -1, SQLITE_STATIC);
                 break;
         }
     }
@@ -956,25 +1042,74 @@ public:
 // Table Definitions
 // ============================================================================
 
-inline VTableDef define_pseudocode() {
-    return table("pseudocode")
-        .count([]() { PseudocodeCache::rebuild(); return PseudocodeCache::get().size(); })
-        .column_int64("func_addr", [](size_t i) -> int64_t {
-            auto& c = PseudocodeCache::get();
-            return i < c.size() ? c[i].func_addr : 0;
+// Helper: Set or delete a decompiler comment at an ea within a function
+inline bool set_decompiler_comment(ea_t func_addr, ea_t target_ea, const char* comment, item_preciser_t itp = ITP_SEMI) {
+    if (!hexrays_available()) return false;
+    if (target_ea == BADADDR || target_ea == 0) return false;
+
+    func_t* f = get_func(func_addr);
+    if (!f) return false;
+
+    hexrays_failure_t hf;
+    cfuncptr_t cfunc = decompile(f, &hf);
+    if (!cfunc) return false;
+
+    treeloc_t loc;
+    loc.ea = target_ea;
+    loc.itp = itp;
+
+    // set_user_cmt with empty/nullptr deletes the comment
+    cfunc->set_user_cmt(loc, (comment && comment[0]) ? comment : nullptr);
+
+    cfunc->save_user_cmts();
+    invalidate_decompiler_cache(func_addr);
+    return true;
+}
+
+inline CachedTableDef<PseudocodeLine> define_pseudocode() {
+    return cached_table<PseudocodeLine>("pseudocode")
+        .estimate_rows([]() -> size_t { return get_func_qty() * 20; })
+        .cache_builder([](std::vector<PseudocodeLine>& cache) {
+            collect_all_pseudocode(cache);
         })
-        .column_int("line_num", [](size_t i) -> int {
-            auto& c = PseudocodeCache::get();
-            return i < c.size() ? c[i].line_num : 0;
+        .row_populator([](PseudocodeLine& row, int argc, sqlite3_value** argv) {
+            // argv[2]=func_addr, argv[3]=line_num, argv[4]=line, argv[5]=ea, argv[6]=comment, argv[7]=comment_placement
+            if (argc > 2) row.func_addr = static_cast<ea_t>(sqlite3_value_int64(argv[2]));
+            if (argc > 3) row.line_num = sqlite3_value_int(argv[3]);
+            if (argc > 5) row.ea = static_cast<ea_t>(sqlite3_value_int64(argv[5]));
+            if (argc > 7 && sqlite3_value_type(argv[7]) != SQLITE_NULL) {
+                const char* p = reinterpret_cast<const char*>(sqlite3_value_text(argv[7]));
+                row.comment_placement = name_to_itp(p);
+            }
         })
-        .column_text("line", [](size_t i) -> std::string {
-            auto& c = PseudocodeCache::get();
-            return i < c.size() ? c[i].text : "";
+        .column_int64("func_addr", [](const PseudocodeLine& r) -> int64_t { return r.func_addr; })
+        .column_int("line_num", [](const PseudocodeLine& r) -> int { return r.line_num; })
+        .column_text("line", [](const PseudocodeLine& r) -> std::string { return r.text; })
+        .column_int64("ea", [](const PseudocodeLine& r) -> int64_t {
+            return r.ea != BADADDR ? r.ea : 0;
         })
-        .column_int64("ea", [](size_t i) -> int64_t {
-            auto& c = PseudocodeCache::get();
-            return (i < c.size() && c[i].ea != BADADDR) ? c[i].ea : 0;
-        })
+        .column_text_rw("comment",
+            [](const PseudocodeLine& r) -> std::string { return r.comment; },
+            [](PseudocodeLine& row, sqlite3_value* val) -> bool {
+                if (row.ea == BADADDR || row.ea == 0) return false;
+                const char* text = nullptr;
+                if (sqlite3_value_type(val) != SQLITE_NULL) {
+                    text = reinterpret_cast<const char*>(sqlite3_value_text(val));
+                }
+                bool ok = set_decompiler_comment(row.func_addr, row.ea, text, row.comment_placement);
+                if (ok) {
+                    row.comment = text ? text : "";
+                }
+                return ok;
+            })
+        .column_text_rw("comment_placement",
+            [](const PseudocodeLine& r) -> std::string { return itp_to_name(r.comment_placement); },
+            [](PseudocodeLine& row, sqlite3_value* val) -> bool {
+                if (sqlite3_value_type(val) == SQLITE_NULL) return false;
+                const char* name = reinterpret_cast<const char*>(sqlite3_value_text(val));
+                row.comment_placement = name_to_itp(name);
+                return true;  // just sets the field, actual comment write happens in comment setter
+            })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<PseudocodeInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 50.0)
@@ -1416,8 +1551,9 @@ inline bool register_ctree_views(xsql::Database& db) {
 // ============================================================================
 
 struct DecompilerRegistry {
-    // Index-based tables
-    VTableDef pseudocode;
+    // Cached table (shared cache, write support)
+    CachedTableDef<PseudocodeLine> pseudocode;
+    // Index-based table
     VTableDef ctree_lvars;
     // Generator tables (lazy full scans)
     GeneratorTableDef<CtreeItem> ctree;
@@ -1438,10 +1574,11 @@ struct DecompilerRegistry {
             return;
         }
 
-        // Index-based tables
-        db.register_table("ida_pseudocode", &pseudocode);
+        // Cached table (query-scoped cache, freed when no cursors reference it)
+        db.register_cached_table("ida_pseudocode", &pseudocode);
         db.create_table("pseudocode", "ida_pseudocode");
 
+        // Index-based table
         db.register_table("ida_ctree_lvars", &ctree_lvars);
         db.create_table("ctree_lvars", "ida_ctree_lvars");
 

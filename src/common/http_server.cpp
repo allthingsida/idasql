@@ -300,7 +300,7 @@ std::string IDAHTTPServer::url() const {
     return ss.str();
 }
 
-std::string format_http_info(int port) {
+std::string format_http_info(int port, const std::string& stop_hint) {
     std::ostringstream ss;
     ss << "HTTP server started on port " << port << "\n";
     ss << "URL: http://127.0.0.1:" << port << "\n\n";
@@ -311,7 +311,7 @@ std::string format_http_info(int port) {
     ss << "  POST /shutdown - Stop server\n\n";
     ss << "Example:\n";
     ss << "  curl -X POST http://127.0.0.1:" << port << "/query -d \"SELECT name FROM funcs LIMIT 5\"\n\n";
-    ss << "Press Ctrl+C to stop and return to REPL.\n";
+    ss << stop_hint << "\n";
     return ss.str();
 }
 
