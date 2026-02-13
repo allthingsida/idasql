@@ -27,8 +27,8 @@
 
 #include <idasql/platform.hpp>
 
-#include <sqlite3.h>
 #include <xsql/database.hpp>
+#include <xsql/functions.hpp>
 #include <xsql/json.hpp>
 #include <string>
 #include <vector>
@@ -155,15 +155,15 @@ inline ea_t find_first_pattern(const char* pattern, ea_t start_ea, ea_t end_ea) 
 // ============================================================================
 
 // search_bytes(pattern) - Returns JSON array of all matches
-static void sql_search_bytes_1(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+static void sql_search_bytes_1(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
-        sqlite3_result_error(ctx, "search_bytes requires pattern argument", -1);
+        ctx.result_error("search_bytes requires pattern argument");
         return;
     }
 
-    const char* pattern = (const char*)sqlite3_value_text(argv[0]);
+    const char* pattern = argv[0].as_c_str();
     if (!pattern) {
-        sqlite3_result_error(ctx, "Invalid pattern", -1);
+        ctx.result_error("Invalid pattern");
         return;
     }
 
@@ -184,24 +184,24 @@ static void sql_search_bytes_1(sqlite3_context* ctx, int argc, sqlite3_value** a
     }
 
     std::string result = arr.dump();
-    sqlite3_result_text(ctx, result.c_str(), -1, SQLITE_TRANSIENT);
+    ctx.result_text(result);
 }
 
 // search_bytes(pattern, start, end) - Returns JSON array within range
-static void sql_search_bytes_3(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+static void sql_search_bytes_3(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
-        sqlite3_result_error(ctx, "search_bytes requires (pattern, start, end) arguments", -1);
+        ctx.result_error("search_bytes requires (pattern, start, end) arguments");
         return;
     }
 
-    const char* pattern = (const char*)sqlite3_value_text(argv[0]);
+    const char* pattern = argv[0].as_c_str();
     if (!pattern) {
-        sqlite3_result_error(ctx, "Invalid pattern", -1);
+        ctx.result_error("Invalid pattern");
         return;
     }
 
-    ea_t start_ea = static_cast<ea_t>(sqlite3_value_int64(argv[1]));
-    ea_t end_ea = static_cast<ea_t>(sqlite3_value_int64(argv[2]));
+    ea_t start_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t end_ea = static_cast<ea_t>(argv[2].as_int64());
 
     std::vector<ByteSearchResult> results;
     find_byte_pattern(pattern, start_ea, end_ea, results);
@@ -217,51 +217,51 @@ static void sql_search_bytes_3(sqlite3_context* ctx, int argc, sqlite3_value** a
     }
 
     std::string result = arr.dump();
-    sqlite3_result_text(ctx, result.c_str(), -1, SQLITE_TRANSIENT);
+    ctx.result_text(result);
 }
 
 // search_first(pattern) - Returns first match address
-static void sql_search_first_1(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+static void sql_search_first_1(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
-        sqlite3_result_error(ctx, "search_first requires pattern argument", -1);
+        ctx.result_error("search_first requires pattern argument");
         return;
     }
 
-    const char* pattern = (const char*)sqlite3_value_text(argv[0]);
+    const char* pattern = argv[0].as_c_str();
     if (!pattern) {
-        sqlite3_result_error(ctx, "Invalid pattern", -1);
+        ctx.result_error("Invalid pattern");
         return;
     }
 
     ea_t result = find_first_pattern(pattern, inf_get_min_ea(), inf_get_max_ea());
     if (result != BADADDR) {
-        sqlite3_result_int64(ctx, static_cast<sqlite3_int64>(result));
+        ctx.result_int64(static_cast<int64_t>(result));
     } else {
-        sqlite3_result_null(ctx);
+        ctx.result_null();
     }
 }
 
 // search_first(pattern, start, end) - Returns first match in range
-static void sql_search_first_3(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+static void sql_search_first_3(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
-        sqlite3_result_error(ctx, "search_first requires (pattern, start, end) arguments", -1);
+        ctx.result_error("search_first requires (pattern, start, end) arguments");
         return;
     }
 
-    const char* pattern = (const char*)sqlite3_value_text(argv[0]);
+    const char* pattern = argv[0].as_c_str();
     if (!pattern) {
-        sqlite3_result_error(ctx, "Invalid pattern", -1);
+        ctx.result_error("Invalid pattern");
         return;
     }
 
-    ea_t start_ea = static_cast<ea_t>(sqlite3_value_int64(argv[1]));
-    ea_t end_ea = static_cast<ea_t>(sqlite3_value_int64(argv[2]));
+    ea_t start_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t end_ea = static_cast<ea_t>(argv[2].as_int64());
 
     ea_t result = find_first_pattern(pattern, start_ea, end_ea);
     if (result != BADADDR) {
-        sqlite3_result_int64(ctx, static_cast<sqlite3_int64>(result));
+        ctx.result_int64(static_cast<int64_t>(result));
     } else {
-        sqlite3_result_null(ctx);
+        ctx.result_null();
     }
 }
 
@@ -269,22 +269,10 @@ static void sql_search_first_3(sqlite3_context* ctx, int argc, sqlite3_value** a
  * Register all search_bytes SQL functions.
  */
 inline bool register_search_bytes(xsql::Database& db) {
-    // search_bytes(pattern) - all matches as JSON
-    sqlite3_create_function(db.handle(), "search_bytes", 1, SQLITE_UTF8,
-                            nullptr, sql_search_bytes_1, nullptr, nullptr);
-
-    // search_bytes(pattern, start, end) - matches in range
-    sqlite3_create_function(db.handle(), "search_bytes", 3, SQLITE_UTF8,
-                            nullptr, sql_search_bytes_3, nullptr, nullptr);
-
-    // search_first(pattern) - first match address
-    sqlite3_create_function(db.handle(), "search_first", 1, SQLITE_UTF8,
-                            nullptr, sql_search_first_1, nullptr, nullptr);
-
-    // search_first(pattern, start, end) - first match in range
-    sqlite3_create_function(db.handle(), "search_first", 3, SQLITE_UTF8,
-                            nullptr, sql_search_first_3, nullptr, nullptr);
-
+    db.register_function("search_bytes", 1, xsql::ScalarFn(sql_search_bytes_1));
+    db.register_function("search_bytes", 3, xsql::ScalarFn(sql_search_bytes_3));
+    db.register_function("search_first", 1, xsql::ScalarFn(sql_search_first_1));
+    db.register_function("search_first", 3, xsql::ScalarFn(sql_search_first_3));
     return true;
 }
 

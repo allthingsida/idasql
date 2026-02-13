@@ -14,8 +14,8 @@
 
 #pragma once
 
-#include <sqlite3.h>
 #include <xsql/database.hpp>
+#include <xsql/functions.hpp>
 #include <string>
 #include <unordered_map>
 #include <mutex>
@@ -114,15 +114,15 @@ struct ModuleOptions {
 
 // Register: SELECT idasql_config('key', 'value') to set
 // Register: SELECT idasql_config('key') to get
-inline void idasql_config_func(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
+inline void idasql_config_func(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
-        sqlite3_result_error(ctx, "idasql_config requires at least 1 argument", -1);
+        ctx.result_error("idasql_config requires at least 1 argument");
         return;
     }
 
-    const char* key = (const char*)sqlite3_value_text(argv[0]);
+    const char* key = argv[0].as_c_str();
     if (!key) {
-        sqlite3_result_null(ctx);
+        ctx.result_null();
         return;
     }
 
@@ -130,7 +130,7 @@ inline void idasql_config_func(sqlite3_context* ctx, int argc, sqlite3_value** a
 
     // Setter mode
     if (argc >= 2) {
-        const char* val = (const char*)sqlite3_value_text(argv[1]);
+        const char* val = argv[1].as_c_str();
         if (!val) val = "";
 
         if (strcmp(key, "cache") == 0) {
@@ -141,7 +141,7 @@ inline void idasql_config_func(sqlite3_context* ctx, int argc, sqlite3_value** a
             } else {
                 config.cache = CachePolicy::Persistent;
             }
-            sqlite3_result_text(ctx, val, -1, SQLITE_TRANSIENT);
+            ctx.result_text(val);
         } else if (strcmp(key, "undo") == 0) {
             if (strcmp(val, "off") == 0 || strcmp(val, "0") == 0) {
                 config.undo = UndoPolicy::Off;
@@ -150,12 +150,12 @@ inline void idasql_config_func(sqlite3_context* ctx, int argc, sqlite3_value** a
             } else {
                 config.undo = UndoPolicy::PerStatement;
             }
-            sqlite3_result_text(ctx, val, -1, SQLITE_TRANSIENT);
+            ctx.result_text(val);
         } else if (strcmp(key, "verbose") == 0) {
             config.verbose = (strcmp(val, "on") == 0 || strcmp(val, "1") == 0);
-            sqlite3_result_int(ctx, config.verbose ? 1 : 0);
+            ctx.result_int(config.verbose ? 1 : 0);
         } else {
-            sqlite3_result_error(ctx, "Unknown config key", -1);
+            ctx.result_error("Unknown config key");
         }
         return;
     }
@@ -165,25 +165,22 @@ inline void idasql_config_func(sqlite3_context* ctx, int argc, sqlite3_value** a
         const char* val = "off";
         if (config.cache == CachePolicy::Session) val = "session";
         else if (config.cache == CachePolicy::Persistent) val = "persistent";
-        sqlite3_result_text(ctx, val, -1, SQLITE_STATIC);
+        ctx.result_text_static(val);
     } else if (strcmp(key, "undo") == 0) {
         const char* val = "statement";
         if (config.undo == UndoPolicy::Off) val = "off";
         else if (config.undo == UndoPolicy::PerRow) val = "row";
-        sqlite3_result_text(ctx, val, -1, SQLITE_STATIC);
+        ctx.result_text_static(val);
     } else if (strcmp(key, "verbose") == 0) {
-        sqlite3_result_int(ctx, config.verbose ? 1 : 0);
+        ctx.result_int(config.verbose ? 1 : 0);
     } else {
-        sqlite3_result_null(ctx);
+        ctx.result_null();
     }
 }
 
 // Register the config function with SQLite
 inline bool register_config_function(xsql::Database& db) {
-    return sqlite3_create_function(db.handle(), "idasql_config", -1,
-                                    SQLITE_UTF8,
-                                    nullptr, idasql_config_func,
-                                    nullptr, nullptr) == SQLITE_OK;
+    return db.register_function("idasql_config", -1, xsql::ScalarFn(idasql_config_func)) == SQLITE_OK;
 }
 
 // ============================================================================
@@ -204,43 +201,33 @@ inline bool create_config_table(xsql::Database& db) {
             ('verbose', '0', 'Debug output: 0 or 1');
     )";
 
-    char* err = nullptr;
-    int rc = sqlite3_exec(db.handle(), sql, nullptr, nullptr, &err);
-    if (err) {
-        sqlite3_free(err);
-        return false;
-    }
-    return rc == SQLITE_OK;
+    return db.exec(sql) == SQLITE_OK;
 }
 
 // Sync config from table to memory
 inline bool load_config_from_table(xsql::Database& db) {
     auto& config = IdasqlConfig::instance();
 
-    sqlite3_stmt* stmt;
-    if (sqlite3_prepare_v2(db.handle(), "SELECT key, value FROM idasql_settings", -1, &stmt, nullptr) != SQLITE_OK) {
-        return false;
-    }
+    auto result = db.query("SELECT key, value FROM idasql_settings");
+    if (!result.ok()) return false;
 
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* key = (const char*)sqlite3_column_text(stmt, 0);
-        const char* val = (const char*)sqlite3_column_text(stmt, 1);
-        if (!key || !val) continue;
+    for (const auto& row : result) {
+        const auto& key = row[0];
+        const auto& val = row[1];
 
-        if (strcmp(key, "cache") == 0) {
-            if (strcmp(val, "off") == 0) config.cache = CachePolicy::Off;
-            else if (strcmp(val, "session") == 0) config.cache = CachePolicy::Session;
+        if (key == "cache") {
+            if (val == "off") config.cache = CachePolicy::Off;
+            else if (val == "session") config.cache = CachePolicy::Session;
             else config.cache = CachePolicy::Persistent;
-        } else if (strcmp(key, "undo") == 0) {
-            if (strcmp(val, "off") == 0) config.undo = UndoPolicy::Off;
-            else if (strcmp(val, "row") == 0) config.undo = UndoPolicy::PerRow;
+        } else if (key == "undo") {
+            if (val == "off") config.undo = UndoPolicy::Off;
+            else if (val == "row") config.undo = UndoPolicy::PerRow;
             else config.undo = UndoPolicy::PerStatement;
-        } else if (strcmp(key, "verbose") == 0) {
-            config.verbose = (strcmp(val, "1") == 0);
+        } else if (key == "verbose") {
+            config.verbose = (val == "1");
         }
     }
 
-    sqlite3_finalize(stmt);
     return true;
 }
 

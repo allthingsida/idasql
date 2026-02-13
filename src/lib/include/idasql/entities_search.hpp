@@ -29,7 +29,6 @@
 
 #include <idasql/platform.hpp>
 
-#include <sqlite3.h>
 #include <xsql/database.hpp>
 #include <string>
 #include <cstring>

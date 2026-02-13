@@ -16,7 +16,6 @@
 #pragma once
 
 #include <idasql/vtable.hpp>
-#include <sqlite3.h>
 
 namespace idasql {
 namespace metapc {
