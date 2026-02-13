@@ -119,7 +119,7 @@ private:
 /**
  * Format HTTP server info for display
  */
-std::string format_http_info(int port);
+std::string format_http_info(int port, const std::string& stop_hint = "Press Ctrl+C to stop and return to REPL.");
 
 /**
  * Format HTTP server status
