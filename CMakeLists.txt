@@ -36,6 +36,9 @@ if(IDASQL_WITH_HTTP)
     set(XSQL_WITH_THINCLIENT ON CACHE BOOL "" FORCE)
 endif()
 
+# idasql uses only plain HTTP (localhost); prevent cpp-httplib from opportunistically linking OpenSSL
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+
 # ============================================================================
 # libxsql dependency
 # ============================================================================
