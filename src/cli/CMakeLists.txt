@@ -72,23 +72,19 @@ if(IDASQL_WITH_AI_AGENT)
 endif()
 
 # HTTP server support
-if(IDASQL_WITH_HTTP)
-    target_sources(idasql_cli PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../common/http_server.cpp
-    )
-    target_compile_definitions(idasql_cli PRIVATE IDASQL_HAS_HTTP XSQL_HAS_THINCLIENT)
+target_sources(idasql_cli PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/http_server.cpp
+)
+target_compile_definitions(idasql_cli PRIVATE XSQL_HAS_THINCLIENT)
 
-    # Fetch cpp-httplib if not already available
-    include(FetchContent)
-    FetchContent_Declare(
-        cpp_httplib
-        GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-        GIT_TAG v0.15.3
-    )
-    FetchContent_MakeAvailable(cpp_httplib)
-    target_include_directories(idasql_cli PRIVATE ${cpp_httplib_SOURCE_DIR})
-
-    message(STATUS "idasql_cli: HTTP server support enabled")
-endif()
+# Fetch cpp-httplib if not already available
+include(FetchContent)
+FetchContent_Declare(
+    cpp_httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG v0.15.3
+)
+FetchContent_MakeAvailable(cpp_httplib)
+target_include_directories(idasql_cli PRIVATE ${cpp_httplib_SOURCE_DIR})
 
 # idasql.exe is placed next to ida.exe via RUNTIME_OUTPUT_DIRECTORY above.

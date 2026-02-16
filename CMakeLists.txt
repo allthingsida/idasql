@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(idasql VERSION 1.0.0 LANGUAGES C CXX)
+project(idasql VERSION 0.0.7 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,15 +26,10 @@ include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
 # ============================================================================
-# HTTP Server Support (optional) - must be set BEFORE libxsql
+# HTTP Server Support - must be set BEFORE libxsql
 # ============================================================================
 
-option(IDASQL_WITH_HTTP "Build with HTTP REST server support" ON)
-
-if(IDASQL_WITH_HTTP)
-    message(STATUS "idasql: Building with HTTP server support")
-    set(XSQL_WITH_THINCLIENT ON CACHE BOOL "" FORCE)
-endif()
+set(XSQL_WITH_THINCLIENT ON CACHE BOOL "" FORCE)
 
 # idasql uses only plain HTTP (localhost); prevent cpp-httplib from opportunistically linking OpenSSL
 set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)

@@ -35,15 +35,13 @@ struct CommandCallbacks {
 
     // MCP server callbacks (optional - plugin only)
     std::function<std::string()> mcp_status;      // Get MCP status
-    std::function<std::string()> mcp_start;       // Start MCP server
+    std::function<std::string(int, const std::string&)> mcp_start;  // Start MCP server (port, bind_addr)
     std::function<std::string()> mcp_stop;        // Stop MCP server
 
-#ifdef IDASQL_HAS_HTTP
     // HTTP server callbacks (optional)
     std::function<std::string()> http_status;     // Get HTTP server status
-    std::function<std::string()> http_start;      // Start HTTP server
+    std::function<std::string(int, const std::string&)> http_start;  // Start HTTP server (port, bind_addr)
     std::function<std::string()> http_stop;       // Stop HTTP server
-#endif
 };
 
 /**
@@ -101,19 +99,17 @@ inline CommandResult handle_command(
 #ifdef IDASQL_HAS_AI_AGENT
                  "\n"
                  "MCP Server:\n"
-                 "  .mcp            Show status or start if not running\n"
-                 "  .mcp start      Start MCP server\n"
-                 "  .mcp stop       Stop MCP server\n"
-                 "  .mcp help       Show MCP help\n"
+                 "  .mcp                    Show status or start if not running\n"
+                 "  .mcp start [bind] [port] Start MCP server\n"
+                 "  .mcp stop               Stop MCP server\n"
+                 "  .mcp help               Show MCP help\n"
 #endif
-#ifdef IDASQL_HAS_HTTP
                  "\n"
                  "HTTP Server:\n"
-                 "  .http           Show status or start if not running\n"
-                 "  .http start     Start HTTP server\n"
-                 "  .http stop      Stop HTTP server\n"
-                 "  .http help      Show HTTP help\n"
-#endif
+                 "  .http                    Show status or start if not running\n"
+                 "  .http start [bind] [port] Start HTTP server\n"
+                 "  .http stop               Stop HTTP server\n"
+                 "  .http help               Show HTTP help\n"
                  "\n"
                  "SQL:\n"
                  "  SELECT * FROM funcs LIMIT 10;\n"
@@ -151,9 +147,35 @@ inline CommandResult handle_command(
                 output = "MCP server not available (plugin mode only)";
             }
         }
-        else if (subargs == "start") {
+        else if (subargs.rfind("start", 0) == 0) {
+            int port = 0;
+            std::string bind_addr = "127.0.0.1";
+            // Parse optional: "start [bind] [port]"
+            std::string rest = subargs.length() > 5 ? subargs.substr(5) : "";
+            size_t rs = rest.find_first_not_of(" \t");
+            if (rs != std::string::npos) {
+                rest = rest.substr(rs);
+                // Split into tokens
+                std::string tok1, tok2;
+                size_t sp = rest.find_first_of(" \t");
+                if (sp != std::string::npos) {
+                    tok1 = rest.substr(0, sp);
+                    size_t t2s = rest.find_first_not_of(" \t", sp);
+                    if (t2s != std::string::npos) tok2 = rest.substr(t2s);
+                } else {
+                    tok1 = rest;
+                }
+                // Heuristic: if tok1 is all digits, treat as port; otherwise bind_addr
+                bool tok1_numeric = !tok1.empty() && tok1.find_first_not_of("0123456789") == std::string::npos;
+                if (tok1_numeric) {
+                    port = std::stoi(tok1);
+                } else {
+                    bind_addr = tok1;
+                    if (!tok2.empty()) port = std::stoi(tok2);
+                }
+            }
             if (callbacks.mcp_start) {
-                output = callbacks.mcp_start();
+                output = callbacks.mcp_start(port, bind_addr);
             } else {
                 output = "MCP server not available (plugin mode only)";
             }
@@ -167,10 +189,10 @@ inline CommandResult handle_command(
         }
         else if (subargs == "help") {
             output = "MCP Server Commands:\n"
-                     "  .mcp            Show status, start if not running\n"
-                     "  .mcp start      Start MCP server on random port\n"
-                     "  .mcp stop       Stop MCP server\n"
-                     "  .mcp help       Show this help\n"
+                     "  .mcp                     Show status, start if not running\n"
+                     "  .mcp start [bind] [port]  Start MCP server (default: 127.0.0.1, random port)\n"
+                     "  .mcp stop                Stop MCP server\n"
+                     "  .mcp help                Show this help\n"
                      "\n"
                      "The MCP server exposes two tools:\n"
                      "  idasql_query  - Execute SQL query directly\n"
@@ -190,7 +212,6 @@ inline CommandResult handle_command(
 
     // .http commands (HTTP server control)
     if (input.rfind(".http", 0) == 0) {
-#ifdef IDASQL_HAS_HTTP
         std::string subargs = input.length() > 5 ? input.substr(5) : "";
         // Trim leading whitespace
         size_t start = subargs.find_first_not_of(" \t");
@@ -205,9 +226,35 @@ inline CommandResult handle_command(
                 output = "HTTP server not available";
             }
         }
-        else if (subargs == "start") {
+        else if (subargs.rfind("start", 0) == 0) {
+            int port = 0;
+            std::string bind_addr = "127.0.0.1";
+            // Parse optional: "start [bind] [port]"
+            std::string rest = subargs.length() > 5 ? subargs.substr(5) : "";
+            size_t rs = rest.find_first_not_of(" \t");
+            if (rs != std::string::npos) {
+                rest = rest.substr(rs);
+                // Split into tokens
+                std::string tok1, tok2;
+                size_t sp = rest.find_first_of(" \t");
+                if (sp != std::string::npos) {
+                    tok1 = rest.substr(0, sp);
+                    size_t t2s = rest.find_first_not_of(" \t", sp);
+                    if (t2s != std::string::npos) tok2 = rest.substr(t2s);
+                } else {
+                    tok1 = rest;
+                }
+                // Heuristic: if tok1 is all digits, treat as port; otherwise bind_addr
+                bool tok1_numeric = !tok1.empty() && tok1.find_first_not_of("0123456789") == std::string::npos;
+                if (tok1_numeric) {
+                    port = std::stoi(tok1);
+                } else {
+                    bind_addr = tok1;
+                    if (!tok2.empty()) port = std::stoi(tok2);
+                }
+            }
             if (callbacks.http_start) {
-                output = callbacks.http_start();
+                output = callbacks.http_start(port, bind_addr);
             } else {
                 output = "HTTP server not available";
             }
@@ -221,10 +268,10 @@ inline CommandResult handle_command(
         }
         else if (subargs == "help") {
             output = "HTTP Server Commands:\n"
-                     "  .http            Show status, start if not running\n"
-                     "  .http start      Start HTTP server on random port\n"
-                     "  .http stop       Stop HTTP server\n"
-                     "  .http help       Show this help\n"
+                     "  .http                     Show status, start if not running\n"
+                     "  .http start [bind] [port]  Start HTTP server (default: 127.0.0.1, random port)\n"
+                     "  .http stop                Stop HTTP server\n"
+                     "  .http help                Show this help\n"
                      "\n"
                      "Endpoints:\n"
                      "  GET  /help       API documentation\n"
@@ -238,9 +285,6 @@ inline CommandResult handle_command(
         else {
             output = "Unknown HTTP command: " + subargs + "\nUse '.http help' for available commands.";
         }
-#else
-        output = "HTTP server not compiled in. Rebuild with -DIDASQL_WITH_HTTP=ON";
-#endif
         return CommandResult::HANDLED;
     }
 
