@@ -55,12 +55,11 @@
 
 // Socket client for remote mode (shared library, no IDA dependency)
 #include <xsql/socket/client.hpp>
-#ifdef IDASQL_HAS_HTTP
 #include <xsql/thinclient/server.hpp>
 #include "../common/http_server.hpp"
-#endif
 
 #include <xsql/script.hpp>
+#include "../common/idasql_version.hpp"
 
 // AI Agent integration (optional, enabled via IDASQL_WITH_AI_AGENT)
 #ifdef IDASQL_HAS_AI_AGENT
@@ -74,9 +73,7 @@ namespace {
     idasql::AIAgent* g_agent = nullptr;
     std::unique_ptr<idasql::IDAMCPServer> g_mcp_server;
     std::unique_ptr<idasql::AIAgent> g_mcp_agent;
-#ifdef IDASQL_HAS_HTTP
     std::unique_ptr<idasql::IDAHTTPServer> g_repl_http_server;
-#endif
 }
 
 extern "C" void signal_handler(int sig) {
@@ -505,9 +502,7 @@ static std::string execute_sql_to_string(idasql::Database& db, const std::string
 }
 
 // Forward declaration (defined in HTTP section below)
-#ifdef IDASQL_HAS_HTTP
 static std::string query_result_to_json(idasql::Database& db, const std::string& sql);
-#endif
 
 #ifdef IDASQL_HAS_AI_AGENT
 static void run_repl(idasql::Database& db, bool agent_mode, bool verbose,
@@ -617,7 +612,7 @@ static void run_repl(idasql::Database& db) {
                 }
             };
 
-            callbacks.mcp_start = [&db, &agent]() -> std::string {
+            callbacks.mcp_start = [&db, &agent](int req_port, const std::string& bind_addr) -> std::string {
                 if (g_mcp_server && g_mcp_server->is_running()) {
                     return idasql::format_mcp_status(g_mcp_server->port(), true);
                 }
@@ -646,7 +641,7 @@ static void run_repl(idasql::Database& db) {
                 };
 
                 // Start with use_queue=true for CLI mode (main thread execution)
-                int port = g_mcp_server->start(0, sql_cb, ask_cb, "127.0.0.1", true);
+                int port = g_mcp_server->start(req_port, sql_cb, ask_cb, bind_addr, true);
                 if (port <= 0) {
                     g_mcp_agent.reset();
                     return "Error: Failed to start MCP server\n";
@@ -693,7 +688,6 @@ static void run_repl(idasql::Database& db) {
                 return "MCP server not running\n";
             };
 
-#ifdef IDASQL_HAS_HTTP
             // HTTP server callbacks
             callbacks.http_status = []() -> std::string {
                 if (g_repl_http_server && g_repl_http_server->is_running()) {
@@ -702,7 +696,7 @@ static void run_repl(idasql::Database& db) {
                 return "HTTP server not running\nUse '.http start' to start\n";
             };
 
-            callbacks.http_start = [&db]() -> std::string {
+            callbacks.http_start = [&db](int req_port, const std::string& bind_addr) -> std::string {
                 if (g_repl_http_server && g_repl_http_server->is_running()) {
                     return idasql::format_http_status(g_repl_http_server->port(), true);
                 }
@@ -717,8 +711,8 @@ static void run_repl(idasql::Database& db) {
                     return query_result_to_json(db, sql);
                 };
 
-                // Start with use_queue=true (CLI mode), port=0 (random 8100-8199)
-                int port = g_repl_http_server->start(0, sql_cb, "127.0.0.1", true);
+                // Start with use_queue=true (CLI mode)
+                int port = g_repl_http_server->start(req_port, sql_cb, bind_addr, true);
                 if (port <= 0) {
                     return "Error: Failed to start HTTP server\n";
                 }
@@ -760,7 +754,6 @@ static void run_repl(idasql::Database& db) {
                 }
                 return "HTTP server not running\n";
             };
-#endif // IDASQL_HAS_HTTP
 
             std::string output;
             auto result = idasql::handle_command(line, callbacks, output);
@@ -935,7 +928,6 @@ static bool execute_file(idasql::Database& db, const char* path) {
 // HTTP Server Mode
 // ============================================================================
 
-#ifdef IDASQL_HAS_HTTP
 static xsql::thinclient::server* g_http_server = nullptr;
 static std::atomic<bool> g_http_stop_requested{false};
 
@@ -1291,14 +1283,13 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     std::cout << "\nHTTP server stopped.\n";
     return 0;
 }
-#endif // IDASQL_HAS_HTTP
 
 // ============================================================================
 // Main
 // ============================================================================
 
 static void print_usage() {
-    std::cerr << "IDASQL - SQL interface to IDA databases\n\n"
+    std::cerr << "idasql v" IDASQL_VERSION_STRING " - SQL interface to IDA databases\n\n"
               << "Usage: idasql -s <database> [-q|-c <query>] [-f <file>] [-i] [--export <file>]\n"
               << "       idasql --remote <host:port> [-q|-c <query>] [-f <file>] [-i]\n\n"
               << "Options:\n"
@@ -1312,10 +1303,8 @@ static void print_usage() {
               << "  -w, --write          Save database on exit (persist changes)\n"
               << "  --export <file>      Export tables to SQL file (local mode only)\n"
               << "  --export-tables=X    Tables to export: * (all, default) or table1,table2,...\n"
-#ifdef IDASQL_HAS_HTTP
               << "  --http [port]        Start HTTP REST server (default: 8080, local mode only)\n"
               << "  --bind <addr>        Bind address for HTTP/MCP server (default: 127.0.0.1)\n"
-#endif
 #ifdef IDASQL_HAS_AI_AGENT
               << "  --mcp [port]         Start MCP server (default: random port, use in -i mode)\n"
               << "                       Or use .mcp start in interactive mode\n"
@@ -1330,7 +1319,8 @@ static void print_usage() {
               << "Agent settings stored in: ~/.idasql/agent_settings.json\n"
               << "Configure via: .agent provider, .agent byok, .agent timeout\n"
 #endif
-              << "  -h, --help           Show this help\n\n"
+              << "  -h, --help           Show this help\n"
+              << "  --version            Show version\n\n"
               << "Examples:\n"
               << "  idasql -s test.i64 -q \"SELECT name, size FROM funcs LIMIT 10\"\n"
               << "  idasql -s test.i64 -f queries.sql\n"
@@ -1351,10 +1341,14 @@ int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
 #endif
 
-    // Check for help first - before any IDA initialization
+    // Check for help/version first - before any IDA initialization
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage();
+            return 0;
+        }
+        if (strcmp(argv[i], "--version") == 0) {
+            std::cout << "idasql v" IDASQL_VERSION_STRING "\n";
             return 0;
         }
     }
@@ -1527,19 +1521,11 @@ int main(int argc, char* argv[]) {
     std::cerr << "Database opened successfully." << std::endl;
 
     // HTTP server mode
-#ifdef IDASQL_HAS_HTTP
     if (http_mode) {
         int http_result = run_http_mode(db, http_port, bind_addr, auth_token);
         db.close();
         return http_result;
     }
-#else
-    if (http_mode) {
-        std::cerr << "Error: HTTP mode not available. Rebuild with -DIDASQL_WITH_HTTP=ON\n";
-        db.close();
-        return 1;
-    }
-#endif
 
     // MCP server mode (standalone, not interactive REPL)
 #ifdef IDASQL_HAS_AI_AGENT

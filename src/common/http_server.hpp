@@ -11,8 +11,6 @@
  * 2. Plugin: Use execute_sync() wrapper in callbacks (no run_until_stopped() needed)
  */
 
-#ifdef IDASQL_HAS_HTTP
-
 #include <string>
 #include <functional>
 #include <atomic>
@@ -127,5 +125,3 @@ std::string format_http_info(int port, const std::string& stop_hint = "Press Ctr
 std::string format_http_status(int port, bool running);
 
 } // namespace idasql
-
-#endif // IDASQL_HAS_HTTP

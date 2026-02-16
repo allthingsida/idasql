@@ -1,7 +1,5 @@
 #include "http_server.hpp"
 
-#ifdef IDASQL_HAS_HTTP
-
 // Windows SDK compatibility for cpp-httplib
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -328,5 +326,3 @@ std::string format_http_status(int port, bool running) {
 }
 
 } // namespace idasql
-
-#endif // IDASQL_HAS_HTTP
