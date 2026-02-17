@@ -13,7 +13,6 @@
  *   types_v_enums     - Filter: enums only
  *   types_v_typedefs  - Filter: typedefs only
  *   types_v_funcs     - Filter: function types only
- *   local_types       - Backward compatibility alias
  */
 
 #pragma once
@@ -1514,10 +1513,6 @@ private:
         db.exec("CREATE VIEW IF NOT EXISTS types_v_enums AS SELECT * FROM types WHERE is_enum = 1");
         db.exec("CREATE VIEW IF NOT EXISTS types_v_typedefs AS SELECT * FROM types WHERE is_typedef = 1");
         db.exec("CREATE VIEW IF NOT EXISTS types_v_funcs AS SELECT * FROM types WHERE is_func = 1");
-
-        // Backward compatibility - alias for old local_types table
-        db.exec("CREATE VIEW IF NOT EXISTS local_types AS SELECT ordinal, name, definition AS type, "
-                "is_struct, is_enum, is_typedef FROM types");
     }
 };
 

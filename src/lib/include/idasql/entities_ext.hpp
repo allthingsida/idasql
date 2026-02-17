@@ -12,8 +12,7 @@
  *   fchunks        - Function chunks (tails)
  *   signatures     - Applied FLIRT signatures
  *   local_types    - Local type library entries
- *   comments       - Address comments (regular/repeatable)
- *   stack_vars     - Stack variables per function
+ *   mappings       - Address mappings
  */
 
 #pragma once
@@ -386,76 +385,6 @@ inline VTableDef define_local_types() {
 }
 
 // ============================================================================
-// COMMENTS Table - Address comments
-// ============================================================================
-
-struct CommentEntry {
-    ea_t ea;
-    std::string comment;
-    std::string rpt_comment;
-};
-
-inline std::vector<CommentEntry>& get_comments_cache() {
-    static std::vector<CommentEntry> cache;
-    return cache;
-}
-
-inline void rebuild_comments_cache() {
-    auto& cache = get_comments_cache();
-    cache.clear();
-
-    // Iterate all addresses that have flags
-    ea_t ea = inf_get_min_ea();
-    ea_t max_ea = inf_get_max_ea();
-
-    while (ea < max_ea) {
-        qstring cmt, rpt;
-        ssize_t cmt_len = get_cmt(&cmt, ea, false);  // regular comment
-        ssize_t rpt_len = get_cmt(&rpt, ea, true);   // repeatable comment
-
-        if (cmt_len > 0 || rpt_len > 0) {
-            CommentEntry entry;
-            entry.ea = ea;
-            entry.comment = cmt_len > 0 ? cmt.c_str() : "";
-            entry.rpt_comment = rpt_len > 0 ? rpt.c_str() : "";
-            cache.push_back(entry);
-        }
-
-        ea = next_head(ea, max_ea);
-        if (ea == BADADDR) break;
-    }
-}
-
-inline VTableDef define_comments() {
-    return table("comments")
-        .count([]() {
-            rebuild_comments_cache();
-            return get_comments_cache().size();
-        })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& cache = get_comments_cache();
-            return i < cache.size() ? cache[i].ea : 0;
-        })
-        .column_text("comment", [](size_t i) -> std::string {
-            auto& cache = get_comments_cache();
-            return i < cache.size() ? cache[i].comment : "";
-        })
-        .column_text("rpt_comment", [](size_t i) -> std::string {
-            auto& cache = get_comments_cache();
-            return i < cache.size() ? cache[i].rpt_comment : "";
-        })
-        .column_int("has_regular", [](size_t i) -> int {
-            auto& cache = get_comments_cache();
-            return i < cache.size() ? (!cache[i].comment.empty() ? 1 : 0) : 0;
-        })
-        .column_int("has_repeatable", [](size_t i) -> int {
-            auto& cache = get_comments_cache();
-            return i < cache.size() ? (!cache[i].rpt_comment.empty() ? 1 : 0) : 0;
-        })
-        .build();
-}
-
-// ============================================================================
 // MAPPINGS Table - Address mappings
 // ============================================================================
 
@@ -502,7 +431,6 @@ struct ExtendedRegistry {
     VTableDef fchunks;
     VTableDef signatures;
     VTableDef local_types;
-    VTableDef comments;
     VTableDef mappings;
 
     ExtendedRegistry()
@@ -512,7 +440,6 @@ struct ExtendedRegistry {
         , fchunks(define_fchunks())
         , signatures(define_signatures())
         , local_types(define_local_types())
-        , comments(define_comments())
         , mappings(define_mappings())
     {}
 
@@ -534,9 +461,6 @@ struct ExtendedRegistry {
 
         db.register_table("ida_local_types", &local_types);
         db.create_table("local_types", "ida_local_types");
-
-        db.register_table("ida_comments", &comments);
-        db.create_table("comments", "ida_comments");
 
         db.register_table("ida_mappings", &mappings);
         db.create_table("mappings", "ida_mappings");
