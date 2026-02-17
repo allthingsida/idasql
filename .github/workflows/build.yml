@@ -121,12 +121,116 @@ jobs:
           path: ${{ env.IDASDK }}/src/bin/idasql.exe
 
   # ============================================================================
+  # Build no-agent variant (CLI + Plugin) — lightweight HTTP-only, no AI deps
+  # ============================================================================
+  build-linux-no-agent:
+    name: Build no-agent (Linux)
+    runs-on: ubuntu-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=OFF
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload plugin (no-agent)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-no-agent-linux
+          path: ${{ env.IDASDK }}/src/bin/plugins/idasql.so
+
+      - name: Upload CLI (no-agent)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-no-agent-linux
+          path: ${{ env.IDASDK }}/src/bin/idasql
+
+  build-macos-no-agent:
+    name: Build no-agent (macOS)
+    runs-on: macos-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_AI_AGENT=OFF
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload plugin (no-agent)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-no-agent-macos
+          path: ${{ env.IDASDK }}/src/bin/plugins/idasql.dylib
+
+      - name: Upload CLI (no-agent)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-no-agent-macos
+          path: ${{ env.IDASDK }}/src/bin/idasql
+
+  build-windows-no-agent:
+    name: Build no-agent (Windows)
+    runs-on: windows-latest
+    env:
+      IDASDK: ${{ github.workspace }}/ida-sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        shell: bash
+        run: git submodule update --init --recursive
+
+      - name: Setup IDA SDK
+        shell: bash
+        run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+
+      - name: Configure
+        run: cmake -B build -DIDASQL_WITH_AI_AGENT=OFF
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload plugin (no-agent)
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-no-agent-windows
+          path: ${{ env.IDASDK }}/src/bin/plugins/idasql.dll
+
+      - name: Upload CLI (no-agent)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-no-agent-windows
+          path: ${{ env.IDASDK }}/src/bin/idasql.exe
+
+  # ============================================================================
   # Release
   # ============================================================================
   publish-release:
     name: Publish Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-linux, build-macos, build-windows, build-linux-no-agent, build-macos-no-agent, build-windows-no-agent]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -139,49 +243,88 @@ jobs:
           path: plugins
           merge-multiple: true
 
-      - name: Download CLI (Linux)
+      - name: Download CLI (with agent)
         uses: actions/download-artifact@v4
         with:
-          name: cli-linux
+          pattern: cli-linux
           path: cli-linux
-
-      - name: Download CLI (macOS)
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: cli-macos
           path: cli-macos
-
-      - name: Download CLI (Windows)
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: cli-windows
           path: cli-windows
 
+      - name: Download no-agent plugins
+        uses: actions/download-artifact@v4
+        with:
+          pattern: plugin-no-agent-*
+          path: plugins-no-agent
+          merge-multiple: true
+
+      - name: Download CLI (no agent)
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-no-agent-linux
+          path: cli-no-agent-linux
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-no-agent-macos
+          path: cli-no-agent-macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-no-agent-windows
+          path: cli-no-agent-windows
+
       - name: Prepare release
         run: |
-          mkdir -p release/plugin
+          mkdir -p release/plugin release/plugin-no-agent
           mkdir -p release/cli/{windows,linux,macos}
-          # Plugin (flat, IDA-compatible)
+          mkdir -p release/cli-no-agent/{windows,linux,macos}
+          # Plugin with agent (flat, IDA-compatible)
           cp plugins/idasql.dll release/plugin/ || true
           cp plugins/idasql.so release/plugin/ || true
           cp plugins/idasql.dylib release/plugin/ || true
           cp ida-plugin.json release/plugin/
-          # CLI (organized by platform)
+          # Plugin without agent (flat, IDA-compatible)
+          cp plugins-no-agent/idasql.dll release/plugin-no-agent/ || true
+          cp plugins-no-agent/idasql.so release/plugin-no-agent/ || true
+          cp plugins-no-agent/idasql.dylib release/plugin-no-agent/ || true
+          cp ida-plugin.json release/plugin-no-agent/
+          # CLI with agent (organized by platform)
           cp cli-windows/idasql.exe release/cli/windows/ || true
           cp cli-linux/idasql release/cli/linux/ || true
           cp cli-macos/idasql release/cli/macos/ || true
+          # CLI without agent (organized by platform)
+          cp cli-no-agent-windows/idasql.exe release/cli-no-agent/windows/ || true
+          cp cli-no-agent-linux/idasql release/cli-no-agent/linux/ || true
+          cp cli-no-agent-macos/idasql release/cli-no-agent/macos/ || true
           echo "=== Plugin ===" && ls -la release/plugin/
-          echo "=== CLI ===" && ls -laR release/cli/
+          echo "=== Plugin (no-agent) ===" && ls -la release/plugin-no-agent/
+          echo "=== CLI (agent) ===" && ls -laR release/cli/
+          echo "=== CLI (no-agent) ===" && ls -laR release/cli-no-agent/
 
       - name: Create plugin zip
         run: |
           cd release/plugin
           zip -9 ../idasql_plugin-${{ github.ref_name }}.zip *
 
-      - name: Create CLI zip
+      - name: Create plugin zip (no agent)
+        run: |
+          cd release/plugin-no-agent
+          zip -9 ../idasql_plugin-no-agent-${{ github.ref_name }}.zip *
+
+      - name: Create CLI zip (with agent)
         run: |
           cd release/cli
           zip -r9 ../idasql_cli-${{ github.ref_name }}.zip windows linux macos
+
+      - name: Create CLI zip (no agent)
+        run: |
+          cd release/cli-no-agent
+          zip -r9 ../idasql_cli-no-agent-${{ github.ref_name }}.zip windows linux macos
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -191,4 +334,6 @@ jobs:
           generate_release_notes: true
           files: |
             release/idasql_plugin-${{ github.ref_name }}.zip
+            release/idasql_plugin-no-agent-${{ github.ref_name }}.zip
             release/idasql_cli-${{ github.ref_name }}.zip
+            release/idasql_cli-no-agent-${{ github.ref_name }}.zip

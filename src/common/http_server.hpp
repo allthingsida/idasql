@@ -3,20 +3,18 @@
 /**
  * IDAHTTPServer - HTTP REST server for IDASQL REPL
  *
- * Thread-safe HTTP server using command queue pattern (same as IDAMCPServer).
- * Provides REST endpoints for SQL queries.
+ * Thin wrapper over xsql::thinclient::http_query_server.
+ * Preserves the existing API for backward compatibility.
  *
  * Usage modes:
  * 1. CLI (idalib): Call run_until_stopped() to process commands on main thread
  * 2. Plugin: Use execute_sync() wrapper in callbacks (no run_until_stopped() needed)
  */
 
+#include <xsql/thinclient/http_query_server.hpp>
+
 #include <string>
 #include <functional>
-#include <atomic>
-#include <mutex>
-#include <condition_variable>
-#include <queue>
 #include <memory>
 
 namespace idasql {
@@ -24,19 +22,10 @@ namespace idasql {
 // Callback for handling SQL queries
 using HTTPQueryCallback = std::function<std::string(const std::string& sql)>;
 
-// Internal command structure for cross-thread execution
-struct HTTPPendingCommand {
-    std::string sql;
-    std::string result;
-    bool completed = false;
-    std::mutex done_mutex;
-    std::condition_variable done_cv;
-};
-
 class IDAHTTPServer {
 public:
-    IDAHTTPServer();
-    ~IDAHTTPServer();
+    IDAHTTPServer() = default;
+    ~IDAHTTPServer() { stop(); }
 
     // Non-copyable
     IDAHTTPServer(const IDAHTTPServer&) = delete;
@@ -59,59 +48,26 @@ public:
     /**
      * Block until server stops, processing commands on the calling thread.
      * Only needed when use_queue=true (CLI mode).
-     * This is where query_cb gets called on the main thread.
      */
     void run_until_stopped();
 
-    /**
-     * Stop the server
-     */
+    /** Stop the server */
     void stop();
 
-    /**
-     * Check if server is running
-     */
-    bool is_running() const { return running_.load(); }
+    /** Check if server is running */
+    bool is_running() const;
 
-    /**
-     * Get the port the server is listening on
-     */
-    int port() const { return port_; }
+    /** Get the port the server is listening on */
+    int port() const;
 
-    /**
-     * Get the server URL
-     */
+    /** Get the server URL */
     std::string url() const;
 
-    /**
-     * Set interrupt check function (called during wait loop)
-     */
+    /** Set interrupt check function (called during wait loop) */
     void set_interrupt_check(std::function<bool()> check);
 
 private:
-    std::function<bool()> interrupt_check_;
-    std::atomic<bool> running_{false};
-    std::atomic<bool> use_queue_{false};
-    std::string bind_addr_{"127.0.0.1"};
-    int port_{0};
-
-    // Command queue for cross-thread execution (CLI mode)
-    std::mutex queue_mutex_;
-    std::condition_variable queue_cv_;
-    std::queue<std::shared_ptr<HTTPPendingCommand>> pending_commands_;
-
-    // Callback stored for execution
-    HTTPQueryCallback query_cb_;
-
-    // Forward declaration - impl hides httplib
-    class Impl;
-    std::unique_ptr<Impl> impl_;
-
-    // Queue a command and wait for main thread to execute it
-    std::string queue_and_wait(const std::string& sql);
-
-    // Complete all pending commands with an error message
-    void complete_pending_commands(const std::string& result);
+    std::unique_ptr<xsql::thinclient::http_query_server> impl_;
 };
 
 /**
