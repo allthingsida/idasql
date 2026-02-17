@@ -1021,7 +1021,6 @@ Endpoints:
   GET  /help     - This documentation (for LLM discovery)
   POST /query    - Execute SQL (body = raw SQL, response = JSON)
   GET  /status   - Server health
-  GET  /health   - Alias for /status
   POST /shutdown - Stop server
 
 Tables:
@@ -1142,34 +1141,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
             res.set_content(xsql::json{{"success", true}, {"status", "ok"}, {"tool", "idasql"}, {"functions", "?"}}.dump(), "application/json");
         });
 
-        // GET /health - Alias for /status
-        svr.Get("/health", [&auth_token](const httplib::Request& req, httplib::Response& res) {
-            if (!auth_token.empty()) {
-                std::string token;
-                if (req.has_header("X-XSQL-Token")) token = req.get_header_value("X-XSQL-Token");
-                else if (req.has_header("Authorization")) {
-                    auto auth = req.get_header_value("Authorization");
-                    if (auth.rfind("Bearer ", 0) == 0) token = auth.substr(7);
-                }
-                if (token != auth_token) {
-                    res.status = 401;
-                    res.set_content(xsql::json{{"success", false}, {"error", "Unauthorized"}}.dump(), "application/json");
-                    return;
-                }
-            }
-            // Queue for main thread
-            std::string result = http_queue_and_wait("SELECT COUNT(*) FROM funcs");
-            try {
-                auto j = xsql::json::parse(result);
-                if (j.value("success", false) && j.contains("rows") && !j["rows"].empty()) {
-                    int count = std::stoi(j["rows"][0][0].get<std::string>());
-                    res.set_content(xsql::json{{"success", true}, {"status", "ok"}, {"tool", "idasql"}, {"functions", count}}.dump(), "application/json");
-                    return;
-                }
-            } catch (...) {}
-            res.set_content(xsql::json{{"success", true}, {"status", "ok"}, {"tool", "idasql"}, {"functions", "?"}}.dump(), "application/json");
-        });
-
         svr.Post("/shutdown", [&svr, &auth_token](const httplib::Request& req, httplib::Response& res) {
             if (!auth_token.empty()) {
                 std::string token;
@@ -1206,17 +1177,16 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     auto old_term_handler = std::signal(SIGTERM, http_signal_handler);
 #endif
 
-    std::cout << "IDASQL HTTP server listening on http://" << cfg.bind_address << ":" << port << "\n";
+    // Start HTTP server on a background thread (resolves random port)
+    http_server.run_async();
+    int actual_port = http_server.port();
+
+    std::cout << "IDASQL HTTP server listening on http://" << cfg.bind_address << ":" << actual_port << "\n";
     std::cout << "Database: " << db.info() << "\n";
     std::cout << "Endpoints: /help, /query, /status, /shutdown\n";
-    std::cout << "Example: curl http://localhost:" << port << "/help\n";
+    std::cout << "Example: curl http://localhost:" << actual_port << "/help\n";
     std::cout << "Press Ctrl+C to stop.\n\n";
     std::cout.flush();
-
-    // Start HTTP server on a background thread
-    std::thread http_thread([&http_server]() {
-        http_server.run();
-    });
 
     // Main thread processes the command queue (required for Hex-Rays thread affinity)
     while (g_http_running.load() && !g_http_stop_requested.load()) {
@@ -1267,11 +1237,8 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
         }
     }
 
-    // Stop HTTP server and wait for thread
+    // Stop HTTP server (run_async thread joined internally)
     http_server.stop();
-    if (http_thread.joinable()) {
-        http_thread.join();
-    }
 
     std::signal(SIGINT, old_handler);
 #ifdef _WIN32

@@ -1,0 +1,26 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IDASQL_WITH_AI_AGENT": "ON"
+      }
+    },
+    {
+      "name": "release-no-agent",
+      "displayName": "Release (no AI agent)",
+      "description": "Build without AI agent support to reduce binary size. Excludes libagents, fastmcpp, claude_sdk, copilot_sdk_cpp, easywsclient, tiny-process-library.",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/build-no-agent",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IDASQL_WITH_AI_AGENT": "OFF"
+      }
+    }
+  ]
+}

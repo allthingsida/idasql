@@ -77,14 +77,17 @@ target_sources(idasql_cli PRIVATE
 )
 target_compile_definitions(idasql_cli PRIVATE XSQL_HAS_THINCLIENT)
 
-# Fetch cpp-httplib if not already available
-include(FetchContent)
-FetchContent_Declare(
-    cpp_httplib
-    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
-    GIT_TAG v0.15.3
-)
-FetchContent_MakeAvailable(cpp_httplib)
-target_include_directories(idasql_cli PRIVATE ${cpp_httplib_SOURCE_DIR})
+# cpp-httplib: provided transitively by xsql::xsql when XSQL_WITH_THINCLIENT=ON.
+# Only fetch standalone if the target doesn't already exist (e.g. standalone build).
+if(NOT TARGET httplib)
+    include(FetchContent)
+    FetchContent_Declare(
+        cpp_httplib
+        GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+        GIT_TAG v0.15.3
+    )
+    FetchContent_MakeAvailable(cpp_httplib)
+    target_include_directories(idasql_cli PRIVATE ${cpp_httplib_SOURCE_DIR})
+endif()
 
 # idasql.exe is placed next to ida.exe via RUNTIME_OUTPUT_DIRECTORY above.
