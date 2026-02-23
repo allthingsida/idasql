@@ -45,7 +45,7 @@ Works as a **standalone CLI** (query `.i64` files directly) or as an **IDA plugi
 
 - **AI Agent** - Natural language queries with Claude or GitHub Copilot
 - **SQL Interface** - Full SQL access to functions, strings, imports, xrefs, instructions, types
-- **Unified Entity Search** - `jump_entities()` searches everything: functions, types, members, enums (think "Jump Anywhere")
+- **Unified Entity Search** - `grep` table + `grep()` function search functions, labels, segments, types, members, and enums
 - **Standalone CLI** - Query `.i64` files without opening IDA GUI
 - **IDA Plugin** - SQL/AI interface inside IDA's command line
 - **Remote Server** - Query IDA from external tools, scripts, or coding agents
@@ -137,15 +137,14 @@ idasql> who calls VirtualAlloc and what do they do with it?
 
 ![Plugin Decompile](assets/idasql_plugin_agent_2.jpg)
 
-### Remote Server
+### HTTP Server
 
-The plugin runs a TCP server. Query IDA from scripts, other tools, or coding agents:
+The plugin can run an HTTP server for scripting, tooling, and agent workflows:
 
 ```bash
-idasql --remote localhost:13337 --token <token> -q "SELECT COUNT(*) FROM funcs"
+idasql -s database.i64 --http 8081 --token <token>
+curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SELECT COUNT(*) FROM funcs"
 ```
-
-![Remote Query](assets/idasql_cli_handoff_1.jpg)
 
 ## Quick Start
 
@@ -166,6 +165,9 @@ idasql -s database.i64 --prompt "find the largest function"
 
 # Run SQL script
 idasql -s database.i64 -f queries.sql
+
+# Save modifications on exit
+idasql -s database.i64 -i -w
 
 # Export all tables
 idasql -s database.i64 --export dump.sql
@@ -190,35 +192,74 @@ SELECT name, printf('0x%X', address) as addr FROM funcs WHERE size > 1000;
 | `segments` | Segments - name, start/end address, permissions, class (UPDATE/DELETE) |
 | `names` | Named locations - address, name, flags (INSERT/UPDATE/DELETE) |
 | `imports` | Imports - module, name, address, ordinal |
-| `exports` | Exports - name, address, ordinal |
+| `entries` | Entry points - export/program/tls callbacks (ordinal, address, name) |
 | `strings` | Strings - address, content, length, type |
 | `xrefs` | Cross-references - from/to address, type, is_code |
 | `instructions` | Disassembly - address, mnemonic, operands, itype, func_addr (DELETE) |
 | `blocks` | Basic blocks - start/end address, func_ea, size |
 | `types` | Type library - structs, unions, enums with members (INSERT/UPDATE/DELETE) |
 | `breakpoints` | Breakpoints - address, type, enabled, condition (full CRUD) |
-| `jump_entities(pattern, mode)` | Unified search across all entities (see below) |
+| `grep` | Unified entity search table (`pattern`, `name`, `kind`, `address`, `ordinal`, `parent_name`, `full_name`) |
+| `grep(pattern, limit, offset)` | Unified entity search function that returns JSON |
+
+### Local Variable Mutation
+
+Hex-Rays-backed local variable surfaces:
+- `decompile(addr)` and `decompile(addr, 1)` for pseudocode display/refresh
+- `list_lvars(addr)` for local variable inventory
+- `rename_lvar(func_addr, lvar_idx, new_name)` for deterministic rename-by-index
+- `rename_lvar_by_name(func_addr, old_name, new_name)` for rename-by-name convenience
+- `UPDATE ctree_lvars SET name/type ... WHERE func_addr = ... AND idx = ...` as SQL update path
+
+Use `idx`-based writes when possible. Some internal/decompiler temps can be hidden or non-nameable.
+For full workflow and edge-case guidance, use `idasql/prompts/idasql_agent.md`.
+
+```sql
+SELECT list_lvars(0x401000);
+SELECT rename_lvar(0x401000, 2, 'buffer_size');
+SELECT decompile(0x401000, 1);
+```
+
+### EA Disassembly (Canonical)
+
+For "look at this address" workflows (code or data), use `disasm_at`:
+
+```sql
+-- Canonical listing at EA (resolves containing head)
+SELECT disasm_at(0x1807272A8);
+
+-- Context window (+/- 2 heads)
+SELECT disasm_at(0x1807272A8, 2);
+```
+
+`disasm(addr)` is still available for instruction-oriented workflows, but it force-decodes from the EA and is less suitable for data addresses.
 
 ### Unified Entity Search
 
-`jump_entities` is a table-valued function that searches across functions, types, struct members, enum values, and names. It works like IDA's "Jump to address" (G) but returns SQL rows.
+Use the `grep` table for composable SQL searches and `grep()` when JSON output is preferred.
 
 ```sql
 -- Search anything starting with "Create"
 SELECT name, kind, printf('0x%X', address) as addr
-FROM jump_entities('Create', 'prefix')
+FROM grep
+WHERE pattern = 'Create%'
 LIMIT 20;
 
--- Search anywhere in name (slower but thorough)
+-- Search anywhere in name (plain text is contains search)
 SELECT name, kind, full_name
-FROM jump_entities('File', 'contains')
-WHERE kind IN ('function', 'import')
+FROM grep
+WHERE pattern = 'File'
+  AND kind IN ('function', 'import')
 LIMIT 20;
 
 -- Find struct members
 SELECT name, parent_name, full_name
-FROM jump_entities('dw', 'prefix')
-WHERE kind = 'member';
+FROM grep
+WHERE pattern = 'dw%'
+  AND kind = 'member';
+
+-- JSON form with pagination
+SELECT grep('Create%', 20, 0);
 ```
 
 ## Query Examples
@@ -500,18 +541,6 @@ cmake --build build/tests --config Release
 ctest --test-dir build/tests -C Release
 ```
 
-## Remote Server Protocol
-
-The plugin listens on `127.0.0.1:13337` by default. Protocol is length-prefixed JSON over TCP. No MCP, no complex handshakes. A thin CLI client is all you need.
-
-Set `IDASQL_TOKEN` environment variable or let the plugin generate one (printed to IDA Output window on startup).
-
-```bash
-# From CLI
-idasql --remote localhost:13337 --token <token> -q "SELECT * FROM funcs LIMIT 5"
-idasql --remote localhost:13337 --token <token> -i  # Interactive
-```
-
 ## HTTP REST API
 
 Stateless HTTP server for simple integration. No protocol overhead.
@@ -590,38 +619,34 @@ The CLI is designed for integration with coding agents (Claude Code, Cursor, Aid
 ### Setup
 
 1. Open your target binary in IDA Pro (plugin loads automatically)
-2. Note the auth token printed in IDA's Output window:
-   ```
-   IDASQL: Auth token generated. Token: 2af05f7152ccc6dd66894c1243f72a2a
-   IDASQL: Server listening on 127.0.0.1:13337
-   ```
-3. The CLI acts as a thin client to query the running IDA instance
+2. Start HTTP mode in CLI or REPL (`idasql -s <db> --http 8081` or `.http start`)
+3. Use `/query` to execute SQL from scripts or coding agents
 
 ### Instructing an Agent
 
 When working with a coding agent on reverse engineering tasks, provide these instructions:
 
 ```
-IDASQL is running on localhost:13337 with token <token>.
+IDASQL HTTP server is running on http://127.0.0.1:8081 with token <token>.
 
-To query the IDA database, use the idasql CLI:
+To query the IDA database, use HTTP POST:
 
-  idasql --remote localhost:13337 --token <token> -q "SQL QUERY"
+  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SQL QUERY"
 
-Available tables: funcs, segments, names, imports, exports, strings, xrefs, instructions, blocks, types
+Available tables: funcs, segments, names, imports, entries, strings, xrefs, instructions, blocks, types
 
 Example queries:
   # List functions
-  idasql --remote localhost:13337 --token <token> -q "SELECT name, printf('0x%X', address) as addr FROM funcs LIMIT 20"
+  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SELECT name, printf('0x%X', address) as addr FROM funcs LIMIT 20"
 
   # Find strings containing a keyword
-  idasql --remote localhost:13337 --token <token> -q "SELECT * FROM strings WHERE content LIKE '%error%'"
+  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SELECT * FROM strings WHERE content LIKE '%error%'"
 
   # Find callers of a function
-  idasql --remote localhost:13337 --token <token> -q "SELECT printf('0x%X', from_ea) as caller FROM xrefs WHERE to_ea = 0x401000"
+  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SELECT printf('0x%X', from_ea) as caller FROM xrefs WHERE to_ea = 0x401000"
 
   # Search for any identifier
-  idasql --remote localhost:13337 --token <token> -q "SELECT name, kind, address FROM jump_entities('CreateFile', 'prefix') LIMIT 10"
+  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SELECT name, kind, address FROM grep WHERE pattern = 'CreateFile%' LIMIT 10"
 ```
 
 ### Agent Workflow Example
@@ -632,7 +657,7 @@ User: "Find all functions that call CreateFileW and check if they handle errors"
 Agent thinks: I'll query IDASQL to find the callers
 
 Agent runs:
-$ idasql --remote localhost:13337 --token abc123 -q "
+$ curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer abc123" -d "
   SELECT DISTINCT func_at(x.from_ea) as caller, printf('0x%X', x.from_ea) as call_site
   FROM xrefs x
   JOIN imports i ON x.to_ea = i.address
@@ -699,7 +724,7 @@ git config --global url."https://github.com/".insteadOf "git@github.com:"
 
 ## Built With
 
-- **[libxsql](https://github.com/0xeb/libxsql)** - Header-only C++17 library for exposing C++ data structures as SQLite virtual tables. Provides the fluent builder API for defining tables, constraint pushdown, and the socket server/client protocol.
+- **[libxsql](https://github.com/0xeb/libxsql)** - Header-only C++17 library for exposing C++ data structures as SQLite virtual tables. Provides the fluent builder API for defining tables, constraint pushdown, and HTTP thinclient support.
 
 - **[libagents](https://github.com/0xeb/libagents)** - C++ library for building AI agents with tool use. Powers the natural language interface with support for Claude (Anthropic) and GitHub Copilot providers.
 

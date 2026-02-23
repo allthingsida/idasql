@@ -25,6 +25,7 @@ target_compile_definitions(idasql_plugin PRIVATE
 
 # Windows-specific settings
 if(WIN32)
+    target_compile_options(idasql_plugin PRIVATE /bigobj)
     target_link_libraries(idasql_plugin PRIVATE ws2_32)
     # WIN32_LEAN_AND_MEAN: Exclude rarely-used Windows headers
     # NOMINMAX: Prevent Windows.h from defining min/max macros
@@ -50,6 +51,7 @@ if(IDASQL_WITH_AI_AGENT)
     target_include_directories(idasql_plugin PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common
         ${CMAKE_CURRENT_SOURCE_DIR}/../../external/libagents/external/fastmcpp/include
+        ${IDASQL_GENERATED_INCLUDE_DIR}
     )
 
     # Link against libagents and fastmcpp

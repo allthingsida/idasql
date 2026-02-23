@@ -8,7 +8,10 @@
  *
  *   idasql::Database db;
  *   db.open("database.i64");
- *   db.exec("SELECT * FROM funcs", callback, nullptr);
+ *   auto result = db.query("SELECT * FROM funcs LIMIT 10");
+ *   if (!result.success) {
+ *       std::cerr << result.error << "\n";
+ *   }
  *   db.close();
  */
 

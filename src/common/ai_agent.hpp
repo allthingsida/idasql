@@ -1,3 +1,9 @@
+/**
+ * ai_agent.hpp - IDASQL AI agent wrapper
+ *
+ * Wraps libagents provider interactions and query execution integration.
+ */
+
 #pragma once
 
 #ifdef IDASQL_HAS_AI_AGENT

@@ -1,5 +1,5 @@
 /**
- * ida_decompiler.hpp - Hex-Rays Decompiler Virtual Tables
+ * decompiler.hpp - Hex-Rays Decompiler Virtual Tables
  *
  * Provides SQLite virtual tables for accessing decompiled function data:
  *   pseudocode       - Decompiled function pseudocode lines
@@ -133,6 +133,7 @@ struct LvarInfo {
     int idx;
     std::string name;
     std::string type;
+    std::string comment;
     int size;
     bool is_arg;
     bool is_result;
@@ -140,6 +141,20 @@ struct LvarInfo {
     bool is_reg_var;
     sval_t stkoff;
     mreg_t mreg;
+};
+
+// Local variable rename result with explicit post-apply observability.
+struct LvarRenameResult {
+    bool success = false;         // Operation executed without internal API failure
+    bool applied = false;         // Observed name changed to requested target
+    ea_t func_addr = BADADDR;
+    int lvar_idx = -1;
+    std::string target_name;      // Original name selector (for by-name API)
+    std::string requested_name;   // Requested new name
+    std::string before_name;      // Name before mutation
+    std::string after_name;       // Name after mutation/readback
+    std::string reason;           // not_found, ambiguous_name, unchanged, not_nameable, etc.
+    std::vector<std::string> warnings;
 };
 
 // Ctree item data
@@ -178,6 +193,9 @@ struct CtreeItem {
 struct CallArgInfo {
     ea_t func_addr;
     int call_item_id;
+    ea_t call_ea;
+    std::string call_obj_name;
+    std::string call_helper_name;
     int arg_idx;
     int arg_item_id;
     std::string arg_op;
@@ -190,7 +208,7 @@ struct CallArgInfo {
     int64_t arg_num_value;
     std::string arg_str_value;
 
-    CallArgInfo() : func_addr(0), call_item_id(-1), arg_idx(-1), arg_item_id(-1),
+    CallArgInfo() : func_addr(0), call_item_id(-1), call_ea(BADADDR), arg_idx(-1), arg_item_id(-1),
                     arg_var_idx(-1), arg_var_is_stk(false), arg_var_is_arg(false),
                     arg_obj_ea(BADADDR), arg_num_value(0) {}
 };
@@ -334,6 +352,7 @@ inline bool collect_lvars(std::vector<LvarInfo>& vars, ea_t func_addr) {
         qstring type_str;
         lv.type().print(&type_str);
         vi.type = type_str.c_str();
+        vi.comment = lv.cmt.c_str();
 
         vi.size = lv.width;
         vi.is_arg = lv.is_arg_var();
@@ -620,6 +639,19 @@ struct call_args_collector_t : public ctree_parentee_t {
         item_ids[expr] = my_id;
 
         if (expr->op == cot_call && expr->a) {
+            std::string call_obj_name;
+            std::string call_helper_name;
+            if (expr->x != nullptr) {
+                if (expr->x->op == cot_obj) {
+                    qstring name;
+                    if (get_name(&name, expr->x->obj_ea) > 0) {
+                        call_obj_name = name.c_str();
+                    }
+                } else if (expr->x->op == cot_helper && expr->x->helper != nullptr) {
+                    call_helper_name = expr->x->helper;
+                }
+            }
+
             carglist_t& arglist = *expr->a;
             for (size_t i = 0; i < arglist.size(); i++) {
                 const carg_t& arg = arglist[i];
@@ -627,6 +659,9 @@ struct call_args_collector_t : public ctree_parentee_t {
                 CallArgInfo ai;
                 ai.func_addr = func_addr;
                 ai.call_item_id = my_id;
+                ai.call_ea = expr->ea;
+                ai.call_obj_name = call_obj_name;
+                ai.call_helper_name = call_helper_name;
                 ai.arg_idx = i;
                 ai.arg_op = get_full_ctype_name(arg.op);
 
@@ -712,20 +747,7 @@ inline void collect_all_call_args(std::vector<CallArgInfo>& args) {
     }
 }
 
-// ============================================================================
-// Caches for full scans
-// ============================================================================
-
-struct LvarsCache {
-    static std::vector<LvarInfo>& get() {
-        static std::vector<LvarInfo> cache;
-        return cache;
-    }
-    static void rebuild() { collect_all_lvars(get()); }
-};
-
-// Note: ctree and ctree_call_args use streaming generator tables (GeneratorTableDef)
-// No static caches needed - iteration is lazy and owned by the query cursor
+// ctree and ctree_call_args use streaming generator tables (GeneratorTableDef).
 
 // ============================================================================
 // Iterators for constraint pushdown
@@ -756,25 +778,138 @@ public:
 
     bool eof() const override { return started_ && idx_ >= lines_.size(); }
 
-    void column(sqlite3_context* ctx, int col) override {
-        if (idx_ >= lines_.size()) { sqlite3_result_null(ctx); return; }
+    void column(xsql::FunctionContext& ctx, int col) override {
+        if (idx_ >= lines_.size()) { ctx.result_null(); return; }
         const auto& line = lines_[idx_];
         switch (col) {
-            case 0: sqlite3_result_int64(ctx, line.func_addr); break;
-            case 1: sqlite3_result_int(ctx, line.line_num); break;
-            case 2: sqlite3_result_text(ctx, line.text.c_str(), -1, SQLITE_TRANSIENT); break;
+            case 0: ctx.result_int64(line.func_addr); break;
+            case 1: ctx.result_int(line.line_num); break;
+            case 2: ctx.result_text(line.text.c_str()); break;
             case 3:
-                sqlite3_result_int64(ctx, line.ea != BADADDR ? line.ea : 0);
+                ctx.result_int64(line.ea != BADADDR ? line.ea : 0);
                 break;
             case 4:
                 if (!line.comment.empty())
-                    sqlite3_result_text(ctx, line.comment.c_str(), -1, SQLITE_TRANSIENT);
+                    ctx.result_text(line.comment.c_str());
                 else
-                    sqlite3_result_null(ctx);
+                    ctx.result_null();
                 break;
             case 5:
-                sqlite3_result_text(ctx, itp_to_name(line.comment_placement), -1, SQLITE_STATIC);
+                ctx.result_text_static(itp_to_name(line.comment_placement));
                 break;
+        }
+    }
+
+    int64_t rowid() const override { return static_cast<int64_t>(idx_); }
+};
+
+// Pseudocode iterator for a single mapped address
+class PseudocodeAtEaIterator : public xsql::RowIterator {
+    std::vector<PseudocodeLine> lines_;
+    size_t idx_ = 0;
+    bool started_ = false;
+
+public:
+    explicit PseudocodeAtEaIterator(ea_t ea) {
+        func_t* f = get_func(ea);
+        if (!f) return;
+
+        std::vector<PseudocodeLine> all;
+        collect_pseudocode(all, f->start_ea);
+        for (const auto& line : all) {
+            if (line.ea == ea) {
+                lines_.push_back(line);
+            }
+        }
+    }
+
+    bool next() override {
+        if (!started_) {
+            started_ = true;
+            if (lines_.empty()) return false;
+            idx_ = 0;
+            return true;
+        }
+        if (idx_ + 1 < lines_.size()) { ++idx_; return true; }
+        idx_ = lines_.size();
+        return false;
+    }
+
+    bool eof() const override { return started_ && idx_ >= lines_.size(); }
+
+    void column(xsql::FunctionContext& ctx, int col) override {
+        if (idx_ >= lines_.size()) { ctx.result_null(); return; }
+        const auto& line = lines_[idx_];
+        switch (col) {
+            case 0: ctx.result_int64(line.func_addr); break;
+            case 1: ctx.result_int(line.line_num); break;
+            case 2: ctx.result_text(line.text.c_str()); break;
+            case 3: ctx.result_int64(line.ea != BADADDR ? line.ea : 0); break;
+            case 4:
+                if (!line.comment.empty()) ctx.result_text(line.comment.c_str());
+                else ctx.result_null();
+                break;
+            case 5: ctx.result_text_static(itp_to_name(line.comment_placement)); break;
+            default: ctx.result_null(); break;
+        }
+    }
+
+    int64_t rowid() const override { return static_cast<int64_t>(idx_); }
+};
+
+// Pseudocode iterator for line number across all functions
+class PseudocodeLineNumIterator : public xsql::RowIterator {
+    std::vector<PseudocodeLine> lines_;
+    size_t idx_ = 0;
+    bool started_ = false;
+
+public:
+    explicit PseudocodeLineNumIterator(int line_num) {
+        if (line_num < 0) return;
+
+        size_t func_qty = get_func_qty();
+        for (size_t i = 0; i < func_qty; ++i) {
+            func_t* f = getn_func(i);
+            if (!f) continue;
+
+            std::vector<PseudocodeLine> func_lines;
+            collect_pseudocode(func_lines, f->start_ea);
+            for (const auto& line : func_lines) {
+                if (line.line_num == line_num) {
+                    lines_.push_back(line);
+                }
+            }
+        }
+    }
+
+    bool next() override {
+        if (!started_) {
+            started_ = true;
+            if (lines_.empty()) return false;
+            idx_ = 0;
+            return true;
+        }
+        if (idx_ + 1 < lines_.size()) { ++idx_; return true; }
+        idx_ = lines_.size();
+        return false;
+    }
+
+    bool eof() const override { return started_ && idx_ >= lines_.size(); }
+
+    void column(xsql::FunctionContext& ctx, int col) override {
+        if (idx_ >= lines_.size()) { ctx.result_null(); return; }
+        const auto& line = lines_[idx_];
+        switch (col) {
+            case 0: ctx.result_int64(line.func_addr); break;
+            case 1: ctx.result_int(line.line_num); break;
+            case 2: ctx.result_text(line.text.c_str()); break;
+            case 3: ctx.result_int64(line.ea != BADADDR ? line.ea : 0); break;
+            case 4:
+                if (!line.comment.empty()) ctx.result_text(line.comment.c_str());
+                else ctx.result_null();
+                break;
+            case 5: ctx.result_text_static(itp_to_name(line.comment_placement)); break;
+            default: ctx.result_null(); break;
         }
     }
 
@@ -806,21 +941,26 @@ public:
 
     bool eof() const override { return started_ && idx_ >= vars_.size(); }
 
-    void column(sqlite3_context* ctx, int col) override {
-        if (idx_ >= vars_.size()) { sqlite3_result_null(ctx); return; }
+    void column(xsql::FunctionContext& ctx, int col) override {
+        if (idx_ >= vars_.size()) { ctx.result_null(); return; }
         const auto& v = vars_[idx_];
         switch (col) {
-            case 0: sqlite3_result_int64(ctx, v.func_addr); break;
-            case 1: sqlite3_result_int(ctx, v.idx); break;
-            case 2: sqlite3_result_text(ctx, v.name.c_str(), -1, SQLITE_TRANSIENT); break;
-            case 3: sqlite3_result_text(ctx, v.type.c_str(), -1, SQLITE_TRANSIENT); break;
-            case 4: sqlite3_result_int(ctx, v.size); break;
-            case 5: sqlite3_result_int(ctx, v.is_arg ? 1 : 0); break;
-            case 6: sqlite3_result_int(ctx, v.is_result ? 1 : 0); break;
-            case 7: sqlite3_result_int(ctx, v.is_stk_var ? 1 : 0); break;
-            case 8: sqlite3_result_int(ctx, v.is_reg_var ? 1 : 0); break;
-            case 9: v.is_stk_var ? sqlite3_result_int64(ctx, v.stkoff) : sqlite3_result_null(ctx); break;
-            case 10: v.is_reg_var ? sqlite3_result_int(ctx, v.mreg) : sqlite3_result_null(ctx); break;
+            case 0: ctx.result_int64(v.func_addr); break;
+            case 1: ctx.result_int(v.idx); break;
+            case 2: ctx.result_text(v.name.c_str()); break;
+            case 3: ctx.result_text(v.type.c_str()); break;
+            case 4:
+                if (!v.comment.empty()) ctx.result_text(v.comment.c_str());
+                else ctx.result_null();
+                break;
+            case 5: ctx.result_int(v.size); break;
+            case 6: ctx.result_int(v.is_arg ? 1 : 0); break;
+            case 7: ctx.result_int(v.is_result ? 1 : 0); break;
+            case 8: ctx.result_int(v.is_stk_var ? 1 : 0); break;
+            case 9: ctx.result_int(v.is_reg_var ? 1 : 0); break;
+            case 10: v.is_stk_var ? ctx.result_int64(v.stkoff) : ctx.result_null(); break;
+            case 11: v.is_reg_var ? ctx.result_int(v.mreg) : ctx.result_null(); break;
+            default: ctx.result_null(); break;
         }
     }
 
@@ -852,38 +992,38 @@ public:
 
     bool eof() const override { return started_ && idx_ >= items_.size(); }
 
-    void column(sqlite3_context* ctx, int col) override {
-        if (idx_ >= items_.size()) { sqlite3_result_null(ctx); return; }
+    void column(xsql::FunctionContext& ctx, int col) override {
+        if (idx_ >= items_.size()) { ctx.result_null(); return; }
         const auto& item = items_[idx_];
         switch (col) {
-            case 0: sqlite3_result_int64(ctx, item.func_addr); break;
-            case 1: sqlite3_result_int(ctx, item.item_id); break;
-            case 2: sqlite3_result_int(ctx, item.is_expr ? 1 : 0); break;
-            case 3: sqlite3_result_int(ctx, item.op); break;
-            case 4: sqlite3_result_text(ctx, item.op_name.c_str(), -1, SQLITE_TRANSIENT); break;
-            case 5: item.ea != BADADDR ? sqlite3_result_int64(ctx, item.ea) : sqlite3_result_null(ctx); break;
-            case 6: item.parent_id >= 0 ? sqlite3_result_int(ctx, item.parent_id) : sqlite3_result_null(ctx); break;
-            case 7: sqlite3_result_int(ctx, item.depth); break;
-            case 8: item.x_id >= 0 ? sqlite3_result_int(ctx, item.x_id) : sqlite3_result_null(ctx); break;
-            case 9: item.y_id >= 0 ? sqlite3_result_int(ctx, item.y_id) : sqlite3_result_null(ctx); break;
-            case 10: item.z_id >= 0 ? sqlite3_result_int(ctx, item.z_id) : sqlite3_result_null(ctx); break;
-            case 11: item.cond_id >= 0 ? sqlite3_result_int(ctx, item.cond_id) : sqlite3_result_null(ctx); break;
-            case 12: item.then_id >= 0 ? sqlite3_result_int(ctx, item.then_id) : sqlite3_result_null(ctx); break;
-            case 13: item.else_id >= 0 ? sqlite3_result_int(ctx, item.else_id) : sqlite3_result_null(ctx); break;
-            case 14: item.body_id >= 0 ? sqlite3_result_int(ctx, item.body_id) : sqlite3_result_null(ctx); break;
-            case 15: item.init_id >= 0 ? sqlite3_result_int(ctx, item.init_id) : sqlite3_result_null(ctx); break;
-            case 16: item.step_id >= 0 ? sqlite3_result_int(ctx, item.step_id) : sqlite3_result_null(ctx); break;
-            case 17: item.var_idx >= 0 ? sqlite3_result_int(ctx, item.var_idx) : sqlite3_result_null(ctx); break;
-            case 18: item.obj_ea != BADADDR ? sqlite3_result_int64(ctx, item.obj_ea) : sqlite3_result_null(ctx); break;
-            case 19: item.op == cot_num ? sqlite3_result_int64(ctx, item.num_value) : sqlite3_result_null(ctx); break;
-            case 20: !item.str_value.empty() ? sqlite3_result_text(ctx, item.str_value.c_str(), -1, SQLITE_TRANSIENT) : sqlite3_result_null(ctx); break;
-            case 21: !item.helper_name.empty() ? sqlite3_result_text(ctx, item.helper_name.c_str(), -1, SQLITE_TRANSIENT) : sqlite3_result_null(ctx); break;
-            case 22: (item.op == cot_memref || item.op == cot_memptr) ? sqlite3_result_int(ctx, item.member_offset) : sqlite3_result_null(ctx); break;
-            case 23: !item.var_name.empty() ? sqlite3_result_text(ctx, item.var_name.c_str(), -1, SQLITE_TRANSIENT) : sqlite3_result_null(ctx); break;
-            case 24: item.op == cot_var ? sqlite3_result_int(ctx, item.var_is_stk ? 1 : 0) : sqlite3_result_null(ctx); break;
-            case 25: item.op == cot_var ? sqlite3_result_int(ctx, item.var_is_reg ? 1 : 0) : sqlite3_result_null(ctx); break;
-            case 26: item.op == cot_var ? sqlite3_result_int(ctx, item.var_is_arg ? 1 : 0) : sqlite3_result_null(ctx); break;
-            case 27: !item.obj_name.empty() ? sqlite3_result_text(ctx, item.obj_name.c_str(), -1, SQLITE_TRANSIENT) : sqlite3_result_null(ctx); break;
+            case 0: ctx.result_int64(item.func_addr); break;
+            case 1: ctx.result_int(item.item_id); break;
+            case 2: ctx.result_int(item.is_expr ? 1 : 0); break;
+            case 3: ctx.result_int(item.op); break;
+            case 4: ctx.result_text(item.op_name.c_str()); break;
+            case 5: item.ea != BADADDR ? ctx.result_int64(item.ea) : ctx.result_null(); break;
+            case 6: item.parent_id >= 0 ? ctx.result_int(item.parent_id) : ctx.result_null(); break;
+            case 7: ctx.result_int(item.depth); break;
+            case 8: item.x_id >= 0 ? ctx.result_int(item.x_id) : ctx.result_null(); break;
+            case 9: item.y_id >= 0 ? ctx.result_int(item.y_id) : ctx.result_null(); break;
+            case 10: item.z_id >= 0 ? ctx.result_int(item.z_id) : ctx.result_null(); break;
+            case 11: item.cond_id >= 0 ? ctx.result_int(item.cond_id) : ctx.result_null(); break;
+            case 12: item.then_id >= 0 ? ctx.result_int(item.then_id) : ctx.result_null(); break;
+            case 13: item.else_id >= 0 ? ctx.result_int(item.else_id) : ctx.result_null(); break;
+            case 14: item.body_id >= 0 ? ctx.result_int(item.body_id) : ctx.result_null(); break;
+            case 15: item.init_id >= 0 ? ctx.result_int(item.init_id) : ctx.result_null(); break;
+            case 16: item.step_id >= 0 ? ctx.result_int(item.step_id) : ctx.result_null(); break;
+            case 17: item.var_idx >= 0 ? ctx.result_int(item.var_idx) : ctx.result_null(); break;
+            case 18: item.obj_ea != BADADDR ? ctx.result_int64(item.obj_ea) : ctx.result_null(); break;
+            case 19: item.op == cot_num ? ctx.result_int64(item.num_value) : ctx.result_null(); break;
+            case 20: !item.str_value.empty() ? ctx.result_text(item.str_value.c_str()) : ctx.result_null(); break;
+            case 21: !item.helper_name.empty() ? ctx.result_text(item.helper_name.c_str()) : ctx.result_null(); break;
+            case 22: (item.op == cot_memref || item.op == cot_memptr) ? ctx.result_int(item.member_offset) : ctx.result_null(); break;
+            case 23: !item.var_name.empty() ? ctx.result_text(item.var_name.c_str()) : ctx.result_null(); break;
+            case 24: item.op == cot_var ? ctx.result_int(item.var_is_stk ? 1 : 0) : ctx.result_null(); break;
+            case 25: item.op == cot_var ? ctx.result_int(item.var_is_reg ? 1 : 0) : ctx.result_null(); break;
+            case 26: item.op == cot_var ? ctx.result_int(item.var_is_arg ? 1 : 0) : ctx.result_null(); break;
+            case 27: !item.obj_name.empty() ? ctx.result_text(item.obj_name.c_str()) : ctx.result_null(); break;
         }
     }
 
@@ -915,23 +1055,26 @@ public:
 
     bool eof() const override { return started_ && idx_ >= args_.size(); }
 
-    void column(sqlite3_context* ctx, int col) override {
-        if (idx_ >= args_.size()) { sqlite3_result_null(ctx); return; }
+    void column(xsql::FunctionContext& ctx, int col) override {
+        if (idx_ >= args_.size()) { ctx.result_null(); return; }
         const auto& ai = args_[idx_];
         switch (col) {
-            case 0: sqlite3_result_int64(ctx, ai.func_addr); break;
-            case 1: sqlite3_result_int(ctx, ai.call_item_id); break;
-            case 2: sqlite3_result_int(ctx, ai.arg_idx); break;
-            case 3: ai.arg_item_id >= 0 ? sqlite3_result_int(ctx, ai.arg_item_id) : sqlite3_result_null(ctx); break;
-            case 4: sqlite3_result_text(ctx, ai.arg_op.c_str(), -1, SQLITE_TRANSIENT); break;
-            case 5: ai.arg_var_idx >= 0 ? sqlite3_result_int(ctx, ai.arg_var_idx) : sqlite3_result_null(ctx); break;
-            case 6: !ai.arg_var_name.empty() ? sqlite3_result_text(ctx, ai.arg_var_name.c_str(), -1, SQLITE_TRANSIENT) : sqlite3_result_null(ctx); break;
-            case 7: ai.arg_var_idx >= 0 ? sqlite3_result_int(ctx, ai.arg_var_is_stk ? 1 : 0) : sqlite3_result_null(ctx); break;
-            case 8: ai.arg_var_idx >= 0 ? sqlite3_result_int(ctx, ai.arg_var_is_arg ? 1 : 0) : sqlite3_result_null(ctx); break;
-            case 9: ai.arg_obj_ea != BADADDR ? sqlite3_result_int64(ctx, ai.arg_obj_ea) : sqlite3_result_null(ctx); break;
-            case 10: !ai.arg_obj_name.empty() ? sqlite3_result_text(ctx, ai.arg_obj_name.c_str(), -1, SQLITE_TRANSIENT) : sqlite3_result_null(ctx); break;
-            case 11: ai.arg_op == "cot_num" ? sqlite3_result_int64(ctx, ai.arg_num_value) : sqlite3_result_null(ctx); break;
-            case 12: !ai.arg_str_value.empty() ? sqlite3_result_text(ctx, ai.arg_str_value.c_str(), -1, SQLITE_TRANSIENT) : sqlite3_result_null(ctx); break;
+            case 0: ctx.result_int64(ai.func_addr); break;
+            case 1: ctx.result_int(ai.call_item_id); break;
+            case 2: ai.call_ea != BADADDR ? ctx.result_int64(ai.call_ea) : ctx.result_null(); break;
+            case 3: !ai.call_obj_name.empty() ? ctx.result_text(ai.call_obj_name.c_str()) : ctx.result_null(); break;
+            case 4: !ai.call_helper_name.empty() ? ctx.result_text(ai.call_helper_name.c_str()) : ctx.result_null(); break;
+            case 5: ctx.result_int(ai.arg_idx); break;
+            case 6: ai.arg_item_id >= 0 ? ctx.result_int(ai.arg_item_id) : ctx.result_null(); break;
+            case 7: ctx.result_text(ai.arg_op.c_str()); break;
+            case 8: ai.arg_var_idx >= 0 ? ctx.result_int(ai.arg_var_idx) : ctx.result_null(); break;
+            case 9: !ai.arg_var_name.empty() ? ctx.result_text(ai.arg_var_name.c_str()) : ctx.result_null(); break;
+            case 10: ai.arg_var_idx >= 0 ? ctx.result_int(ai.arg_var_is_stk ? 1 : 0) : ctx.result_null(); break;
+            case 11: ai.arg_var_idx >= 0 ? ctx.result_int(ai.arg_var_is_arg ? 1 : 0) : ctx.result_null(); break;
+            case 12: ai.arg_obj_ea != BADADDR ? ctx.result_int64(ai.arg_obj_ea) : ctx.result_null(); break;
+            case 13: !ai.arg_obj_name.empty() ? ctx.result_text(ai.arg_obj_name.c_str()) : ctx.result_null(); break;
+            case 14: ai.arg_op == "cot_num" ? ctx.result_int64(ai.arg_num_value) : ctx.result_null(); break;
+            case 15: !ai.arg_str_value.empty() ? ctx.result_text(ai.arg_str_value.c_str()) : ctx.result_null(); break;
         }
     }
 
@@ -946,7 +1089,7 @@ class CtreeGenerator : public xsql::Generator<CtreeItem> {
     size_t func_idx_ = 0;
     std::vector<CtreeItem> items_;
     size_t idx_ = 0;
-    sqlite3_int64 rowid_ = -1;
+    int64_t rowid_ = -1;
     bool started_ = false;
 
     bool load_next_func() {
@@ -987,14 +1130,14 @@ public:
 
     const CtreeItem& current() const override { return items_[idx_]; }
 
-    sqlite3_int64 rowid() const override { return rowid_; }
+    int64_t rowid() const override { return rowid_; }
 };
 
 class CallArgsGenerator : public xsql::Generator<CallArgInfo> {
     size_t func_idx_ = 0;
     std::vector<CallArgInfo> args_;
     size_t idx_ = 0;
-    sqlite3_int64 rowid_ = -1;
+    int64_t rowid_ = -1;
     bool started_ = false;
 
     bool load_next_func() {
@@ -1035,7 +1178,7 @@ public:
 
     const CallArgInfo& current() const override { return args_[idx_]; }
 
-    sqlite3_int64 rowid() const override { return rowid_; }
+    int64_t rowid() const override { return rowid_; }
 };
 
 // ============================================================================
@@ -1066,19 +1209,123 @@ inline bool set_decompiler_comment(ea_t func_addr, ea_t target_ea, const char* c
     return true;
 }
 
+inline bool clear_decompiler_comment_all_placements(ea_t func_addr, ea_t target_ea) {
+    if (!hexrays_available()) return false;
+    if (target_ea == BADADDR || target_ea == 0) return false;
+
+    func_t* f = get_func(func_addr);
+    if (!f) return false;
+
+    hexrays_failure_t hf;
+    cfuncptr_t cfunc = decompile(f, &hf);
+    if (!cfunc) return false;
+
+    // Clear any existing comment regardless of placement so UPDATE statements
+    // like "SET comment = NULL, comment_placement = 'semi'" are order-independent.
+    static const item_preciser_t kPlacements[] = {
+        ITP_SEMI, ITP_BLOCK1, ITP_BLOCK2, ITP_CURLY1, ITP_CURLY2, ITP_BRACE1,
+        ITP_BRACE2, ITP_COLON, ITP_CASE, ITP_ELSE, ITP_DO, ITP_ASM
+    };
+    for (item_preciser_t itp : kPlacements) {
+        treeloc_t loc;
+        loc.ea = target_ea;
+        loc.itp = itp;
+        cfunc->set_user_cmt(loc, nullptr);
+    }
+
+    cfunc->save_user_cmts();
+    invalidate_decompiler_cache(func_addr);
+    return true;
+}
+
+// Resolve an EA for a ctree item within a function.
+inline bool get_ctree_item_ea(ea_t func_addr, int item_id, ea_t& out_ea) {
+    out_ea = BADADDR;
+    if (!hexrays_available()) return false;
+    if (item_id < 0) return false;
+
+    std::vector<CtreeItem> items;
+    if (!collect_ctree(items, func_addr)) return false;
+    for (const CtreeItem& item : items) {
+        if (item.item_id != item_id) continue;
+        if (item.ea == BADADDR || item.ea == 0) continue;
+        out_ea = item.ea;
+        return true;
+    }
+    return false;
+}
+
+// Persist user union selection path for an EA. Empty path clears selection.
+inline bool set_union_selection_at_ea(ea_t func_addr, ea_t target_ea, const intvec_t& path) {
+    if (!hexrays_available()) return false;
+    if (target_ea == BADADDR || target_ea == 0) return false;
+
+    user_unions_t* unions = restore_user_unions(func_addr);
+    if (!unions) {
+        unions = user_unions_new();
+        if (!unions) return false;
+    }
+
+    const auto end = user_unions_end(unions);
+    auto it = user_unions_find(unions, target_ea);
+
+    if (path.empty()) {
+        if (it != end) {
+            user_unions_erase(unions, it);
+        }
+    } else if (it == end) {
+        user_unions_insert(unions, target_ea, path);
+    } else {
+        user_unions_second(it) = path;
+    }
+
+    save_user_unions(func_addr, unions);
+    user_unions_free(unions);
+    invalidate_decompiler_cache(func_addr);
+    return true;
+}
+
+// Persist user union selection path by ctree item id.
+inline bool set_union_selection_at_item(ea_t func_addr, int item_id, const intvec_t& path) {
+    ea_t target_ea = BADADDR;
+    if (!get_ctree_item_ea(func_addr, item_id, target_ea)) {
+        return false;
+    }
+    return set_union_selection_at_ea(func_addr, target_ea, path);
+}
+
+// Read user union selection path for an EA. Returns false when not found.
+inline bool get_union_selection_at_ea(ea_t func_addr, ea_t target_ea, intvec_t& out_path) {
+    out_path.clear();
+    if (!hexrays_available()) return false;
+    if (target_ea == BADADDR || target_ea == 0) return false;
+
+    user_unions_t* unions = restore_user_unions(func_addr);
+    if (!unions) return false;
+
+    auto it = user_unions_find(unions, target_ea);
+    const bool found = (it != user_unions_end(unions));
+    if (found) {
+        out_path = user_unions_second(it);
+    }
+    user_unions_free(unions);
+    return found;
+}
+
 inline CachedTableDef<PseudocodeLine> define_pseudocode() {
     return cached_table<PseudocodeLine>("pseudocode")
+        .no_shared_cache()
         .estimate_rows([]() -> size_t { return get_func_qty() * 20; })
         .cache_builder([](std::vector<PseudocodeLine>& cache) {
             collect_all_pseudocode(cache);
         })
-        .row_populator([](PseudocodeLine& row, int argc, sqlite3_value** argv) {
+        .row_populator([](PseudocodeLine& row, int argc, xsql::FunctionArg* argv) {
             // argv[2]=func_addr, argv[3]=line_num, argv[4]=line, argv[5]=ea, argv[6]=comment, argv[7]=comment_placement
-            if (argc > 2) row.func_addr = static_cast<ea_t>(sqlite3_value_int64(argv[2]));
-            if (argc > 3) row.line_num = sqlite3_value_int(argv[3]);
-            if (argc > 5) row.ea = static_cast<ea_t>(sqlite3_value_int64(argv[5]));
-            if (argc > 7 && sqlite3_value_type(argv[7]) != SQLITE_NULL) {
-                const char* p = reinterpret_cast<const char*>(sqlite3_value_text(argv[7]));
+            if (argc > 2) row.func_addr = static_cast<ea_t>(argv[2].as_int64());
+            if (argc > 3) row.line_num = argv[3].as_int();
+            if (argc > 5) row.ea = static_cast<ea_t>(argv[5].as_int64());
+            if (argc > 7 && !argv[7].is_null()) {
+                const char* p = argv[7].as_c_str();
                 row.comment_placement = name_to_itp(p);
             }
         })
@@ -1090,13 +1337,28 @@ inline CachedTableDef<PseudocodeLine> define_pseudocode() {
         })
         .column_text_rw("comment",
             [](const PseudocodeLine& r) -> std::string { return r.comment; },
-            [](PseudocodeLine& row, sqlite3_value* val) -> bool {
-                if (row.ea == BADADDR || row.ea == 0) return false;
+            [](PseudocodeLine& row, xsql::FunctionArg val) -> bool {
                 const char* text = nullptr;
-                if (sqlite3_value_type(val) != SQLITE_NULL) {
-                    text = reinterpret_cast<const char*>(sqlite3_value_text(val));
+                if (!val.is_null()) {
+                    text = val.as_c_str();
                 }
-                bool ok = set_decompiler_comment(row.func_addr, row.ea, text, row.comment_placement);
+                const bool is_clear = (text == nullptr || text[0] == '\0');
+                if (row.ea == BADADDR || row.ea == 0) {
+                    // Non-addressable lines (signature/blank/comment-only) cannot hold
+                    // user comments in Hex-Rays. Allow clear/no-op updates so bulk
+                    // cleanup queries do not fail the full statement.
+                    if (is_clear) {
+                        row.comment.clear();
+                        return true;
+                    }
+                    return false;
+                }
+                bool ok = false;
+                if (is_clear) {
+                    ok = clear_decompiler_comment_all_placements(row.func_addr, row.ea);
+                } else {
+                    ok = set_decompiler_comment(row.func_addr, row.ea, text, row.comment_placement);
+                }
                 if (ok) {
                     row.comment = text ? text : "";
                 }
@@ -1104,47 +1366,185 @@ inline CachedTableDef<PseudocodeLine> define_pseudocode() {
             })
         .column_text_rw("comment_placement",
             [](const PseudocodeLine& r) -> std::string { return itp_to_name(r.comment_placement); },
-            [](PseudocodeLine& row, sqlite3_value* val) -> bool {
-                if (sqlite3_value_type(val) == SQLITE_NULL) return false;
-                const char* name = reinterpret_cast<const char*>(sqlite3_value_text(val));
+            [](PseudocodeLine& row, xsql::FunctionArg val) -> bool {
+                if (val.is_null()) return false;
+                const char* name = val.as_c_str();
                 row.comment_placement = name_to_itp(name);
                 return true;  // just sets the field, actual comment write happens in comment setter
             })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<PseudocodeInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 50.0)
+        .filter_eq("ea", [](int64_t ea) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<PseudocodeAtEaIterator>(static_cast<ea_t>(ea));
+        }, 20.0, 5.0)
+        .filter_eq("line_num", [](int64_t line_num) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<PseudocodeLineNumIterator>(static_cast<int>(line_num));
+        }, 200.0, 100.0)
         .build();
 }
 
-// Helper: Rename lvar by func_addr and lvar index
-inline bool rename_lvar_at(ea_t func_addr, int lvar_idx, const char* new_name) {
-    if (!hexrays_available())
-        return false;
+// Snapshot one lvar from a function by index.
+inline bool get_lvar_snapshot(ea_t func_addr, int lvar_idx, LvarInfo& out) {
+    if (!hexrays_available()) return false;
+    if (lvar_idx < 0) return false;
+
+    std::vector<LvarInfo> vars;
+    if (!collect_lvars(vars, func_addr)) return false;
+    if (static_cast<size_t>(lvar_idx) >= vars.size()) return false;
+
+    out = vars[static_cast<size_t>(lvar_idx)];
+    return true;
+}
+
+// Helper: Rename lvar by func_addr and lvar index with explicit readback validation.
+inline LvarRenameResult rename_lvar_at_ex(ea_t func_addr, int lvar_idx, const char* new_name) {
+    LvarRenameResult result;
+    result.func_addr = func_addr;
+    result.lvar_idx = lvar_idx;
+    result.requested_name = new_name ? new_name : "";
+
+    if (!hexrays_available()) {
+        result.success = false;
+        result.reason = "hexrays_unavailable";
+        return result;
+    }
+    if (!new_name || !new_name[0]) {
+        result.success = true;
+        result.reason = "invalid_name";
+        return result;
+    }
+
+    LvarInfo before{};
+    if (!get_lvar_snapshot(func_addr, lvar_idx, before)) {
+        result.success = true;
+        result.reason = "not_found";
+        return result;
+    }
+    result.before_name = before.name;
+
+    if (before.name == new_name) {
+        result.success = true;
+        result.applied = false;
+        result.after_name = before.name;
+        result.reason = "unchanged";
+        return result;
+    }
 
     func_t* f = get_func(func_addr);
-    if (!f)
-        return false;
+    if (!f) {
+        result.success = false;
+        result.reason = "function_not_found";
+        return result;
+    }
 
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile(f, &hf);
-    if (!cfunc)
-        return false;
+    if (!cfunc) {
+        result.success = false;
+        result.reason = "decompile_failed";
+        return result;
+    }
 
     lvars_t* lvars = cfunc->get_lvars();
-    if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size())
-        return false;
+    if (!lvars || static_cast<size_t>(lvar_idx) >= lvars->size()) {
+        result.success = true;
+        result.reason = "not_found";
+        return result;
+    }
 
     lvar_t& lv = (*lvars)[lvar_idx];
 
-    // Use modify_user_lvar_info to persist the name change
     lvar_saved_info_t lsi;
-    lsi.ll = lv;  // Copy lvar_locator_t
+    lsi.ll = lv;
     lsi.name = new_name;
-    lsi.flags = 0;  // No special flags needed
+    lsi.flags = 0;
 
     bool ok = modify_user_lvar_info(func_addr, MLI_NAME, lsi);
-    if (ok) invalidate_decompiler_cache(func_addr);
-    return ok;
+    if (!ok) {
+        result.success = false;
+        result.reason = "rename_failed";
+        return result;
+    }
+
+    invalidate_decompiler_cache(func_addr);
+
+    LvarInfo after{};
+    if (!get_lvar_snapshot(func_addr, lvar_idx, after)) {
+        result.success = false;
+        result.reason = "post_verify_failed";
+        return result;
+    }
+
+    result.success = true;
+    result.after_name = after.name;
+    if (result.after_name == new_name) {
+        result.applied = true;
+        return result;
+    }
+
+    result.applied = false;
+    result.reason = result.after_name.empty() ? "not_nameable" : "not_applied";
+    result.warnings.push_back("rename request did not match post-refresh lvar name");
+    return result;
+}
+
+// Helper: Rename lvar by idx preserving legacy bool return.
+// Returns true on a successful mutation or a no-op unchanged rename.
+inline bool rename_lvar_at(ea_t func_addr, int lvar_idx, const char* new_name) {
+    LvarRenameResult r = rename_lvar_at_ex(func_addr, lvar_idx, new_name);
+    return r.success && (r.applied || r.reason == "unchanged");
+}
+
+// Helper: Rename lvar by old name (exact match).
+inline LvarRenameResult rename_lvar_by_name_ex(ea_t func_addr, const char* old_name, const char* new_name) {
+    LvarRenameResult result;
+    result.func_addr = func_addr;
+    result.lvar_idx = -1;
+    result.target_name = old_name ? old_name : "";
+    result.requested_name = new_name ? new_name : "";
+
+    if (!hexrays_available()) {
+        result.success = false;
+        result.reason = "hexrays_unavailable";
+        return result;
+    }
+    if (!old_name || !old_name[0]) {
+        result.success = true;
+        result.reason = "invalid_selector";
+        return result;
+    }
+
+    std::vector<LvarInfo> vars;
+    if (!collect_lvars(vars, func_addr)) {
+        result.success = false;
+        result.reason = "decompile_failed";
+        return result;
+    }
+
+    std::vector<int> matches;
+    matches.reserve(vars.size());
+    for (const auto& v : vars) {
+        if (v.name == old_name) {
+            matches.push_back(v.idx);
+        }
+    }
+
+    if (matches.empty()) {
+        result.success = true;
+        result.reason = "not_found";
+        return result;
+    }
+    if (matches.size() > 1) {
+        result.success = true;
+        result.reason = "ambiguous_name";
+        result.warnings.push_back("multiple locals matched selector; use rename_lvar(func_addr, idx, new_name)");
+        return result;
+    }
+
+    result = rename_lvar_at_ex(func_addr, matches[0], new_name);
+    result.target_name = old_name;
+    return result;
 }
 
 // Helper: Set lvar type by func_addr and lvar index
@@ -1189,74 +1589,96 @@ inline bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str)
     return ok;
 }
 
-inline VTableDef define_ctree_lvars() {
-    return table("ctree_lvars")
-        .count([]() { LvarsCache::rebuild(); return LvarsCache::get().size(); })
-        .column_int64("func_addr", [](size_t i) -> int64_t {
-            auto& c = LvarsCache::get(); return i < c.size() ? c[i].func_addr : 0;
+// Helper: Set lvar comment by func_addr and lvar index
+inline bool set_lvar_comment_at(ea_t func_addr, int lvar_idx, const char* comment) {
+    if (!hexrays_available())
+        return false;
+
+    func_t* f = get_func(func_addr);
+    if (!f)
+        return false;
+
+    hexrays_failure_t hf;
+    cfuncptr_t cfunc = decompile(f, &hf);
+    if (!cfunc)
+        return false;
+
+    lvars_t* lvars = cfunc->get_lvars();
+    if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size())
+        return false;
+
+    lvar_t& lv = (*lvars)[lvar_idx];
+
+    lvar_saved_info_t lsi;
+    lsi.ll = lv;  // Copy lvar_locator_t
+    lsi.cmt = comment ? comment : "";
+    lsi.flags = 0;
+
+    bool ok = modify_user_lvar_info(func_addr, MLI_CMT, lsi);
+    if (ok) invalidate_decompiler_cache(func_addr);
+    return ok;
+}
+
+inline CachedTableDef<LvarInfo> define_ctree_lvars() {
+    return cached_table<LvarInfo>("ctree_lvars")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t { return get_func_qty() * 20; })
+        .cache_builder([](std::vector<LvarInfo>& rows) {
+            collect_all_lvars(rows);
         })
-        .column_int("idx", [](size_t i) -> int {
-            auto& c = LvarsCache::get(); return i < c.size() ? c[i].idx : 0;
+        .row_populator([](LvarInfo& row, int argc, xsql::FunctionArg* argv) {
+            // argv[2]=func_addr, argv[3]=idx, argv[4]=name, argv[5]=type, argv[6]=comment, ...
+            if (argc > 2) row.func_addr = static_cast<ea_t>(argv[2].as_int64());
+            if (argc > 3) row.idx = argv[3].as_int();
+            if (argc > 4 && !argv[4].is_null()) {
+                const char* v = argv[4].as_c_str();
+                row.name = v ? v : "";
+            }
+            if (argc > 5 && !argv[5].is_null()) {
+                const char* v = argv[5].as_c_str();
+                row.type = v ? v : "";
+            }
+            if (argc > 6 && !argv[6].is_null()) {
+                const char* v = argv[6].as_c_str();
+                row.comment = v ? v : "";
+            }
         })
+        .column_int64("func_addr", [](const LvarInfo& row) -> int64_t { return row.func_addr; })
+        .column_int("idx", [](const LvarInfo& row) -> int { return row.idx; })
         .column_text_rw("name",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& c = LvarsCache::get();
-                return i < c.size() ? c[i].name : "";
+            [](const LvarInfo& row) -> std::string {
+                return row.name;
             },
-            // Setter - rename lvar
-            [](size_t i, const char* new_name) -> bool {
-                auto& c = LvarsCache::get();
-                if (i >= c.size()) return false;
-                ea_t func_addr = c[i].func_addr;
-                int idx = c[i].idx;
-                bool ok = rename_lvar_at(func_addr, idx, new_name);
-                if (ok) {
-                    // Update cache entry
-                    c[i].name = new_name;
-                }
+            [](LvarInfo& row, const char* new_name) -> bool {
+                bool ok = rename_lvar_at(row.func_addr, row.idx, new_name);
+                if (ok) row.name = new_name ? new_name : "";
                 return ok;
             })
         .column_text_rw("type",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& c = LvarsCache::get();
-                return i < c.size() ? c[i].type : "";
+            [](const LvarInfo& row) -> std::string {
+                return row.type;
             },
-            // Setter - change lvar type
-            [](size_t i, const char* new_type) -> bool {
-                auto& c = LvarsCache::get();
-                if (i >= c.size()) return false;
-                ea_t func_addr = c[i].func_addr;
-                int idx = c[i].idx;
-                bool ok = set_lvar_type_at(func_addr, idx, new_type);
-                if (ok) {
-                    // Update cache entry
-                    c[i].type = new_type;
-                }
+            [](LvarInfo& row, const char* new_type) -> bool {
+                bool ok = set_lvar_type_at(row.func_addr, row.idx, new_type);
+                if (ok) row.type = new_type ? new_type : "";
                 return ok;
             })
-        .column_int("size", [](size_t i) -> int {
-            auto& c = LvarsCache::get(); return i < c.size() ? c[i].size : 0;
-        })
-        .column_int("is_arg", [](size_t i) -> int {
-            auto& c = LvarsCache::get(); return i < c.size() ? (c[i].is_arg ? 1 : 0) : 0;
-        })
-        .column_int("is_result", [](size_t i) -> int {
-            auto& c = LvarsCache::get(); return i < c.size() ? (c[i].is_result ? 1 : 0) : 0;
-        })
-        .column_int("is_stk_var", [](size_t i) -> int {
-            auto& c = LvarsCache::get(); return i < c.size() ? (c[i].is_stk_var ? 1 : 0) : 0;
-        })
-        .column_int("is_reg_var", [](size_t i) -> int {
-            auto& c = LvarsCache::get(); return i < c.size() ? (c[i].is_reg_var ? 1 : 0) : 0;
-        })
-        .column_int64("stkoff", [](size_t i) -> int64_t {
-            auto& c = LvarsCache::get(); return i < c.size() ? c[i].stkoff : 0;
-        })
-        .column_int("mreg", [](size_t i) -> int {
-            auto& c = LvarsCache::get(); return i < c.size() ? c[i].mreg : 0;
-        })
+        .column_text_rw("comment",
+            [](const LvarInfo& row) -> std::string {
+                return row.comment;
+            },
+            [](LvarInfo& row, const char* new_comment) -> bool {
+                bool ok = set_lvar_comment_at(row.func_addr, row.idx, new_comment);
+                if (ok) row.comment = new_comment ? new_comment : "";
+                return ok;
+            })
+        .column_int("size", [](const LvarInfo& row) -> int { return row.size; })
+        .column_int("is_arg", [](const LvarInfo& row) -> int { return row.is_arg ? 1 : 0; })
+        .column_int("is_result", [](const LvarInfo& row) -> int { return row.is_result ? 1 : 0; })
+        .column_int("is_stk_var", [](const LvarInfo& row) -> int { return row.is_stk_var ? 1 : 0; })
+        .column_int("is_reg_var", [](const LvarInfo& row) -> int { return row.is_reg_var ? 1 : 0; })
+        .column_int64("stkoff", [](const LvarInfo& row) -> int64_t { return row.stkoff; })
+        .column_int("mreg", [](const LvarInfo& row) -> int { return row.mreg; })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<LvarsInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 10.0)
@@ -1321,6 +1743,11 @@ inline GeneratorTableDef<CallArgInfo> define_ctree_call_args() {
         })
         .column_int64("func_addr", [](const CallArgInfo& r) -> int64_t { return r.func_addr; })
         .column_int("call_item_id", [](const CallArgInfo& r) -> int { return r.call_item_id; })
+        .column_int64("call_ea", [](const CallArgInfo& r) -> int64_t {
+            return r.call_ea != BADADDR ? static_cast<int64_t>(r.call_ea) : 0;
+        })
+        .column_text("call_obj_name", [](const CallArgInfo& r) -> std::string { return r.call_obj_name; })
+        .column_text("call_helper_name", [](const CallArgInfo& r) -> std::string { return r.call_helper_name; })
         .column_int("arg_idx", [](const CallArgInfo& r) -> int { return r.arg_idx; })
         .column_int("arg_item_id", [](const CallArgInfo& r) -> int { return r.arg_item_id; })
         .column_text("arg_op", [](const CallArgInfo& r) -> std::string { return r.arg_op; })
@@ -1551,10 +1978,9 @@ inline bool register_ctree_views(xsql::Database& db) {
 // ============================================================================
 
 struct DecompilerRegistry {
-    // Cached table (shared cache, write support)
+    // Cached tables (query-scoped cache, write support)
     CachedTableDef<PseudocodeLine> pseudocode;
-    // Index-based table
-    VTableDef ctree_lvars;
+    CachedTableDef<LvarInfo> ctree_lvars;
     // Generator tables (lazy full scans)
     GeneratorTableDef<CtreeItem> ctree;
     GeneratorTableDef<CallArgInfo> ctree_call_args;
@@ -1578,8 +2004,7 @@ struct DecompilerRegistry {
         db.register_cached_table("ida_pseudocode", &pseudocode);
         db.create_table("pseudocode", "ida_pseudocode");
 
-        // Index-based table
-        db.register_table("ida_ctree_lvars", &ctree_lvars);
+        db.register_cached_table("ida_ctree_lvars", &ctree_lvars);
         db.create_table("ctree_lvars", "ida_ctree_lvars");
 
         // Generator tables (lazy full scans, stop work early with LIMIT)
@@ -1595,3 +2020,4 @@ struct DecompilerRegistry {
 
 } // namespace decompiler
 } // namespace idasql
+

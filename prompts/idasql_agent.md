@@ -33,14 +33,22 @@ IDA groups code into **functions** with:
 - `name` - Assigned or auto-generated name (e.g., `main`, `sub_401000`)
 - `size` - Total bytes in the function
 
+There will be addresses and disassembly listing not belonging to a function. IDASQL can still get the bytes, disassembly listing ranges, etc.
+For single-EA disassembly (code or data), prefer `disasm_at(ea[, context])` over function-scoped queries.
+
 ### Cross-References (xrefs)
 Binary analysis is about understanding **relationships**:
 - **Code xrefs** - Function calls, jumps between code
-- **Data xrefs** - Code reading/writing data locations
+- **Data xrefs** - Code reading/writing data locations, or data referring to other data (pointers)
 - `from_ea` → `to_ea` represents "address X references address Y"
+Use table: `xrefs(from_ea, to_ea, type, is_code)`.
 
 ### Segments
-Memory is divided into **segments** with different purposes:
+
+Use table: `segments(start_ea, end_ea, name, class, perm)`.
+
+Memory is divided into **segments** with different purposes. For example, a typical PE file, has these segments:
+
 - `.text` - Executable code (typically)
 - `.data` - Initialized global data
 - `.rdata` - Read-only data (strings, constants)
@@ -53,6 +61,7 @@ Within a function, **basic blocks** are straight-line code sequences:
 - No branches in the middle
 - Single entry, single exit
 - Useful for control flow analysis
+Use table: `blocks(start_ea, end_ea, func_ea, size)`.
 
 ### Decompilation (Hex-Rays)
 The **Hex-Rays decompiler** converts assembly to C-like **pseudocode**:
@@ -60,11 +69,33 @@ The **Hex-Rays decompiler** converts assembly to C-like **pseudocode**:
 - **lvars** - Local variables detected by the decompiler
 - Much easier to analyze than raw assembly
 
+Core decompiler surfaces:
+- `decompile(addr)` (**PRIMARY read/display surface**)
+  - Returns the entire function as one text block.
+  - Each output line is prefixed for address grounding:
+    - Addressed line: `/* 401010 */ ...`
+    - Non-anchored line: `/*          */ ...` (no address anchor for that line)
+  - Use this first when the user asks to "decompile", "show code", "show pseudocode", or "explain function logic".
+- `pseudocode` table (**structured/edit surface**)
+  - Use for line-level filtering (`func_addr`, `ea`, `line_num`) and comment writes.
+  - Not the preferred display surface for full-function code.
+- `ctree` and `ctree_call_args` for AST-level analysis
+- `ctree_lvars` for local variable rename/type/comment updates
+
 ---
 
 ## Command-Line Interface
 
 IDASQL provides SQL access to IDA databases via command line or as a server.
+
+### Binary Provenance (Required)
+
+When validating behavior that must match the live IDA plugin session, use SDK-path binaries:
+
+- CLI: `%IDASDK%\src\bin\idasql.exe`
+- Plugin loaded by IDA: `%IDASDK%\src\bin\plugins\idasql.dll`
+
+Do not use test harness binaries (for example `build/idasql_tests/.../idasql.exe`) to conclude plugin behavior. Those are useful for tests, but plugin-parity checks must run against the SDK-path artifacts.
 
 ### Invocation Modes
 
@@ -84,19 +115,15 @@ idasql -s database.i64 -f analysis.sql
 idasql -s database.i64 -i
 ```
 
-**4. Remote Mode** (connect to running server)
-```bash
-idasql --remote localhost:8080 -q "SELECT * FROM funcs"
-idasql --remote localhost:8080 -i  # Remote interactive
-```
-
-**5. HTTP Server Mode**
+**4. HTTP Server Mode**
 ```bash
 idasql -s database.i64 --http 8080
 # Then query via: curl -X POST http://localhost:8080/query -d "SELECT * FROM funcs"
 ```
 
-**6. Export Mode**
+**5. Export Mode**
+
+If the user asks to export the database as SQL, use:
 ```bash
 idasql -s database.i64 --export dump.sql
 idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
@@ -107,17 +134,18 @@ idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
 | Option | Description |
 |--------|-------------|
 | `-s <file>` | IDA database file (.idb/.i64) |
-| `--remote <host:port>` | Connect to IDASQL server |
-| `--token <token>` | Auth token for remote/server mode |
+| `--token <token>` | Auth token for HTTP/MCP server mode |
 | `-q <sql>` | Execute single SQL query |
-| `-c <sql>` | Alias for -q (Python-style) |
 | `-f <file>` | Execute SQL from file |
 | `-i` | Interactive REPL mode |
 | `-w, --write` | Save database changes on exit |
 | `--export <file>` | Export tables to SQL file |
 | `--export-tables=X` | Tables to export: `*` (all) or `table1,table2,...` |
-| `--http [port]` | Start HTTP REST server (default: 8080) |
-| `--bind <addr>` | Bind address for server (default: 127.0.0.1) |
+| `--http [port]` | Start HTTP REST server (default: 8080, local mode only) |
+| `--bind <addr>` | Bind address for HTTP/MCP server (default: 127.0.0.1) |
+| `--mcp [port]` | Start MCP server (default: random port, use in -i mode) |
+| `--agent` | Enable AI agent mode in interactive REPL |
+| `--config [path] [value]` | View/set agent configuration |
 | `-h, --help` | Show help |
 
 ### REPL Commands
@@ -137,12 +165,14 @@ idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
 
 ### Performance Strategy
 
+Opening a database has startup overhead (IDALib initialization and auto-analysis wait). For one query, use `-q`. For iterative work, keep one long-lived session (`-i`, `--http`, or `--mcp`) and run many queries against it.
+
 **Single queries:** Use `-q` directly.
 ```bash
 idasql -s database.i64 -q "SELECT COUNT(*) FROM funcs"
 ```
 
-**Multiple queries / exploration:** Start a server once, then query as a client.
+**Multiple queries / exploration:** Start a server once, then query repeatedly over HTTP.
 
 Opening an IDA database has startup overhead (idalib initialization, auto-analysis). If you plan to run many queries—exploring the database, experimenting with different queries, or iterating on analysis—avoid re-opening the database each time.
 
@@ -151,22 +181,39 @@ Opening an IDA database has startup overhead (idalib initialization, auto-analys
 # Terminal 1: Start server (opens database once)
 idasql -s database.i64 --http 8080
 
-# Terminal 2: Query repeatedly via remote client (instant responses)
-idasql --remote localhost:8080 -q "SELECT * FROM funcs LIMIT 5"
-idasql --remote localhost:8080 -q "SELECT * FROM strings WHERE content LIKE '%error%'"
-idasql --remote localhost:8080 -q "SELECT name, size FROM funcs ORDER BY size DESC"
+# Terminal 2: Query repeatedly via HTTP (instant responses)
+curl -X POST http://localhost:8080/query -d "SELECT * FROM funcs LIMIT 5"
+curl -X POST http://localhost:8080/query -d "SELECT * FROM strings WHERE content LIKE '%error%'"
+curl -X POST http://localhost:8080/query -d "SELECT name, size FROM funcs ORDER BY size DESC"
 # ... as many queries as needed, no startup cost
 ```
 
-Or use interactive mode on the remote connection:
-```bash
-idasql --remote localhost:8080 -i
-idasql> SELECT COUNT(*) FROM funcs;
-idasql> SELECT * FROM xrefs WHERE to_ea = 0x401000;
-idasql> .quit
+This approach is significantly faster for iterative analysis since the database remains open and queries go directly through the already-initialized session.
+
+### Runtime Controls (SQL)
+
+`idasql` exposes runtime settings through pragmas:
+
+```sql
+PRAGMA idasql.query_timeout_ms;                  -- get current query timeout
+PRAGMA idasql.query_timeout_ms = 60000;          -- set timeout (0 disables)
+PRAGMA idasql.queue_admission_timeout_ms = 120000;
+PRAGMA idasql.max_queue = 64;                    -- 0 = unbounded
+PRAGMA idasql.hints_enabled = 1;                 -- 1/0, on/off
+PRAGMA idasql.timeout_push = 15000;              -- push old timeout, set new
+PRAGMA idasql.timeout_pop;                       -- restore previous timeout
 ```
 
-This approach is significantly faster for iterative analysis since the database remains open and queries go directly through the already-initialized session.
+Recommended defaults for agent harnesses that issue concurrent requests:
+
+```sql
+PRAGMA idasql.max_queue = 0;                     -- unbounded queue
+PRAGMA idasql.queue_admission_timeout_ms = 0;    -- wait in queue until completion
+PRAGMA idasql.query_timeout_ms = 60000;          -- still cap execution time
+```
+
+When a `SELECT` times out, partial rows may be returned with `warnings` and `timed_out=true`.
+For decompiler-heavy queries, `idasql` emits warnings that suggest adding `WHERE func_addr = ...`.
 
 ---
 
@@ -226,6 +273,9 @@ JOIN funcs f ON b.address >= f.address AND b.address < f.end_ea;
 ```
 
 ### Entity Tables
+
+Entity tables expose IDA's core program objects (functions, names, segments, imports, strings, xrefs, blocks, instructions).
+Some tables support write operations; when they do, the section includes RW columns and examples.
 
 #### funcs
 All detected functions in the binary with prototype information.
@@ -303,15 +353,26 @@ DELETE FROM segments WHERE name = '.rdata';
 ```
 
 #### names
-All named locations (functions, labels, data).
+All named locations (functions, labels, data). Supports INSERT, UPDATE, and DELETE.
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `address` | INT | Address |
-| `name` | TEXT | Name |
+| Column | Type | RW | Description |
+|--------|------|----|-------------|
+| `address` | INT | R | Address |
+| `name` | TEXT | RW | Name |
+
+```sql
+-- Create/set a name
+INSERT INTO names (address, name) VALUES (0x401000, 'my_symbol');
+
+-- Rename
+UPDATE names SET name = 'my_symbol_renamed' WHERE address = 0x401000;
+
+-- Remove name at address
+DELETE FROM names WHERE address = 0x401000;
+```
 
 #### entries
-Entry points (exports, program entry).
+Entry points (exports, program entry, tls callbacks, etc.).
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -411,6 +472,7 @@ SELECT * FROM blocks WHERE func_ea = 0x401000;
 SELECT func_at(func_ea) as name, COUNT(*) as blocks
 FROM blocks GROUP BY func_ea ORDER BY blocks DESC LIMIT 10;
 ```
+`WHERE func_ea = X` is the optimized path. Without it, `blocks` may scan all functions.
 
 ### Convenience Views
 
@@ -456,34 +518,42 @@ SELECT func_name, COUNT(*) as call_count
 FROM callees GROUP BY func_addr ORDER BY call_count DESC LIMIT 10;
 ```
 
-#### string_refs
-Which functions reference which strings. Great for finding functions by string content.
+#### String References (explicit join pattern)
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `string_addr` | INT | String address |
-| `string_value` | TEXT | String content |
-| `string_length` | INT | String length |
-| `ref_addr` | INT | Reference address |
-| `func_addr` | INT | Referencing function |
-| `func_name` | TEXT | Function name |
+Use `strings + xrefs + funcs` directly. This is the canonical pattern.
 
 ```sql
--- Find functions using error strings
-SELECT func_name, string_value
-FROM string_refs
-WHERE string_value LIKE '%error%' OR string_value LIKE '%fail%';
+-- Find call sites/functions referencing error-like strings
+SELECT
+    s.content as string_value,
+    printf('0x%X', x.from_ea) as ref_addr,
+    func_at(x.from_ea) as func_name
+FROM strings s
+JOIN xrefs x ON x.to_ea = s.address
+WHERE s.content LIKE '%error%' OR s.content LIKE '%fail%'
+ORDER BY func_name, ref_addr;
 
 -- Functions with most string references
-SELECT func_name, COUNT(*) as string_count
-FROM string_refs WHERE func_name IS NOT NULL
-GROUP BY func_addr ORDER BY string_count DESC LIMIT 10;
+SELECT
+    func_at(x.from_ea) as func_name,
+    COUNT(*) as string_refs
+FROM strings s
+JOIN xrefs x ON x.to_ea = s.address
+GROUP BY func_name
+ORDER BY string_refs DESC
+LIMIT 10;
 ```
 
 ### Instruction Tables
 
 #### instructions
-Decoded instructions. Supports DELETE (converts instruction to unexplored bytes). **Always filter by `func_addr` for performance.**
+
+`instructions` is the disassembly table. For scalar disassembly text at a specific EA, use `disasm_at(ea[, context])`.
+Use `disasm_func()` or `disasm_range()` when you explicitly need a function/range listing.
+Decoded instructions support DELETE (converts instruction to unexplored bytes) and operand representation updates via `operand*_format_spec`.
+
+`WHERE func_addr = X` is the fast path (function-item iterator). Without it, the table scans all code heads.
+If `X` is not a valid function start/address in a function, the constrained iterator returns no rows.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -492,9 +562,15 @@ Decoded instructions. Supports DELETE (converts instruction to unexplored bytes)
 | `itype` | INT | Instruction type (architecture-specific) |
 | `mnemonic` | TEXT | Instruction mnemonic |
 | `size` | INT | Instruction size |
-| `operand0` | TEXT | First operand |
-| `operand1` | TEXT | Second operand |
+| `operand0..operand7` | TEXT | Operand text (`0..7`) |
 | `disasm` | TEXT | Full disassembly line |
+| `operand0_class..operand7_class` | TEXT | Operand class: `reg`, `imm`, `displ`, `mem`, ... |
+| `operand0_repr_kind..operand7_repr_kind` | TEXT | Current representation: `plain`, `enum`, `stroff` |
+| `operand0_repr_type_name..operand7_repr_type_name` | TEXT | Enum name or stroff path (`Type/SubType`) |
+| `operand0_repr_member_name..operand7_repr_member_name` | TEXT | Enum member expression when applicable |
+| `operand0_repr_serial..operand7_repr_serial` | INT | Enum serial (duplicate-value enums) |
+| `operand0_repr_delta..operand7_repr_delta` | INT | Stroff delta |
+| `operand0_format_spec..operand7_format_spec` | TEXT (RW) | Apply/clear representation for a specific operand |
 
 ```sql
 -- Instruction profile of a function (FAST)
@@ -508,6 +584,21 @@ WHERE func_addr = 0x401000 AND mnemonic = 'call';
 
 -- Delete an instruction (convert to unexplored bytes)
 DELETE FROM instructions WHERE address = 0x401000;
+
+-- Apply enum representation to operand 1
+UPDATE instructions
+SET operand1_format_spec = 'enum:MY_ENUM'
+WHERE address = 0x401020;
+
+-- Apply struct-offset representation with optional delta
+UPDATE instructions
+SET operand0_format_spec = 'stroff:MY_STRUCT,delta=0'
+WHERE address = 0x401030;
+
+-- Clear representation back to plain
+UPDATE instructions
+SET operand1_format_spec = 'clear'
+WHERE address = 0x401020;
 ```
 
 **Performance:** `WHERE func_addr = X` uses O(function_size) iteration. Without this constraint, it scans the entire database - SLOW.
@@ -530,86 +621,36 @@ FROM disasm_calls WHERE callee_name LIKE '%malloc%';
 
 ### Database Modification
 
-The following tables support modification:
+Most write examples are documented next to their tables (`breakpoints`, `segments`, `names`, `instructions`, `types*`, `bookmarks`, `comments`, `ctree_lvars`).
+Quick capability matrix:
 
 | Table | INSERT | UPDATE columns | DELETE |
 |-------|--------|---------------|--------|
 | `breakpoints` | Yes | `enabled`, `type`, `size`, `flags`, `pass_count`, `condition`, `group` | Yes |
 | `funcs` | Yes | `name`, `flags` | Yes |
 | `names` | Yes | `name` | Yes |
-| `comments` | Yes | `comment`, `rep_comment` | Yes |
+| `comments` | Yes | `comment`, `rpt_comment` | Yes |
 | `bookmarks` | Yes | `description` | Yes |
 | `segments` | — | `name`, `class`, `perm` | Yes |
-| `instructions` | — | — | Yes |
+| `instructions` | — | `operand0_format_spec` .. `operand7_format_spec` | Yes |
+| `bytes` | — | `value` | — |
+| `patched_bytes` | — | — | — |
 | `types` | Yes | Yes | Yes |
 | `types_members` | Yes | Yes | Yes |
 | `types_enum_values` | Yes | Yes | Yes |
-| `ctree_lvars` | — | `name`, `type` | — |
+| `ctree_lvars` | — | `name`, `type`, `comment` | — |
 
-**INSERT examples:**
-```sql
--- Create a function (IDA auto-detects boundaries)
-INSERT INTO funcs (address) VALUES (0x401000);
+Write support is covered by integration/e2e tests in:
+- `tests/idasql/write_operations_phase3_test.cpp`
+- `tests/idasql/save_database_test.cpp`
+- `tests/idasql/breakpoints_table_test.cpp`
+- `tests/idasql/comments_table_test.cpp`
+- `tests/idasql/names_table_test.cpp`
+- `tests/idasql/bytes_table_test.cpp`
+- `tests/idasql/patch_functions_test.cpp`
+- `tests/idasql/patched_bytes_table_test.cpp`
 
--- Create a function with name and explicit end
-INSERT INTO funcs (address, name, end_ea) VALUES (0x401000, 'my_func', 0x401050);
-
--- Set a name at an address
-INSERT INTO names (address, name) VALUES (0x401000, 'main');
-
--- Add a comment
-INSERT INTO comments (address, comment) VALUES (0x401050, 'Check return value');
-
--- Add a repeatable comment
-INSERT INTO comments (address, rpt_comment) VALUES (0x404000, 'Global config');
-
--- Add a bookmark (auto-assigned slot)
-INSERT INTO bookmarks (address, description) VALUES (0x401000, 'interesting');
-
--- Add a bookmark at specific slot
-INSERT INTO bookmarks (slot, address, description) VALUES (5, 0x401000, 'slot 5');
-```
-
-**UPDATE examples:**
-```sql
--- Rename a function
-UPDATE funcs SET name = 'my_main' WHERE address = 0x401000;
-
--- Rename any named address
-UPDATE names SET name = 'my_global' WHERE address = 0x404000;
-
--- Add/update comment
-UPDATE comments SET comment = 'Check return value' WHERE address = 0x401050;
-
--- Add repeatable comment
-UPDATE comments SET rep_comment = 'Global config' WHERE address = 0x404000;
-
--- Delete a name
-DELETE FROM names WHERE address = 0x401000;
-```
-
-**Segments:**
-```sql
--- Rename a segment
-UPDATE segments SET name = '.mytext' WHERE start_ea = 0x401000;
-
--- Change segment class
-UPDATE segments SET class = 'DATA' WHERE name = '.rdata';
-
--- Change permissions (R=4, W=2, X=1)
-UPDATE segments SET perm = 5 WHERE name = '.text';
-
--- Delete a segment
-DELETE FROM segments WHERE name = '.rdata';
-```
-
-**Instructions:**
-```sql
--- Delete an instruction (convert to unexplored bytes)
-DELETE FROM instructions WHERE address = 0x401000;
-```
-
-**Types:**
+Type/decompiler write examples:
 ```sql
 -- Create a new struct
 INSERT INTO types (name, kind) VALUES ('my_struct', 'struct');
@@ -632,52 +673,57 @@ INSERT INTO types_enum_values (type_ordinal, value_name, value) VALUES (15, 'FLA
 -- Add an enum value with comment
 INSERT INTO types_enum_values (type_ordinal, value_name, value, comment)
 VALUES (15, 'FLAG_HIDDEN', 2, 'not visible in UI');
-```
-
-**Decompiler local variables (requires Hex-Rays):**
-```sql
 -- Rename a local variable
 UPDATE ctree_lvars SET name = 'buffer_size'
-WHERE func_addr = 0x401000 AND name = 'v1';
+WHERE func_addr = 0x401000 AND idx = 2;
 
 -- Change variable type
 UPDATE ctree_lvars SET type = 'char *'
 WHERE func_addr = 0x401000 AND idx = 2;
 ```
 
-### Persisting Changes
+### Persistence and Lifecycle Semantics
 
-Changes to the database (UPDATE, set_name, etc.) are held in memory by default.
+Writes are visible immediately within the current process, but they are not flushed to the IDB file until an explicit save path is used.
 
-**To persist changes:**
+**CLI mode (`idasql.exe`):**
+- Session opens one database, serves queries, then closes on exit.
+- HTTP `POST /shutdown` cleanly stops the server and closes the session.
+- Temporary unpacked IDA side files (`.id0/.id1/.id2/.nam/.til`) may appear while the DB is open and are expected to be removed on clean close.
+- Changes are not persisted by default unless you call `save_database()` or run with `-w/--write`.
+
+**Plugin mode (`idasql_plugin`):**
+- Plugin stays alive for the IDA database/plugin lifetime.
+- HTTP/MCP servers are stopped on plugin teardown/unload.
+- Plugin unload is the lifecycle boundary for final cleanup.
+
+**To persist changes explicitly:**
 ```sql
--- Explicit save (recommended for scripts)
-SELECT save_database();  -- Returns 1 on success, 0 on failure
+SELECT save_database();
 ```
 
-**CLI flag for auto-save:**
+`save_database()` can be costly. Prefer batching writes and saving once at an intentional boundary.
+
+**CLI flag for save-on-exit:**
 ```bash
-# Auto-save on exit (use with caution)
 idasql -s db.i64 -q "UPDATE funcs SET name='main' WHERE address=0x401000" -w
 ```
 
 **Best practice for batch operations:**
 ```sql
--- Make multiple changes
 UPDATE funcs SET name = 'init_config' WHERE address = 0x401000;
 UPDATE names SET name = 'g_settings' WHERE address = 0x402000;
--- Persist once at the end
 SELECT save_database();
 ```
 
-> Without `save_database()` or `-w`, changes are lost when the session ends.
+> Agent rule: never assume writes are persisted unless `save_database()` or `-w` is explicitly used.
 
 ### Decompiler Tables (Hex-Rays Required)
 
 **CRITICAL:** Always filter by `func_addr`. Without constraint, these tables will decompile EVERY function - extremely slow!
 
 #### pseudocode
-Structured line-by-line pseudocode with writable comments. **Use `decompile(addr)` to view pseudocode; use this table only for surgical edits (comments) or structured queries.**
+The `pseudocode` table is a structured line-by-line pseudocode with writable comments. **Use `decompile(addr)` to view pseudocode; use this table only for surgical edits (comments) or structured queries.**
 
 | Column | Type | Writable | Description |
 |--------|------|----------|-------------|
@@ -687,6 +733,11 @@ Structured line-by-line pseudocode with writable comments. **Use `decompile(addr
 | `ea` | INT | No | Corresponding assembly address (from COLOR_ADDR anchor) |
 | `comment` | TEXT | **Yes** | Decompiler comment at this ea |
 | `comment_placement` | TEXT | **Yes** | Comment placement: `semi` (inline, default), `block1` (above line) |
+
+Filter behavior:
+- `WHERE func_addr = X`: best performance; iterates pseudocode for one function only.
+- `WHERE ea = X`: decompiles only the containing function and returns matching lines for that EA.
+- `WHERE line_num = N`: scans functions and returns rows at that line index; use only when you need cross-function line alignment.
 
 **Comment placements:** `semi` (after `;`), `block1` (own line above), `block2`, `curly1`, `curly2`, `colon`, `case`, `else`, `do`
 
@@ -740,10 +791,16 @@ Local variables from decompilation.
 | `idx` | INT | Variable index |
 | `name` | TEXT | Variable name |
 | `type` | TEXT | Type string |
+| `comment` | TEXT | Local-variable comment shown next to declaration |
 | `size` | INT | Size in bytes |
 | `is_arg` | INT | 1=function argument |
 | `is_stk_var` | INT | 1=stack variable |
 | `stkoff` | INT | Stack offset |
+
+Mutation guidance:
+- Prefer `idx`-based updates for deterministic writes.
+- `name` can be empty for internal/non-display temps; treat those as potentially non-nameable.
+- `comment` updates map to Hex-Rays local-variable comments (`lv.cmt`) and appear in `decompile(...)` output.
 
 #### ctree_call_args
 Flattened call arguments for easy querying.
@@ -752,7 +809,11 @@ Flattened call arguments for easy querying.
 |--------|------|-------------|
 | `func_addr` | INT | Function address |
 | `call_item_id` | INT | Call node ID |
+| `call_ea` | INT | Call-site EA used by hybrid ea+arg helpers |
+| `call_obj_name` | TEXT | Callee object name when call target is `cot_obj` |
+| `call_helper_name` | TEXT | Callee helper name when call target is `cot_helper` |
 | `arg_idx` | INT | Argument index (0-based) |
+| `arg_item_id` | INT | Argument expression item ID (`ctree.item_id`) |
 | `arg_op` | TEXT | Argument type |
 | `arg_var_name` | TEXT | Variable name if applicable |
 | `arg_var_is_stk` | INT | 1=stack variable |
@@ -810,7 +871,9 @@ WHERE returns_arg = 1;
 ### Type Tables
 
 #### types
+
 All local type definitions. Supports INSERT (create struct/union/enum), UPDATE, and DELETE.
+Integration/e2e coverage includes `tests/idasql/write_operations_phase3_test.cpp` and `tests/idasql/types_table_test.cpp`.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -915,12 +978,56 @@ Convenience views for filtering types:
 | `types_v_enums` | `SELECT * FROM types WHERE is_enum = 1` |
 | `types_v_typedefs` | `SELECT * FROM types WHERE is_typedef = 1` |
 | `types_v_funcs` | `SELECT * FROM types WHERE is_func = 1` |
-| `local_types` | Legacy compatibility view |
 
 ### Extended Tables
 
+#### bytes
+Byte-wise program view with patch support.
+
+| Column | Type | RW | Description |
+|--------|------|----|-------------|
+| `ea` | INT | R | Address |
+| `value` | INT | RW | Current byte value (UPDATE patches byte) |
+| `original_value` | INT | R | Original byte value before patch |
+| `size` | INT | R | Item size at address |
+| `type` | TEXT | R | Item type (`code`, `data`, etc.) |
+| `is_patched` | INT | R | 1 if byte differs from original |
+
+```sql
+-- Read one address
+SELECT ea, value, original_value, is_patched
+FROM bytes WHERE ea = 0x401000;
+
+-- Patch via table update
+UPDATE bytes SET value = 0x90 WHERE ea = 0x401000;
+
+-- Inspect patch inventory
+SELECT * FROM patched_bytes LIMIT 20;
+
+-- Persist once done
+SELECT save_database();
+```
+
+#### patched_bytes
+All patched locations tracked by IDA.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `ea` | INT | Patched address |
+| `original_value` | INT | Original byte value |
+| `patched_value` | INT | Current patched value |
+| `fpos` | INT | File offset when available |
+
+```sql
+SELECT printf('0x%X', ea) AS ea,
+       printf('0x%02X', original_value) AS old,
+       printf('0x%02X', patched_value) AS new
+FROM patched_bytes
+ORDER BY ea;
+```
+
 #### bookmarks
-User-defined bookmarks/marked positions.
+User-defined bookmarks/marked positions. Supports INSERT, UPDATE (`description`), and DELETE.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -931,6 +1038,15 @@ User-defined bookmarks/marked positions.
 ```sql
 -- List all bookmarks
 SELECT printf('0x%X', address) as addr, description FROM bookmarks;
+
+-- Add bookmark
+INSERT INTO bookmarks (address, description) VALUES (0x401000, 'interesting branch');
+
+-- Update bookmark description
+UPDATE bookmarks SET description = 'confirmed branch' WHERE index = 0;
+
+-- Delete bookmark
+DELETE FROM bookmarks WHERE index = 0;
 ```
 
 #### heads
@@ -1077,12 +1193,82 @@ FROM disasm_v_calls_in_loops;
 ### Disassembly
 | Function | Description |
 |----------|-------------|
-| `disasm(addr)` | Disassembly line at address |
-| `disasm(addr, n)` | Multiple lines from address |
-| `bytes(addr, n)` | Bytes as hex string |
-| `bytes_raw(addr, n)` | Raw bytes as BLOB |
+| `disasm_at(addr)` | Canonical listing line for containing head (works for code/data) |
+| `disasm_at(addr, n)` | Canonical listing line with +/- `n` neighboring heads |
+| `disasm(addr)` | Single disassembly line at address |
+| `disasm(addr, n)` | Next N instructions from address (count-based, not boundary-aware) |
+| `disasm_range(start, end)` | All disassembly lines in address range [start, end) |
+| `disasm_func(addr)` | Full disassembly of function containing address |
 | `mnemonic(addr)` | Instruction mnemonic only |
 | `operand(addr, n)` | Operand text (n=0-5) |
+
+#### Disassembly Examples
+
+```sql
+-- Canonical single-EA disassembly (safe for code or data)
+SELECT disasm_at(0x401000);
+
+-- Canonical context window (+/- 2 heads)
+SELECT disasm_at(0x401000, 2);
+
+-- Fallback for older runtimes without disasm_at():
+SELECT printf('%llx', address) || ': ' || disasm
+FROM heads
+WHERE address <= 0x401000 AND address + size > 0x401000
+LIMIT 1;
+-- Note: this fallback may decode some data heads as code; prefer disasm_at when available.
+
+-- Full function disassembly (resolves boundaries via get_func)
+SELECT disasm_func(address) FROM funcs WHERE name = '_main';
+
+-- Disassemble a specific address range
+SELECT disasm_range(address, end_ea) FROM funcs WHERE name = '_main';
+SELECT disasm_range(0x401000, 0x401100);
+
+-- Disassemble all functions in a segment
+SELECT name, disasm_func(address) FROM funcs
+WHERE address >= (SELECT start_ea FROM segments WHERE name = '.text')
+  AND address <  (SELECT end_ea FROM segments WHERE name = '.text');
+
+-- Force instruction decode from EA (useful for code-only workflows)
+SELECT disasm(0x401000);
+
+-- Sliding window: next 5 instructions from an address
+SELECT disasm(0x401000, 5);
+
+-- Structured analysis: filter instructions by mnemonic
+SELECT address, disasm FROM instructions
+WHERE func_addr = 0x401000 AND mnemonic = 'call';
+```
+
+### Byte Access and Patching
+| Function | Description |
+|----------|-------------|
+| `bytes(addr, n)` | Read `n` bytes as hex string |
+| `bytes_raw(addr, n)` | Read `n` bytes as BLOB |
+| `patch_byte(addr, val)` | Patch one byte at `addr` (returns 1/0) |
+| `patch_word(addr, val)` | Patch 2 bytes at `addr` (returns 1/0) |
+| `patch_dword(addr, val)` | Patch 4 bytes at `addr` (returns 1/0) |
+| `patch_qword(addr, val)` | Patch 8 bytes at `addr` (returns 1/0) |
+| `revert_byte(addr)` | Revert one patched byte to original |
+| `get_original_byte(addr)` | Read original (pre-patch) byte |
+
+```sql
+-- Read bytes
+SELECT bytes(0x401000, 16);
+
+-- Patch one byte (example: NOP)
+SELECT patch_byte(0x401000, 0x90) AS ok;
+
+-- Verify current vs original
+SELECT bytes(0x401000, 1) AS current, get_original_byte(0x401000) AS original;
+
+-- Revert patch
+SELECT revert_byte(0x401000) AS reverted;
+
+-- Persist patches explicitly
+SELECT save_database();
+```
 
 ### Binary Search
 | Function | Description |
@@ -1097,7 +1283,7 @@ FROM disasm_v_calls_in_loops;
 - `"48 ? 05"` or `"48 ?? 05"` - `?` = any byte wildcard (whole byte only)
 - `"(01 02 03)"` - Alternatives (match any of these bytes)
 
-**Note:** Unlike Binary Ninja, IDA does NOT support nibble wildcards or regex.
+**Note:** Nibble wildcards and regex are not supported in byte patterns.
 
 **Example:**
 ```sql
@@ -1172,6 +1358,13 @@ This is **much faster** than scanning all disassembly lines because:
 | Function | Description |
 |----------|-------------|
 | `set_name(addr, name)` | Set name at address |
+| `type_at(addr)` | Read type declaration applied at address |
+| `set_type(addr, decl)` | Apply C declaration/type at address (empty decl clears type) |
+| `parse_decls(text)` | Import C declarations (struct/union/enum/typedef) into local types |
+
+Preferred SQL write surface for function metadata:
+- `UPDATE funcs SET name = '...', prototype = '...' WHERE address = ...`
+- `prototype` maps to `type_at/set_type` behavior and invalidates decompiler cache.
 
 ### Item Analysis
 | Function | Description |
@@ -1202,16 +1395,106 @@ SELECT decode_insn(0x401000);
 ### Decompilation
 
 **When to use `decompile()` vs `pseudocode` table:**
-- **To view/show pseudocode** → always use `SELECT decompile(addr)`. Returns the full function as a single text block with `/* ea */` address prefixes. This is fast, efficient, and what you should use when the user asks to "decompile", "show the code", or "show the pseudocode".
-- **To read specific lines or columns** → query the `pseudocode` table. If you already have the full output from `decompile()`, refer to it directly. Only query the table when you need structured access (e.g. filtering by ea, reading comment values).
-- **To add/edit/delete comments** → `UPDATE pseudocode SET comment = '...' WHERE func_addr = X AND ea = Y`. The pseudocode table is the write interface for decompiler comments.
+- **Read/show pseudocode** → always start with `SELECT decompile(addr)`. It returns the full function as one text block with per-line prefixes (`/* <ea> */` when available, `/*          */` when no line anchor exists).
+- **Local declaration hints** → declaration lines include compact local-variable index hints (`[lv:N]`) so rename operations can target `rename_lvar(func_addr, N, new_name)` safely.
+- **Need fresh output after edits** → use `SELECT decompile(addr, 1)` to force re-decompilation.
+- **Need structured line access or comment CRUD** → query/update the `pseudocode` table.
 
 | Function | Description |
 |----------|-------------|
-| `decompile(addr)` | **PREFERRED** — Full pseudocode with `/* ea */` prefixes (requires Hex-Rays) |
-| `decompile(addr, 1)` | Same but forces re-decompilation (use after writing comments or renaming variables) |
+| `decompile(addr)` | **PREFERRED** — Full pseudocode with line prefixes (requires Hex-Rays) |
+| `decompile(addr, 1)` | Same output but forces re-decompilation (use after writes/renames) |
 | `list_lvars(addr)` | List local variables as JSON |
-| `rename_lvar(addr, old, new)` | Rename a local variable (shortcut for `UPDATE ctree_lvars`) |
+| `rename_lvar(func_addr, lvar_idx, new_name)` | Rename a local variable by index |
+| `rename_lvar_by_name(func_addr, old_name, new_name)` | Rename a local variable by existing name |
+| `set_lvar_comment(func_addr, lvar_idx, text)` | Set local-variable comment by index |
+| `set_union_selection(func_addr, ea, path)` | Set/clear union selection path at EA (`[0,1]` or `0,1`) |
+| `set_union_selection_item(func_addr, item_id, path)` | Set/clear union selection path by `ctree.item_id` |
+| `set_union_selection_ea_arg(func_addr, ea, arg_idx, path[, callee])` | **PREFERRED** call-arg targeting helper; resolves to item id or errors with hint |
+| `call_arg_item(func_addr, ea, arg_idx[, callee])` | Resolve call-arg coordinate to explicit `arg_item_id` |
+| `ctree_item_at(func_addr, ea[, op_name[, nth]])` | Resolve generic expression coordinate to explicit `ctree.item_id` |
+| `set_union_selection_ea_expr(func_addr, ea, path[, op_name[, nth]])` | Set/clear union selection via generic expression coordinate |
+| `get_union_selection(func_addr, ea)` | Read union selection path JSON at EA |
+| `get_union_selection_item(func_addr, item_id)` | Read union selection path JSON by `ctree.item_id` |
+| `get_union_selection_ea_arg(func_addr, ea, arg_idx[, callee])` | Read union selection JSON via call-arg coordinate |
+| `get_union_selection_ea_expr(func_addr, ea[, op_name[, nth]])` | Read union selection JSON via generic expression coordinate |
+| `set_numform(func_addr, ea, opnum, spec)` | Set/clear numform directly by EA + operand index |
+| `get_numform(func_addr, ea, opnum)` | Read numform JSON directly by EA + operand index |
+| `set_numform_item(func_addr, item_id, opnum, spec)` | Set/clear numform by explicit ctree item id |
+| `get_numform_item(func_addr, item_id, opnum)` | Read numform JSON by explicit ctree item id |
+| `set_numform_ea_arg(func_addr, ea, arg_idx, opnum, spec[, callee])` | Set/clear numform via call-arg coordinate |
+| `get_numform_ea_arg(func_addr, ea, arg_idx, opnum[, callee])` | Read numform JSON via call-arg coordinate |
+| `set_numform_ea_expr(func_addr, ea, opnum, spec[, op_name[, nth]])` | Set/clear numform via generic expression coordinate |
+| `get_numform_ea_expr(func_addr, ea, opnum[, op_name[, nth]])` | Read numform JSON via generic expression coordinate |
+
+#### Runtime Capability Profile (Do This First)
+
+Do **not** start with broad `pragma_*` discovery unless debugging the tool itself.
+Start with documented surfaces and probe availability directly:
+
+1. Baseline decompiler surface:
+```sql
+SELECT decompile(0x401000);
+```
+
+2. Baseline mutation surfaces (must exist in all supported plugin runtimes):
+```sql
+SELECT set_name(0x401000, 'my_func');
+SELECT rename_lvar(0x401000, 0, 'arg0');
+SELECT set_lvar_comment(0x401000, 0, 'seed comment');
+```
+
+3. Advanced expression/representation helpers (optional in older/minimal runtimes):
+```sql
+SELECT call_arg_item(0x401000, 0x401020, 0);
+SELECT ctree_item_at(0x401000, 0x401030, 'cot_asg', 0);
+SELECT set_union_selection_ea_expr(0x401000, 0x401030, '', 'cot_asg', 0);
+SELECT set_numform_ea_expr(0x401000, 0x401030, 0, 'clear', 'cot_asg', 0);
+```
+
+If any call returns `no such function`, treat that primitive as unavailable in this runtime and switch to fallback workflows below.
+
+#### Mandatory Mutation Loop
+
+For every write, use this strict loop:
+
+1. Read current state (`ctree_lvars`, `pseudocode`, etc.) for the exact target.
+2. Apply **one** focused mutation.
+3. Force refresh with `SELECT decompile(func_addr, 1)`.
+4. Verify both:
+   - Structured row state (e.g., `ctree_lvars` row changed),
+   - Rendered pseudocode reflects the change.
+5. Continue to next mutation only after verification succeeds.
+
+#### Local Type Seeding (Works Even In Minimal Runtimes)
+
+When advanced numform/union helpers are unavailable, aggressively improve pseudocode via local type seeding:
+
+```sql
+-- Change local/arg type and optional comment
+UPDATE ctree_lvars
+SET type = 'unsigned __int64',
+    comment = 'my comment here'
+WHERE func_addr = 0x401000 AND idx = 18;
+
+-- Refresh and verify effect in pseudocode
+SELECT decompile(0x401000, 1);
+SELECT idx, name, type, comment
+FROM ctree_lvars
+WHERE func_addr = 0x401000 AND idx = 18;
+```
+
+Use this to reduce noisy casts and surface meaningful field access when paired with function prototype/type improvements.
+
+#### Fallback Path (When Advanced Helpers Are Missing)
+
+If `set_union_selection*` / `set_numform*` / `ctree_item_at` are unavailable:
+
+- Use `UPDATE funcs SET prototype = ...` for function-level typing.
+- Use `UPDATE ctree_lvars SET type/name/comment = ...` for local shaping.
+- Use `UPDATE pseudocode SET comment = ...` for stable semantic breadcrumbs.
+- Keep constants readable via comments when enum rendering primitives are unavailable.
+- Explicitly note unavailable primitives in your response so follow-up runs don't waste queries.
 
 ```sql
 -- Decompile a function (PREFERRED way to view pseudocode)
@@ -1223,12 +1506,92 @@ SELECT decompile(0x401000, 1);
 -- Get all local variables in a function
 SELECT list_lvars(0x401000);
 
--- Rename a variable (function shortcut)
-SELECT rename_lvar(0x401000, 'v1', 'buffer_size');
+-- Rename by index (canonical, deterministic)
+SELECT rename_lvar(0x401000, 2, 'buffer_size');
 
--- Equivalent using UPDATE (canonical approach)
-UPDATE ctree_lvars SET name = 'buffer_size' WHERE func_addr = 0x401000 AND name = 'v1';
+-- Rename by current name (convenience; fails if ambiguous)
+SELECT rename_lvar_by_name(0x401000, 'v2', 'buffer_size');
+
+-- Set local-variable comment by index
+SELECT set_lvar_comment(0x401000, 2, 'points to decrypted buffer');
+
+-- Equivalent UPDATE path
+UPDATE ctree_lvars SET name = 'buffer_size'
+WHERE func_addr = 0x401000 AND idx = 2;
+
+-- Equivalent UPDATE path for comments
+UPDATE ctree_lvars SET comment = 'points to decrypted buffer'
+WHERE func_addr = 0x401000 AND idx = 2;
+
+-- Fallback when direct UPDATE comment write fails on a specific lvar
+-- (some runtimes can return "SQL logic error" for particular slots):
+SELECT set_lvar_comment(0x401000, 2, 'points to decrypted buffer');
+
+-- Mandatory verification loop after rename
+SELECT list_lvars(0x401000);
+SELECT decompile(0x401000, 1);
+
+-- Import declarations + apply prototype to improve decompilation quality
+SELECT parse_decls('
+#pragma pack(push, 1)
+typedef struct _iobuf FILE;
+typedef enum operations_e { op_empty=0, op_open=11, op_read=22, op_close=1, op_seek=2, op_read4=3 } operations_e;
+typedef struct open_t { const char* filename; const char* mode; FILE** fp; } open_t;
+typedef struct close_t { FILE* fp; } close_t;
+typedef struct read_t { FILE* fp; void* buf; unsigned __int64 size; } read_t;
+typedef struct seek_t { FILE* fp; __int64 offset; int whence; } seek_t;
+typedef struct read4_t { FILE* fp; __int64 seek; int val; } read4_t;
+typedef struct command_t { operations_e cmd_id; union { open_t open; read_t read; read4_t read4; seek_t seek; close_t close; } ops; unsigned __int64 ret; } command_t;
+#pragma pack(pop)
+');
+UPDATE funcs
+SET name = 'exec_command',
+    prototype = 'void __fastcall exec_command(command_t *cmd);'
+WHERE address = 0x140001BD0;
+SELECT decompile(0x140001BD0, 1);
+
+-- Hybrid call-arg targeting (recommended): line 0x140001C3E has multiple casted args.
+-- Callee is optional. If used, pass exact name from ctree_call_args
+-- (for imports this is commonly "__imp_fread", not "fread").
+SELECT set_union_selection_ea_arg(0x140001BD0, 0x140001C3E, 0, '[1]');
+SELECT get_union_selection_ea_arg(0x140001BD0, 0x140001C3E, 0);
+
+-- If helper returns ambiguity/no-match, resolve explicitly:
+SELECT call_item_id, arg_idx, arg_item_id, call_ea AS ea,
+       COALESCE(NULLIF(call_obj_name,''), call_helper_name, '') AS callee
+FROM ctree_call_args
+WHERE func_addr = 0x140001BD0 AND call_ea = 0x140001C3E AND arg_idx = 0
+ORDER BY call_item_id, arg_idx;
+
+-- Fallback with explicit item id:
+SELECT set_union_selection_item(0x140001BD0, 42, '[1]');
+
+-- Inspect persisted path
+SELECT get_union_selection_item(0x140001BD0, 42);
+
+-- Clear selection
+SELECT set_union_selection_item(0x140001BD0, 42, '');
+
+-- Optional bridge when you want hybrid lookup + explicit item workflow:
+SELECT call_arg_item(0x140001BD0, 0x140001C3E, 0);
+
+-- Non-call expression workflow (e.g., comparisons/ifs):
+-- 1) resolve expression item deterministically by ea + op_name + nth
+SELECT ctree_item_at(0x140001BD0, 0x140001CBB, 'cot_eq', 0);
+-- 2) apply/read via generic expression helpers
+SELECT set_numform_ea_expr(0x140001BD0, 0x140001CBB, 0, 'enum:operations_e', 'cot_eq', 0);
+SELECT get_numform_ea_expr(0x140001BD0, 0x140001CBB, 0, 'cot_eq', 0);
+SELECT set_numform_ea_expr(0x140001BD0, 0x140001CBB, 0, 'clear', 'cot_eq', 0);
+
+-- Assignment-style expression (not a call): target with cot_asg
+SELECT ctree_item_at(0x140001BD0, 0x140001C49, 'cot_asg', 0);
+SELECT set_union_selection_ea_expr(0x140001BD0, 0x140001C49, '', 'cot_asg', 0);
 ```
+
+`rename_lvar*` functions return JSON with explicit fields:
+- `success` (execution success)
+- `applied` (observable rename applied)
+- `reason` (for non-applied cases: `not_found`, `ambiguous_name`, `unchanged`, `not_nameable`, ...)
 
 ### File Generation
 | Function | Description |
@@ -1262,18 +1625,40 @@ SELECT gen_cfg_dot(0x401000);
 SELECT gen_schema_dot();
 ```
 
-### Entity Search ("Jump to Anything")
-| Function | Description |
-|----------|-------------|
-| `jump_search(pattern, mode, limit, offset)` | Search entities, returns JSON array |
-| `jump_query(pattern, mode, limit, offset)` | Returns the generated SQL string |
+### Entity Search (grep)
+| Surface | Description |
+|---------|-------------|
+| `grep` table | Structured rows for composable SQL search |
+| `grep(pattern, limit, offset)` | JSON array for quick agent/tool output |
+
+Searches functions, labels, segments, structs, unions, enums, members, and enum members.
+Pattern rules:
+- Plain text = case-insensitive contains (`pattern = 'main'`)
+- `%` / `_` wildcards supported (`pattern = 'sub%'`)
+- `*` is accepted and normalized to `%`
 
 ```sql
--- Search for functions/types/labels starting with 'sub'
-SELECT jump_search('sub', 'prefix', 10, 0);
+-- Structured table search: prefix
+SELECT name, kind, address
+FROM grep
+WHERE pattern = 'sub%'
+LIMIT 10;
 
--- Search for anything containing 'main'
-SELECT jump_search('main', 'contains', 10, 0);
+-- Structured table search: contains
+SELECT name, kind, full_name
+FROM grep
+WHERE pattern = 'main'
+LIMIT 20;
+
+-- JSON form with pagination
+SELECT grep('sub%', 10, 0);
+SELECT grep('sub%', 10, 10);
+
+-- Parse JSON result from grep()
+SELECT json_extract(value, '$.name') as name,
+       printf('0x%llX', json_extract(value, '$.address')) as addr
+FROM json_each(grep('init', 50, 0))
+WHERE json_extract(value, '$.kind') = 'function';
 ```
 
 ### String List Functions
@@ -1322,24 +1707,24 @@ The `rebuild_strings()` function configures IDA's string detection with sensible
 
 ---
 
-## Entity Search Table (jump_entities)
+## Entity Search Table (grep)
 
-A table-valued function for unified entity search with full SQL composability.
+The `grep` virtual table is the primary structured entity-search surface.
 
 ### Usage
 
 ```sql
--- Basic search (function-call syntax)
-SELECT * FROM jump_entities('sub', 'prefix') LIMIT 10;
+-- Basic search
+SELECT * FROM grep WHERE pattern = 'sub%' LIMIT 10;
 
 -- Filter by kind
-SELECT * FROM jump_entities('EH', 'prefix') WHERE kind = 'struct';
+SELECT * FROM grep WHERE pattern = 'EH%' AND kind = 'struct';
 
 -- JOIN with other tables
-SELECT j.name, f.size
-FROM jump_entities('sub', 'prefix') j
-LEFT JOIN funcs f ON j.address = f.address
-WHERE j.kind = 'function';
+SELECT g.name, f.size
+FROM grep g
+LEFT JOIN funcs f ON g.address = f.address
+WHERE g.pattern = 'sub%' AND g.kind = 'function';
 ```
 
 ### Parameters
@@ -1347,7 +1732,6 @@ WHERE j.kind = 'function';
 | Parameter | Description |
 |-----------|-------------|
 | `pattern` | Search pattern (required) |
-| `mode` | `'prefix'` or `'contains'` |
 
 ### Columns
 
@@ -1360,7 +1744,7 @@ WHERE j.kind = 'function';
 | `parent_name` | TEXT | Parent type (for members) |
 | `full_name` | TEXT | Fully qualified name |
 
-**Use Case:** Implement "Jump to Anything" with virtual scrolling - lazy cursor respects LIMIT.
+For JSON output instead of rows, use `grep(pattern, limit, offset)`.
 
 ---
 
@@ -2116,6 +2500,9 @@ SELECT * FROM imports WHERE name LIKE '%socket%' OR name LIKE '%connect%' OR nam
 -- Basic info
 SELECT * FROM funcs WHERE address = 0x401000;
 
+-- Full disassembly
+SELECT disasm_func(0x401000);
+
 -- Decompile (if Hex-Rays available)
 SELECT decompile(0x401000);
 
@@ -2284,6 +2671,7 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Find strings | `strings` |
 | Configure string types | `rebuild_strings(types, minlen)` |
 | Instruction analysis | `instructions WHERE func_addr = X` |
+| View function disassembly | `disasm_func(addr)` or `disasm_range(start, end)` |
 | View decompiled code | `decompile(addr)` |
 | Edit decompiler comments | `UPDATE pseudocode SET comment = '...' WHERE func_addr = X AND ea = Y` |
 | AST pattern matching | `ctree WHERE func_addr = X` |
@@ -2306,8 +2694,8 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Add struct members | `types_members` (INSERT) |
 | Add enum values | `types_enum_values` (INSERT) |
 | Modify database | `funcs`, `names`, `comments`, `bookmarks` (INSERT/UPDATE/DELETE) |
-| Jump to Anything | `jump_entities('pattern', 'mode')` |
-| Entity search (JSON) | `jump_search('pattern', 'mode', limit, offset)` |
+| Entity search (structured) | `grep WHERE pattern = '...'` |
+| Entity search (JSON) | `grep('pattern', limit, offset)` |
 
 **Remember:** Always use `func_addr = X` constraints on instruction and decompiler tables for acceptable performance.
 
@@ -2315,7 +2703,7 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 
 ## Server Modes
 
-IDASQL supports two server protocols for remote queries: **HTTP REST** (recommended) and raw TCP.
+IDASQL supports HTTP-based server modes for remote queries: **HTTP REST** and **MCP** (both over HTTP/SSE).
 
 ---
 
@@ -2371,22 +2759,4 @@ curl http://localhost:8081/status
 
 ```json
 {"success": false, "error": "no such table: bad_table"}
-```
-
----
-
-### Raw TCP Server (Legacy)
-
-Binary protocol with length-prefixed JSON. Use only when HTTP is not available.
-
-**Starting the server:**
-```bash
-idasql -s database.i64 --server 13337
-idasql -s database.i64 --server 13337 --token mysecret
-```
-
-**Connecting as client:**
-```bash
-idasql --remote localhost:13337 -q "SELECT name FROM funcs LIMIT 5"
-idasql --remote localhost:13337 -i
 ```

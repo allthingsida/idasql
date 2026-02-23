@@ -25,6 +25,8 @@
 #include <memory>
 #include <string>
 #include <functional>
+#include <chrono>
+#include <mutex>
 
 // Platform-specific include order:
 // - Windows: json before IDA (IDA poisons stdlib functions)
@@ -76,6 +78,15 @@
 
 namespace {
 
+// RAII guard: enables IDA batch mode, restores previous state on scope exit.
+// Suppresses dialogs/message boxes during HTTP query execution so external
+// clients (curl, scripts) don't hang waiting for user interaction.
+struct batch_guard_t {
+    bool prev;
+    batch_guard_t() : prev(batch) { batch = true; }
+    ~batch_guard_t() { batch = prev; }
+};
+
 struct query_request_t : public exec_request_t
 {
     idasql::QueryEngine* engine;
@@ -87,6 +98,7 @@ struct query_request_t : public exec_request_t
 
     virtual ssize_t idaapi execute() override
     {
+        batch_guard_t bg;
         result = engine->query(sql);
         return result.success ? 0 : -1;
     }
@@ -102,6 +114,10 @@ struct idasql_plugmod_t : public plugmod_t
 {
     std::unique_ptr<idasql::QueryEngine> engine_;
     std::unique_ptr<idasql::IdasqlCLI> cli_;
+    std::mutex query_exec_mutex_;
+    std::mutex query_meta_mutex_;
+    std::string active_query_;
+    std::chrono::steady_clock::time_point active_query_started_{};
 
 #ifdef IDASQL_HAS_AI_AGENT
     idasql::IDAMCPServer mcp_server_;
@@ -109,6 +125,28 @@ struct idasql_plugmod_t : public plugmod_t
 #endif
 
     idasql::IDAHTTPServer http_server_;
+
+    idasql::QueryResult run_query_sync(const std::string& sql)
+    {
+        std::lock_guard<std::mutex> exec_lock(query_exec_mutex_);
+
+        {
+            std::lock_guard<std::mutex> lock(query_meta_mutex_);
+            active_query_ = sql;
+            active_query_started_ = std::chrono::steady_clock::now();
+        }
+
+        query_request_t req(engine_.get(), sql);
+        execute_sync(req, MFF_WRITE);
+
+        {
+            std::lock_guard<std::mutex> lock(query_meta_mutex_);
+            active_query_.clear();
+            active_query_started_ = std::chrono::steady_clock::time_point{};
+        }
+
+        return req.result;
+    }
 
     idasql_plugmod_t()
     {
@@ -118,12 +156,11 @@ struct idasql_plugmod_t : public plugmod_t
 
             // SQL executor that uses execute_sync for thread safety
             auto sql_executor = [this](const std::string& sql) -> std::string {
-                query_request_t req(engine_.get(), sql);
-                execute_sync(req, MFF_WRITE);
-                if (req.result.success) {
-                    return req.result.to_string();
+                idasql::QueryResult result = run_query_sync(sql);
+                if (result.success) {
+                    return result.to_string();
                 } else {
-                    return "Error: " + req.result.error;
+                    return "Error: " + result.error;
                 }
             };
 
@@ -195,12 +232,11 @@ struct idasql_plugmod_t : public plugmod_t
 
         // SQL executor that uses execute_sync for thread safety
         auto sql_executor = [this](const std::string& sql) -> std::string {
-            query_request_t req(engine_.get(), sql);
-            execute_sync(req, MFF_WRITE);
-            if (req.result.success) {
-                return req.result.to_string();
+            idasql::QueryResult result = run_query_sync(sql);
+            if (result.success) {
+                return result.to_string();
             } else {
-                return "Error: " + req.result.error;
+                return "Error: " + result.error;
             }
         };
 
@@ -233,20 +269,31 @@ struct idasql_plugmod_t : public plugmod_t
 
         // SQL executor that uses execute_sync for thread safety and returns JSON
         idasql::HTTPQueryCallback sql_cb = [this](const std::string& sql) -> std::string {
-            query_request_t req(engine_.get(), sql);
-            execute_sync(req, MFF_WRITE);
+            idasql::QueryResult result = run_query_sync(sql);
 
-            xsql::json j = {{"success", req.result.success}};
-            if (req.result.success) {
-                j["columns"] = req.result.columns;
+            xsql::json j = {{"success", result.success}};
+            if (result.success) {
+                j["columns"] = result.columns;
                 xsql::json rows = xsql::json::array();
-                for (const auto& row : req.result.rows) {
+                for (const auto& row : result.rows) {
                     rows.push_back(row.values);
                 }
                 j["rows"] = rows;
-                j["row_count"] = req.result.rows.size();
+                j["row_count"] = result.rows.size();
+                if (!result.warnings.empty()) {
+                    j["warnings"] = result.warnings;
+                }
+                if (result.timed_out) {
+                    j["timed_out"] = true;
+                }
+                if (result.partial) {
+                    j["partial"] = true;
+                }
+                if (result.elapsed_ms > 0) {
+                    j["elapsed_ms"] = result.elapsed_ms;
+                }
             } else {
-                j["error"] = req.result.error;
+                j["error"] = result.error;
             }
             return j.dump();
         };

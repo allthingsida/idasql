@@ -1,6 +1,8 @@
 #pragma once
 
 /**
+ * session_handler.hpp - Interactive session orchestration core
+ *
  * SessionHandler - Core query processing logic for IDASQL
  *
  * This class handles:

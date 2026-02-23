@@ -1,10 +1,12 @@
 #pragma once
 
 /**
+ * http_server.hpp - HTTP REST server wrapper for IDASQL
+ *
  * IDAHTTPServer - HTTP REST server for IDASQL REPL
  *
  * Thin wrapper over xsql::thinclient::http_query_server.
- * Preserves the existing API for backward compatibility.
+ * Keeps a stable API for CLI and plugin callers.
  *
  * Usage modes:
  * 1. CLI (idalib): Call run_until_stopped() to process commands on main thread

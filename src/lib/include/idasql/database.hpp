@@ -13,7 +13,7 @@
  *   - Use for tools like idasql.exe that manage everything
  *
  * TIER 3: Free functions (quick one-liners)
- *   - idasql::query(), idasql::exec()
+ *   - idasql::query(), idasql::exec(), idasql::execute()
  *   - Use global engine, lazily initialized
  *
  * IMPORTANT: IDA SDK is a singleton. Only ONE database can be open.
@@ -26,10 +26,13 @@
 
 #include <xsql/database.hpp>
 #include <xsql/json.hpp>
+#include <xsql/script.hpp>
+#include <idasql/runtime_settings.hpp>
 #include <string>
 #include <vector>
-#include <functional>
 #include <memory>
+#include <cctype>
+#include <limits>
 
 #include <idasql/platform_undef.hpp>
 
@@ -78,7 +81,11 @@ struct QueryResult {
     std::vector<std::string> columns;
     std::vector<Row> rows;
     std::string error;
+    std::vector<std::string> warnings;
     bool success = false;
+    bool timed_out = false;
+    bool partial = false;
+    int elapsed_ms = 0;
 
     // Convenience accessors
     size_t row_count() const { return rows.size(); }
@@ -123,6 +130,15 @@ struct QueryResult {
             result += "\n";
         }
         result += "(" + std::to_string(row_count()) + " rows)";
+        if (!warnings.empty()) {
+            result += "\nWarnings:";
+            for (const auto& warning : warnings) {
+                result += "\n  - " + warning;
+            }
+        }
+        if (timed_out) {
+            result += "\n(timed out after " + std::to_string(elapsed_ms) + " ms)";
+        }
         return result;
     }
 };
@@ -175,55 +191,50 @@ public:
             return result;
         }
 
-        struct QueryData {
-            QueryResult* result;
-            bool first_row;
-        } qd = { &result, true };
-
-        auto callback = [](void* data, int argc, char** argv, char** cols) -> int {
-            auto* qd = static_cast<QueryData*>(data);
-
-            if (qd->first_row) {
-                for (int i = 0; i < argc; i++) {
-                    qd->result->columns.push_back(cols[i] ? cols[i] : "");
-                }
-                qd->first_row = false;
-            }
-
-            Row row;
-            row.values.reserve(argc);
-            for (int i = 0; i < argc; i++) {
-                row.values.push_back(argv[i] ? argv[i] : "NULL");
-            }
-            qd->result->rows.push_back(std::move(row));
-
-            return 0;
-        };
-
-        int rc = exec(sql, callback, &qd);
-        result.success = (rc == SQLITE_OK);
-        if (!result.success && result.error.empty()) {
-            result.error = sqlite3_errmsg(db_.handle());
+        if (handle_runtime_pragma(sql, result)) {
+            error_ = result.success ? "" : result.error;
+            return result;
         }
+
+        xsql::QueryOptions options;
+        options.timeout_ms = runtime_settings().query_timeout_ms();
+        xsql::Result raw = db_.query(sql, options);
+        result.columns = std::move(raw.columns);
+        result.rows.reserve(raw.rows.size());
+        for (auto& raw_row : raw.rows) {
+            Row row;
+            row.values = std::move(raw_row.values);
+            result.rows.push_back(std::move(row));
+        }
+        result.error = std::move(raw.error);
+        result.warnings = std::move(raw.warnings);
+        result.timed_out = raw.timed_out;
+        result.partial = raw.partial;
+        result.elapsed_ms = raw.elapsed_ms;
+        append_query_hints(sql ? std::string(sql) : std::string(), result);
+        result.success = result.error.empty();
+        error_ = result.success ? "" : result.error;
 
         return result;
     }
 
     /**
-     * Execute SQL with callback (for streaming large results)
+     * Execute SQL, ignoring rows
      */
-    int exec(const char* sql, sqlite3_callback callback, void* data) {
+    xsql::Status exec(const char* sql) {
         if (!db_.is_open()) {
             error_ = "QueryEngine not initialized";
-            return SQLITE_ERROR;
+            return xsql::Status::error;
         }
 
-        char* err_msg = nullptr;
-        int rc = sqlite3_exec(db_.handle(), sql, callback, data, &err_msg);
-        if (err_msg) {
-            error_ = err_msg;
-            sqlite3_free(err_msg);
+        QueryResult pragma_result;
+        if (handle_runtime_pragma(sql, pragma_result)) {
+            error_ = pragma_result.success ? "" : pragma_result.error;
+            return pragma_result.success ? xsql::Status::ok : xsql::Status::error;
         }
+
+        xsql::Status rc = db_.exec(sql);
+        error_ = db_.last_error();
         return rc;
     }
 
@@ -231,7 +242,41 @@ public:
      * Execute SQL, ignore results (for INSERT/UPDATE/DELETE)
      */
     bool execute(const char* sql) {
-        return exec(sql, nullptr, nullptr) == SQLITE_OK;
+        return xsql::is_ok(exec(sql));
+    }
+
+    /**
+     * Execute multi-statement SQL script and collect statement results.
+     */
+    bool execute_script(const std::string& script,
+                        std::vector<xsql::StatementResult>& results,
+                        std::string& error) {
+        if (!db_.is_open()) {
+            error_ = "QueryEngine not initialized";
+            error = error_;
+            return false;
+        }
+
+        bool ok = db_.execute_script(script, results, error);
+        error_ = ok ? "" : error;
+        return ok;
+    }
+
+    /**
+     * Export tables to a SQL file.
+     */
+    bool export_tables(const std::vector<std::string>& tables,
+                       const std::string& output_path,
+                       std::string& error) {
+        if (!db_.is_open()) {
+            error_ = "QueryEngine not initialized";
+            error = error_;
+            return false;
+        }
+
+        bool ok = db_.export_tables(tables, output_path, error);
+        error_ = ok ? "" : error;
+        return ok;
     }
 
     /**
@@ -260,11 +305,257 @@ public:
     bool is_valid() const { return db_.is_open(); }
 
     /**
-     * Get raw SQLite handle (for advanced use)
+     * Advanced access to the underlying xsql database wrapper.
+     * Use this for module registration workflows (custom virtual tables).
      */
-    sqlite3* handle() { return db_.handle(); }
+    xsql::Database& database() { return db_; }
+    const xsql::Database& database() const { return db_; }
 
 private:
+    static std::string trim_copy(const std::string& s) {
+        size_t begin = 0;
+        while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin]))) {
+            ++begin;
+        }
+        size_t end = s.size();
+        while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) {
+            --end;
+        }
+        return s.substr(begin, end - begin);
+    }
+
+    static std::string to_lower_copy(std::string value) {
+        for (char& c : value) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return value;
+    }
+
+    static std::string strip_optional_quotes(const std::string& s) {
+        if (s.size() >= 2) {
+            char a = s.front();
+            char b = s.back();
+            if ((a == '\'' && b == '\'') || (a == '"' && b == '"')) {
+                return s.substr(1, s.size() - 2);
+            }
+        }
+        return s;
+    }
+
+    static bool parse_int_value(const std::string& text, int& value) {
+        try {
+            size_t consumed = 0;
+            long long parsed = std::stoll(text, &consumed, 10);
+            if (consumed != text.size()) {
+                return false;
+            }
+            if (parsed < (std::numeric_limits<int>::min)() ||
+                parsed > (std::numeric_limits<int>::max)()) {
+                return false;
+            }
+            value = static_cast<int>(parsed);
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    static bool parse_bool_value(const std::string& text, bool& value) {
+        const std::string lower = to_lower_copy(trim_copy(text));
+        if (lower == "1" || lower == "on" || lower == "true" || lower == "yes") {
+            value = true;
+            return true;
+        }
+        if (lower == "0" || lower == "off" || lower == "false" || lower == "no") {
+            value = false;
+            return true;
+        }
+        return false;
+    }
+
+    static QueryResult make_pragma_result(const std::string& key, const std::string& value) {
+        QueryResult result;
+        result.columns = {"name", "value"};
+        Row row;
+        row.values = {key, value};
+        result.rows.push_back(std::move(row));
+        result.success = true;
+        return result;
+    }
+
+    static QueryResult make_pragma_error(const std::string& error) {
+        QueryResult result;
+        result.success = false;
+        result.error = error;
+        return result;
+    }
+
+    bool handle_runtime_pragma(const char* sql, QueryResult& out) {
+        if (sql == nullptr) {
+            return false;
+        }
+
+        std::string text = trim_copy(sql);
+        if (text.empty()) {
+            return false;
+        }
+        if (!text.empty() && text.back() == ';') {
+            text.pop_back();
+            text = trim_copy(text);
+        }
+
+        std::string lower = to_lower_copy(text);
+        const std::string pragma_prefix = "pragma";
+        if (lower.rfind(pragma_prefix, 0) != 0) {
+            return false;
+        }
+
+        std::string body = trim_copy(text.substr(pragma_prefix.size()));
+        std::string body_lower = to_lower_copy(body);
+        const std::string idasql_prefix = "idasql.";
+        if (body_lower.rfind(idasql_prefix, 0) != 0) {
+            return false;
+        }
+
+        std::string key_expr = trim_copy(body.substr(idasql_prefix.size()));
+        std::string value_expr;
+        size_t eq_pos = key_expr.find('=');
+        if (eq_pos != std::string::npos) {
+            value_expr = trim_copy(key_expr.substr(eq_pos + 1));
+            key_expr = trim_copy(key_expr.substr(0, eq_pos));
+            value_expr = strip_optional_quotes(value_expr);
+        }
+
+        const std::string key = to_lower_copy(key_expr);
+        auto& settings = runtime_settings();
+
+        if (key == "query_timeout_ms") {
+            if (value_expr.empty()) {
+                out = make_pragma_result("query_timeout_ms", std::to_string(settings.query_timeout_ms()));
+                return true;
+            }
+            int timeout_ms = 0;
+            if (!parse_int_value(value_expr, timeout_ms) || !settings.set_query_timeout_ms(timeout_ms)) {
+                out = make_pragma_error("Invalid idasql.query_timeout_ms value");
+                return true;
+            }
+            out = make_pragma_result("query_timeout_ms", std::to_string(settings.query_timeout_ms()));
+            return true;
+        }
+
+        if (key == "queue_admission_timeout_ms") {
+            if (value_expr.empty()) {
+                out = make_pragma_result("queue_admission_timeout_ms",
+                                         std::to_string(settings.queue_admission_timeout_ms()));
+                return true;
+            }
+            int timeout_ms = 0;
+            if (!parse_int_value(value_expr, timeout_ms) ||
+                !settings.set_queue_admission_timeout_ms(timeout_ms)) {
+                out = make_pragma_error("Invalid idasql.queue_admission_timeout_ms value");
+                return true;
+            }
+            out = make_pragma_result("queue_admission_timeout_ms",
+                                     std::to_string(settings.queue_admission_timeout_ms()));
+            return true;
+        }
+
+        if (key == "max_queue") {
+            if (value_expr.empty()) {
+                out = make_pragma_result("max_queue", std::to_string(settings.max_queue()));
+                return true;
+            }
+            int queue_limit = 0;
+            if (!parse_int_value(value_expr, queue_limit) || queue_limit < 0 ||
+                !settings.set_max_queue(static_cast<size_t>(queue_limit))) {
+                out = make_pragma_error("Invalid idasql.max_queue value");
+                return true;
+            }
+            out = make_pragma_result("max_queue", std::to_string(settings.max_queue()));
+            return true;
+        }
+
+        if (key == "hints_enabled") {
+            if (value_expr.empty()) {
+                out = make_pragma_result("hints_enabled", settings.hints_enabled() ? "1" : "0");
+                return true;
+            }
+            bool enabled = false;
+            if (!parse_bool_value(value_expr, enabled)) {
+                out = make_pragma_error("Invalid idasql.hints_enabled value");
+                return true;
+            }
+            settings.set_hints_enabled(enabled);
+            out = make_pragma_result("hints_enabled", settings.hints_enabled() ? "1" : "0");
+            return true;
+        }
+
+        if (key == "timeout_push") {
+            if (value_expr.empty()) {
+                out = make_pragma_error("idasql.timeout_push requires a timeout value");
+                return true;
+            }
+            int timeout_ms = 0;
+            if (!parse_int_value(value_expr, timeout_ms)) {
+                out = make_pragma_error("Invalid idasql.timeout_push value");
+                return true;
+            }
+            int effective_timeout = 0;
+            if (!settings.timeout_push(timeout_ms, &effective_timeout)) {
+                out = make_pragma_error("Invalid idasql.timeout_push value");
+                return true;
+            }
+            out = make_pragma_result("query_timeout_ms", std::to_string(effective_timeout));
+            return true;
+        }
+
+        if (key == "timeout_pop") {
+            int effective_timeout = 0;
+            if (!settings.timeout_pop(&effective_timeout)) {
+                out = make_pragma_error("idasql.timeout_pop stack is empty");
+                return true;
+            }
+            out = make_pragma_result("query_timeout_ms", std::to_string(effective_timeout));
+            return true;
+        }
+
+        out = make_pragma_error("Unknown idasql pragma key");
+        return true;
+    }
+
+    void append_query_hints(const std::string& sql, QueryResult& result) const {
+        if (!runtime_settings().hints_enabled()) {
+            return;
+        }
+
+        const std::string lower = to_lower_copy(sql);
+        const bool touches_decompiler_table =
+            lower.find("ctree_lvars") != std::string::npos ||
+            lower.find("ctree_call_args") != std::string::npos ||
+            lower.find("ctree ") != std::string::npos ||
+            lower.find("ctree\n") != std::string::npos ||
+            lower.find("pseudocode") != std::string::npos;
+        const bool has_func_filter = lower.find("func_addr") != std::string::npos;
+
+        auto add_warning_once = [&result](const std::string& warning) {
+            for (const auto& existing : result.warnings) {
+                if (existing == warning) {
+                    return;
+                }
+            }
+            result.warnings.push_back(warning);
+        };
+
+        if (touches_decompiler_table && !has_func_filter) {
+            add_warning_once(
+                "Decompiler tables are expensive without func_addr filtering; add WHERE func_addr = <addr> and LIMIT.");
+        }
+        if (result.timed_out && touches_decompiler_table) {
+            add_warning_once(
+                "Decompiler query timed out; resolve candidate functions first, then query ctree_* per function.");
+        }
+    }
+
     xsql::Database db_;
     std::string error_;
 
@@ -434,8 +725,8 @@ public:
         return engine_->query(sql);
     }
 
-    int exec(const char* sql, sqlite3_callback cb, void* data) {
-        return engine_ ? engine_->exec(sql, cb, data) : SQLITE_ERROR;
+    xsql::Status exec(const char* sql) {
+        return engine_ ? engine_->exec(sql) : xsql::Status::error;
     }
 
     bool execute(const std::string& sql) { return execute(sql.c_str()); }
@@ -443,15 +734,30 @@ public:
         return engine_ ? engine_->execute(sql) : false;
     }
 
+    bool execute_script(const std::string& script,
+                        std::vector<xsql::StatementResult>& results,
+                        std::string& error) {
+        if (!engine_) {
+            error = "Session not open";
+            return false;
+        }
+        return engine_->execute_script(script, results, error);
+    }
+
+    bool export_tables(const std::vector<std::string>& tables,
+                       const std::string& output_path,
+                       std::string& error) {
+        if (!engine_) {
+            error = "Session not open";
+            return false;
+        }
+        return engine_->export_tables(tables, output_path, error);
+    }
+
     std::string scalar(const std::string& sql) { return scalar(sql.c_str()); }
     std::string scalar(const char* sql) {
         return engine_ ? engine_->scalar(sql) : "";
     }
-
-    /**
-     * Get raw SQLite handle
-     */
-    sqlite3* handle() { return engine_ ? engine_->handle() : nullptr; }
 
     /**
      * Get query engine (for advanced use)
@@ -503,10 +809,10 @@ inline QueryResult query(const char* sql) {
 }
 
 /**
- * Quick exec with callback
+ * Quick exec (no result rows)
  */
-inline int exec(const char* sql, sqlite3_callback cb, void* data) {
-    return detail::global_engine().exec(sql, cb, data);
+inline xsql::Status exec(const char* sql) {
+    return detail::global_engine().exec(sql);
 }
 
 /**

@@ -1,33 +1,3 @@
-/**
- * idasql CLI - Command-line SQL interface to IDA databases
- *
- * Usage:
- *   idasql -s database.i64 -q "SELECT * FROM funcs"     # Single query (local)
- *   idasql -s database.i64 -c "SELECT * FROM funcs"     # Same as -q (Python-style)
- *   idasql -s database.i64 -f script.sql                # Execute SQL file
- *   idasql -s database.i64 -i                           # Interactive mode
- *   idasql -s database.i64 --export out.sql             # Export all tables to SQL
- *   idasql -s database.i64 --export out.sql --export-tables=funcs,segments
- *   idasql --remote localhost:13337 -q "SELECT * FROM funcs"  # Remote mode
- *
- * Switches:
- *   -s <file>            IDA database file (.idb/.i64) for local mode
- *   --remote <host:port> Connect to IDASQL plugin server
- *   -q <sql>             Execute single SQL query
- *   -c <sql>             Execute single SQL query (alias for -q)
- *   -f <file>            Execute SQL from file
- *   -i                   Interactive REPL mode
- *   --export <file>      Export tables to SQL file (local only)
- *   --export-tables=...  Tables to export (* for all, or table1,table2,...)
- *   -h                   Show help
- *
- * Architecture Note:
- *   Remote mode (--remote) is a thin client that only uses sockets - no IDA
- *   functions are called. However, ida.dll must still be in PATH because the
- *   executable links against it (delayed loading is not possible due to
- *   data symbol imports like callui).
- */
-
 #include <idasql/platform.hpp>
 
 #include <iostream>
@@ -43,9 +13,10 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
-#include <queue>
+#include <deque>
 #include <thread>
 #include <chrono>
+#include <memory>
 
 // Windows UTF-8 console support
 #ifdef _WIN32
@@ -53,12 +24,9 @@
 #include <windows.h>
 #endif
 
-// Socket client for remote mode (shared library, no IDA dependency)
-#include <xsql/socket/client.hpp>
 #include <xsql/thinclient/server.hpp>
 #include "../common/http_server.hpp"
 
-#include <xsql/script.hpp>
 #include "../common/idasql_version.hpp"
 
 // AI Agent integration (optional, enabled via IDASQL_WITH_AI_AGENT)
@@ -89,42 +57,12 @@ extern "C" void signal_handler(int sig) {
 // Table Printing (shared between remote and local modes)
 // ============================================================================
 
-static int print_callback(void*, int argc, char** argv, char** colNames) {
-    for (int i = 0; i < argc; i++) {
-        std::cout << colNames[i] << " = " << (argv[i] ? argv[i] : "NULL");
-        if (i < argc - 1) std::cout << " | ";
-    }
-    std::cout << std::endl;
-    return 0;
-}
-
 // Table-style output
 struct TablePrinter {
     std::vector<std::string> columns;
     std::vector<std::vector<std::string>> rows;
     std::vector<size_t> widths;
     bool first_row = true;
-
-    void add_row(int argc, char** argv, char** colNames) {
-        if (first_row) {
-            columns.reserve(argc);
-            widths.resize(argc, 0);
-            for (int i = 0; i < argc; i++) {
-                columns.push_back(colNames[i] ? colNames[i] : "");
-                widths[i] = (std::max)(widths[i], columns[i].length());
-            }
-            first_row = false;
-        }
-
-        std::vector<std::string> row;
-        row.reserve(argc);
-        for (int i = 0; i < argc; i++) {
-            std::string val = argv[i] ? argv[i] : "NULL";
-            row.push_back(val);
-            widths[i] = (std::max)(widths[i], val.length());
-        }
-        rows.push_back(std::move(row));
-    }
 
     void add_row(const std::vector<std::string>& cols,
                  const std::vector<std::string>& values) {
@@ -180,28 +118,6 @@ struct TablePrinter {
     }
 };
 
-static TablePrinter* g_printer = nullptr;
-
-static int table_callback(void*, int argc, char** argv, char** colNames) {      
-    if (g_printer) {
-        g_printer->add_row(argc, argv, colNames);
-    }
-    return 0;
-}
-
-static bool parse_port(const std::string& s, int& port) {
-    try {
-        size_t idx = 0;
-        int v = std::stoi(s, &idx, 10);
-        if (idx != s.size()) return false;
-        if (v < 1 || v > 65535) return false;
-        port = v;
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
 // ============================================================================ 
 // Validation Helpers
 // ============================================================================ 
@@ -211,209 +127,6 @@ static bool is_safe_table_name(const std::string& name) {
     return std::all_of(name.begin(), name.end(), [](unsigned char c) {
         return std::isalnum(c) || c == '_';
     });
-}
-
-// ============================================================================ 
-// Remote Mode - Pure socket client (NO IDA DEPENDENCIES)
-// ============================================================================ 
-// This entire section uses only standard C++ and sockets.
-// On Windows with delayed loading, ida.dll/idalib.dll are never loaded
-// when running in remote mode.
-
-static void print_remote_result(const xsql::socket::RemoteResult& qr) {
-    if (qr.rows.empty() && qr.columns.empty()) {
-        std::cout << "OK\n";
-        return;
-    }
-    TablePrinter printer;
-    for (size_t r = 0; r < qr.rows.size(); r++) {
-        std::vector<char*> argv_ptrs(qr.columns.size());
-        std::vector<char*> cols_ptrs(qr.columns.size());
-        for (size_t c = 0; c < qr.columns.size(); c++) {
-            argv_ptrs[c] = const_cast<char*>(qr.rows[r][c].c_str());
-            cols_ptrs[c] = const_cast<char*>(qr.columns[c].c_str());
-        }
-        printer.add_row(static_cast<int>(qr.columns.size()),
-                        argv_ptrs.data(), cols_ptrs.data());
-    }
-    printer.print();
-}
-
-static int run_remote_mode(const std::string& host, int port,
-                           const std::string& query,
-                           const std::string& sql_file,
-                           const std::string& auth_token,
-                           bool interactive,
-                           const std::string& nl_prompt = "",
-                           bool verbose_mode = false,
-                           const std::string& provider_override = "") {
-    std::cerr << "Connecting to " << host << ":" << port << "..." << std::endl;
-    xsql::socket::Client remote;
-    if (!auth_token.empty()) {
-        remote.set_auth_token(auth_token);
-    }
-    if (!remote.connect(host, port)) {
-        std::cerr << "Error: " << remote.error() << std::endl;
-        return 1;
-    }
-    std::cerr << "Connected." << std::endl;
-
-    int result = 0;
-
-#ifdef IDASQL_HAS_AI_AGENT
-    if (!nl_prompt.empty()) {
-        // Natural language query via remote
-        auto executor = [&remote](const std::string& sql) -> std::string {
-            auto qr = remote.query(sql);
-            if (!qr.success) {
-                return "Error: " + qr.error;
-            }
-            // Format result as string
-            std::ostringstream oss;
-            if (!qr.columns.empty()) {
-                for (size_t i = 0; i < qr.columns.size(); i++) {
-                    if (i > 0) oss << " | ";
-                    oss << qr.columns[i];
-                }
-                oss << "\n";
-                for (const auto& row : qr.rows) {
-                    for (size_t i = 0; i < row.size(); i++) {
-                        if (i > 0) oss << " | ";
-                        oss << row[i];
-                    }
-                    oss << "\n";
-                }
-            }
-            return oss.str();
-        };
-
-        idasql::AgentSettings settings = idasql::LoadAgentSettings();
-        if (!provider_override.empty()) {
-            try {
-                settings.default_provider = idasql::ParseProviderType(provider_override);
-            } catch (...) {}
-        }
-
-        idasql::AIAgent agent(executor, settings, verbose_mode);
-        g_agent = &agent;
-        std::signal(SIGINT, signal_handler);
-
-        agent.start();
-        std::string response = agent.query(nl_prompt);
-        agent.stop();
-
-        g_agent = nullptr;
-        std::signal(SIGINT, SIG_DFL);
-
-        std::cout << response << "\n";
-        return 0;
-    }
-#else
-    (void)nl_prompt;
-    (void)verbose_mode;
-    (void)provider_override;
-#endif
-
-    if (!query.empty()) {
-        // Single query
-        auto qr = remote.query(query);
-        if (qr.success) {
-            print_remote_result(qr);
-        } else {
-            std::cerr << "Error: " << qr.error << "\n";
-            result = 1;
-        }
-    } else if (!sql_file.empty()) {
-        // File execution (remote)
-        std::ifstream file(sql_file);
-        if (!file.is_open()) {
-            std::cerr << "Cannot open file: " << sql_file << "\n";
-            return 1;
-        }
-        std::stringstream buffer;
-        buffer << file.rdbuf();
-        std::string content = buffer.str();
-
-        std::vector<std::string> statements;
-        std::string parse_error;
-        if (!xsql::collect_statements(nullptr, content, statements, parse_error)) {
-            std::cerr << "Error parsing SQL file: " << parse_error << "\n";
-            return 1;
-        }
-
-        for (const auto& stmt : statements) {
-            auto qr = remote.query(stmt);
-            if (qr.success) {
-                print_remote_result(qr);
-                std::cout << "\n";
-            } else {
-                std::cerr << "Error: " << qr.error << "\n";
-                std::cerr << "Query: " << stmt << "\n";
-                result = 1;
-                break;
-            }
-        }
-    } else if (interactive) {
-        // Interactive REPL (remote)
-        std::string line;
-        std::string stmt;
-        std::cout << "IDASQL Remote Interactive Mode (" << host << ":" << port << ")\n"
-                  << "Type .quit to exit\n\n";
-
-        while (true) {
-            std::cout << (stmt.empty() ? "idasql> " : "   ...> ");
-            std::cout.flush();
-            if (!std::getline(std::cin, line)) break;
-            if (line.empty()) continue;
-
-            if (stmt.empty() && line[0] == '.') {
-                if (line == ".quit" || line == ".exit") break;
-                if (line == ".tables") {
-                    auto qr = remote.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;");
-                    if (qr.success) {
-                        std::cout << "Tables:\n";
-                        for (const auto& row : qr.rows) {
-                            std::cout << "  " << row[0] << "\n";
-                        }
-                    }
-                    continue;
-                }
-                if (line == ".help") {
-                    std::cout << R"(
-Commands:
-  .tables             List all tables
-  .clear              Clear session
-  .quit / .exit       Exit interactive mode
-  .help               Show this help
-
-SQL queries end with semicolon (;)
-)" << std::endl;
-                    continue;
-                }
-                if (line == ".clear") {
-                    std::cout << "Session cleared\n";
-                    continue;
-                }
-                std::cerr << "Unknown command: " << line << "\n";
-                continue;
-            }
-
-            stmt += line + " ";
-            size_t last = line.length() - 1;
-            while (last > 0 && (line[last] == ' ' || line[last] == '\t')) last--;
-            if (line[last] == ';') {
-                auto qr = remote.query(stmt);
-                if (qr.success) {
-                    print_remote_result(qr);
-                } else {
-                    std::cerr << "Error: " << qr.error << "\n";
-                }
-                stmt.clear();
-            }
-        }
-    }
-
-    return result;
 }
 
 // ============================================================================
@@ -435,6 +148,28 @@ SQL queries end with semicolon (;)
 #include <xsql/json.hpp>
 #endif
 
+static void add_query_result_rows(TablePrinter& printer, const idasql::QueryResult& result) {
+    for (const auto& row : result.rows) {
+        printer.add_row(result.columns, row.values);
+    }
+}
+
+static void print_query_warnings(std::ostream& os, const idasql::QueryResult& result) {
+    for (const auto& warning : result.warnings) {
+        os << "Warning: " << warning << "\n";
+    }
+    if (result.timed_out) {
+        os << "Warning: query timed out";
+        if (result.elapsed_ms > 0) {
+            os << " after " << result.elapsed_ms << " ms";
+        }
+        if (result.partial) {
+            os << " (partial rows returned)";
+        }
+        os << "\n";
+    }
+}
+
 // ============================================================================
 // REPL - Interactive Mode (Local)
 // ============================================================================
@@ -455,15 +190,16 @@ Multi-line queries are supported.
 }
 
 static void show_tables(idasql::Database& db) {
+    auto result = db.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;");
+    if (!result.success) {
+        std::cerr << "Error: " << db.error() << "\n";
+        return;
+    }
+
     std::cout << "Tables:\n";
-    db.exec(
-        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;",
-        [](void*, int, char** argv, char**) -> int {
-            std::cout << "  " << (argv[0] ? argv[0] : "") << "\n";
-            return 0;
-        },
-        nullptr
-    );
+    for (const auto& row : result.rows) {
+        std::cout << "  " << (row.size() > 0 ? row[0] : "") << "\n";
+    }
 }
 
 static void show_schema(idasql::Database& db, const std::string& table) {
@@ -473,32 +209,35 @@ static void show_schema(idasql::Database& db, const std::string& table) {
     }
 
     std::string sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name='" + table + "';";
-    db.exec(sql.c_str(),
-        [](void*, int, char** argv, char**) -> int {
-            std::cout << (argv[0] ? argv[0] : "Not found") << "\n";
-            return 0;
-        },
-        nullptr
-    );
+    auto result = db.query(sql);
+    if (!result.success) {
+        std::cerr << "Error: " << db.error() << "\n";
+        return;
+    }
+    if (!result.rows.empty() && result.rows[0].size() > 0) {
+        std::cout << result.rows[0][0] << "\n";
+    } else {
+        std::cout << "Not found\n";
+    }
 }
 
 // Helper to execute SQL and format results as string (for AI agent)
 static std::string execute_sql_to_string(idasql::Database& db, const std::string& sql) {
-    std::stringstream ss;
-    TablePrinter printer;
-    g_printer = &printer;
-    int rc = db.exec(sql.c_str(), table_callback, nullptr);
-    g_printer = nullptr;
-
-    if (rc == SQLITE_OK) {
-        // Capture to string instead of stdout
-        std::streambuf* old_cout = std::cout.rdbuf(ss.rdbuf());
-        printer.print();
-        std::cout.rdbuf(old_cout);
-        return ss.str();
-    } else {
+    auto result = db.query(sql);
+    if (!result.success) {
         return "Error: " + std::string(db.error());
     }
+
+    std::stringstream ss;
+    TablePrinter printer;
+    add_query_result_rows(printer, result);
+
+    // Capture to string instead of stdout
+    std::streambuf* old_cout = std::cout.rdbuf(ss.rdbuf());
+    printer.print();
+    print_query_warnings(std::cout, result);
+    std::cout.rdbuf(old_cout);
+    return ss.str();
 }
 
 // Forward declaration (defined in HTTP section below)
@@ -820,13 +559,12 @@ static void run_repl(idasql::Database& db) {
         size_t last = line.length() - 1;
         while (last > 0 && (line[last] == ' ' || line[last] == '\t')) last--;
         if (line[last] == ';') {
-            TablePrinter printer;
-            g_printer = &printer;
-            int rc = db.exec(query.c_str(), table_callback, nullptr);
-            g_printer = nullptr;
-
-            if (rc == SQLITE_OK) {
+            auto result = db.query(query);
+            if (result.success) {
+                TablePrinter printer;
+                add_query_result_rows(printer, result);
                 printer.print();
+                print_query_warnings(std::cout, result);
             } else {
                 std::cerr << "Error: " << db.error() << "\n";
             }
@@ -878,7 +616,7 @@ static bool export_to_sql(idasql::Database& db, const char* path,
     }
 
     std::string error;
-    if (!xsql::export_tables(db.handle(), tables, path, error)) {
+    if (!db.export_tables(tables, path, error)) {
         std::cerr << "Error: " << error << "\n";
         return false;
     }
@@ -904,7 +642,7 @@ static bool execute_file(idasql::Database& db, const char* path) {
 
     std::vector<xsql::StatementResult> results;
     std::string error;
-    if (!xsql::execute_script(db.handle(), content, results, error)) {
+    if (!db.execute_script(content, results, error)) {
         std::cerr << "Error: " << error << "\n";
         return false;
     }
@@ -940,14 +678,16 @@ static void http_signal_handler(int) {
 struct HttpPendingCommand {
     std::string sql;
     std::string result;
+    bool started = false;
+    bool canceled = false;
     bool completed = false;
-    std::mutex* done_mutex = nullptr;
-    std::condition_variable* done_cv = nullptr;
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
 };
 
 static std::mutex g_http_queue_mutex;
 static std::condition_variable g_http_queue_cv;
-static std::queue<HttpPendingCommand*> g_http_pending_commands;
+static std::deque<std::shared_ptr<HttpPendingCommand>> g_http_pending_commands;
 static std::atomic<bool> g_http_running{false};
 
 // Queue a command and wait for main thread to execute it
@@ -956,39 +696,66 @@ static std::string http_queue_and_wait(const std::string& sql) {
         return xsql::json{{"success", false}, {"error", "Server not running"}}.dump();
     }
 
-    HttpPendingCommand cmd;
-    cmd.sql = sql;
-    cmd.completed = false;
-
-    std::mutex done_mutex;
-    std::condition_variable done_cv;
-    cmd.done_mutex = &done_mutex;
-    cmd.done_cv = &done_cv;
+    auto cmd = std::make_shared<HttpPendingCommand>();
+    cmd->sql = sql;
+    cmd->completed = false;
 
     {
         std::lock_guard<std::mutex> lock(g_http_queue_mutex);
-        g_http_pending_commands.push(&cmd);
+        const size_t max_queue = idasql::runtime_settings().max_queue();
+        if (max_queue > 0 && g_http_pending_commands.size() >= max_queue) {
+            return xsql::json{
+                {"success", false},
+                {"error", "Queue full"},
+                {"hint", "Raise PRAGMA idasql.max_queue or reduce request concurrency"}
+            }.dump();
+        }
+        g_http_pending_commands.push_back(cmd);
     }
     g_http_queue_cv.notify_one();
 
-    // Wait for completion - cleanup code will signal if server stops
-    // Timeout after 60s as safety net against shutdown race conditions
-    {
-        std::unique_lock<std::mutex> lock(done_mutex);
-        int wait_count = 0;
-        while (!cmd.completed && wait_count < 600) {  // 60 seconds max
-            done_cv.wait_for(lock, std::chrono::milliseconds(100));
-            wait_count++;
+    // Wait for completion (or queue admission timeout).
+    const int timeout_ms = idasql::runtime_settings().queue_admission_timeout_ms();
+    std::unique_lock<std::mutex> lock(cmd->done_mutex);
+    if (timeout_ms <= 0) {
+        while (!cmd->completed) {
+            cmd->done_cv.wait_for(lock, std::chrono::milliseconds(100));
         }
-        if (!cmd.completed) {
-            // Timed out - likely shutdown race, remove from queue if still there
-            std::lock_guard<std::mutex> qlock(g_http_queue_mutex);
-            // Can't easily remove from std::queue, but server is stopping anyway
-            return xsql::json{{"success", false}, {"error", "Request timed out"}}.dump();
+    } else {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        while (!cmd->completed) {
+            if (cmd->started) {
+                cmd->done_cv.wait_for(lock, std::chrono::milliseconds(100));
+                continue;
+            }
+
+            if (cmd->done_cv.wait_until(lock, deadline,
+                                        [&]() { return cmd->completed || cmd->started; })) {
+                continue;
+            }
+
+            // Timed out before command admission: mark canceled and remove from pending queue.
+            if (!cmd->completed && !cmd->started) {
+                cmd->canceled = true;
+            }
+            lock.unlock();
+            {
+                std::lock_guard<std::mutex> qlock(g_http_queue_mutex);
+                auto it = std::find(g_http_pending_commands.begin(), g_http_pending_commands.end(), cmd);
+                if (it != g_http_pending_commands.end()) {
+                    g_http_pending_commands.erase(it);
+                }
+            }
+
+            return xsql::json{
+                {"success", false},
+                {"error", "Request timed out while waiting in queue"},
+                {"hint", "Raise PRAGMA idasql.queue_admission_timeout_ms or reduce request concurrency"}
+            }.dump();
         }
     }
 
-    return cmd.result;
+    return cmd->result;
 }
 
 static std::string query_result_to_json(idasql::Database& db, const std::string& sql) {
@@ -1004,6 +771,18 @@ static std::string query_result_to_json(idasql::Database& db, const std::string&
         }
         j["rows"] = rows;
         j["row_count"] = result.rows.size();
+        if (!result.warnings.empty()) {
+            j["warnings"] = result.warnings;
+        }
+        if (result.timed_out) {
+            j["timed_out"] = true;
+        }
+        if (result.partial) {
+            j["partial"] = true;
+        }
+        if (result.elapsed_ms > 0) {
+            j["elapsed_ms"] = result.elapsed_ms;
+        }
     } else {
         j["error"] = result.error;
     }
@@ -1190,7 +969,7 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
 
     // Main thread processes the command queue (required for Hex-Rays thread affinity)
     while (g_http_running.load() && !g_http_stop_requested.load()) {
-        HttpPendingCommand* cmd = nullptr;
+        std::shared_ptr<HttpPendingCommand> cmd;
 
         {
             std::unique_lock<std::mutex> lock(g_http_queue_mutex);
@@ -1199,21 +978,34 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                                                         g_http_stop_requested.load(); })) {
                 if (!g_http_pending_commands.empty()) {
                     cmd = g_http_pending_commands.front();
-                    g_http_pending_commands.pop();
+                    g_http_pending_commands.pop_front();
                 }
             }
         }
 
         if (cmd) {
-            // Execute query on main thread - safe for Hex-Rays decompiler
-            cmd->result = query_result_to_json(db, cmd->sql);
-            if (cmd->done_mutex && cmd->done_cv) {
-                {
-                    std::lock_guard<std::mutex> lock(*cmd->done_mutex);
+            bool should_execute = false;
+            {
+                std::lock_guard<std::mutex> lock(cmd->done_mutex);
+                if (!cmd->completed && !cmd->canceled) {
+                    cmd->started = true;
+                    should_execute = true;
+                } else if (!cmd->completed && cmd->canceled) {
                     cmd->completed = true;
                 }
-                cmd->done_cv->notify_one();
             }
+
+            if (should_execute) {
+                // Execute query on main thread - safe for Hex-Rays decompiler
+                std::string result = query_result_to_json(db, cmd->sql);
+                {
+                    std::lock_guard<std::mutex> lock(cmd->done_mutex);
+                    cmd->result = std::move(result);
+                    cmd->completed = true;
+                }
+            }
+
+            cmd->done_cv.notify_one();
         }
     }
 
@@ -1222,19 +1014,23 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     g_http_queue_cv.notify_all();
 
     // Complete any pending commands with error
+    std::deque<std::shared_ptr<HttpPendingCommand>> pending;
     {
         std::lock_guard<std::mutex> lock(g_http_queue_mutex);
-        while (!g_http_pending_commands.empty()) {
-            HttpPendingCommand* cmd = g_http_pending_commands.front();
-            g_http_pending_commands.pop();
-            if (!cmd || !cmd->done_mutex || !cmd->done_cv) continue;
-            cmd->result = xsql::json{{"success", false}, {"error", "Server stopped"}}.dump();
-            {
-                std::lock_guard<std::mutex> dlock(*cmd->done_mutex);
+        pending.swap(g_http_pending_commands);
+    }
+    while (!pending.empty()) {
+        auto cmd = pending.front();
+        pending.pop_front();
+        if (!cmd) continue;
+        {
+            std::lock_guard<std::mutex> dlock(cmd->done_mutex);
+            if (!cmd->completed) {
+                cmd->result = xsql::json{{"success", false}, {"error", "Server stopped"}}.dump();
                 cmd->completed = true;
             }
-            cmd->done_cv->notify_one();
         }
+        cmd->done_cv.notify_one();
     }
 
     // Stop HTTP server (run_async thread joined internally)
@@ -1257,14 +1053,11 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
 
 static void print_usage() {
     std::cerr << "idasql v" IDASQL_VERSION_STRING " - SQL interface to IDA databases\n\n"
-              << "Usage: idasql -s <database> [-q|-c <query>] [-f <file>] [-i] [--export <file>]\n"
-              << "       idasql --remote <host:port> [-q|-c <query>] [-f <file>] [-i]\n\n"
+              << "Usage: idasql -s <database> [-q <query>] [-f <file>] [-i] [--export <file>]\n\n"
               << "Options:\n"
               << "  -s <file>            IDA database file (.idb/.i64) for local mode\n"
-              << "  --remote <host:port> Connect to IDASQL plugin server (e.g., localhost:13337)\n"
-              << "  --token <token>      Auth token for remote mode (if server requires it)\n"
+              << "  --token <token>      Auth token for HTTP/MCP server mode (if server requires it)\n"
               << "  -q <sql>             Execute single SQL query\n"
-              << "  -c <sql>             Execute single SQL query (alias for -q)\n"
               << "  -f <file>            Execute SQL from file\n"
               << "  -i                   Interactive REPL mode\n"
               << "  -w, --write          Save database on exit (persist changes)\n"
@@ -1293,13 +1086,13 @@ static void print_usage() {
               << "  idasql -s test.i64 -f queries.sql\n"
               << "  idasql -s test.i64 -i\n"
               << "  idasql -s test.i64 --export dump.sql\n"
-              << "  idasql --remote localhost:13337 -q \"SELECT * FROM funcs LIMIT 5\"\n"
+              << "  idasql -s test.i64 --http 8080\n"
 #ifdef IDASQL_HAS_AI_AGENT
               << "  idasql -s test.i64 --prompt \"Find the largest functions\"\n"
               << "  idasql -s test.i64 -i --agent\n"
               << "  idasql -s test.i64 --provider copilot --prompt \"How many functions?\"\n"
 #endif
-              << "  idasql --remote localhost:13337 -i\n";
+              << "  idasql -s test.i64 --mcp 9000\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -1325,8 +1118,7 @@ int main(int argc, char* argv[]) {
     std::string sql_file;
     std::string export_file;
     std::string export_tables = "*";  // Default: all tables
-    std::string remote_spec;          // host:port for remote mode
-    std::string auth_token;           // --token for remote mode
+    std::string auth_token;           // --token for HTTP/MCP mode
     std::string bind_addr;            // --bind for HTTP/MCP mode
     bool interactive = false;
     bool write_mode = false;          // -w/--write to save on exit
@@ -1345,11 +1137,9 @@ int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
             db_path = argv[++i];
-        } else if (strcmp(argv[i], "--remote") == 0 && i + 1 < argc) {
-            remote_spec = argv[++i];
         } else if (strcmp(argv[i], "--token") == 0 && i + 1 < argc) {
             auth_token = argv[++i];
-        } else if ((strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "-c") == 0) && i + 1 < argc) {
+        } else if (strcmp(argv[i], "-q") == 0 && i + 1 < argc) {
             query = argv[++i];
         } else if ((strcmp(argv[i], "-f") == 0) && i + 1 < argc) {
             sql_file = argv[++i];
@@ -1408,16 +1198,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Validate arguments
-    bool remote_mode = !remote_spec.empty();
-
-    if (!remote_mode && db_path.empty()) {
-        std::cerr << "Error: Database path required (-s) or use --remote\n\n";
-        print_usage();
-        return 1;
-    }
-
-    if (remote_mode && !db_path.empty()) {
-        std::cerr << "Error: Cannot use both -s and --remote\n\n";
+    if (db_path.empty()) {
+        std::cerr << "Error: Database path required (-s)\n\n";
         print_usage();
         return 1;
     }
@@ -1427,53 +1209,13 @@ int main(int argc, char* argv[]) {
     has_action = has_action || !nl_prompt.empty();
 #endif
     if (!has_action) {
-        std::cerr << "Error: Specify -q, -c, -f, -i, --export, --http, --mcp"
+        std::cerr << "Error: Specify -q, -f, -i, --export, --http, --mcp"
 #ifdef IDASQL_HAS_AI_AGENT
                   << ", or --prompt"
 #endif
                   << "\n\n";
         print_usage();
         return 1;
-    }
-
-    if (remote_mode && !export_file.empty()) {
-        std::cerr << "Error: --export not supported in remote mode\n\n";
-        print_usage();
-        return 1;
-    }
-
-    if (remote_mode && http_mode) {
-        std::cerr << "Error: Cannot use both --remote and --http\n\n";
-        print_usage();
-        return 1;
-    }
-
-    //=========================================================================
-    // Remote mode - thin client, no IDA kernel loaded
-    //=========================================================================
-    // IMPORTANT: This path never calls any IDA functions.
-    // On Windows with delayed loading, ida.dll/idalib.dll stay unloaded.
-    if (remote_mode) {
-        // Parse host:port
-        std::string host = "127.0.0.1";
-        int port = 13337;
-        auto colon = remote_spec.find(':');
-        if (colon != std::string::npos) {
-            host = remote_spec.substr(0, colon);
-            std::string port_str = remote_spec.substr(colon + 1);
-            if (!parse_port(port_str, port)) {
-                std::cerr << "Error: Invalid port in --remote: " << port_str << "\n";
-                return 1;
-            }
-        } else {
-            host = remote_spec;
-        }
-#ifdef IDASQL_HAS_AI_AGENT
-        return run_remote_mode(host, port, query, sql_file, auth_token, interactive,
-                               nl_prompt, verbose_mode, provider_override);
-#else
-        return run_remote_mode(host, port, query, sql_file, auth_token, interactive);
-#endif
     }
 
     //=========================================================================
@@ -1602,13 +1344,12 @@ int main(int argc, char* argv[]) {
 #endif
     } else if (!query.empty()) {
         // Single query mode
-        TablePrinter printer;
-        g_printer = &printer;
-        int rc = db.exec(query.c_str(), table_callback, nullptr);
-        g_printer = nullptr;
-
-        if (rc == SQLITE_OK) {
+        auto query_result = db.query(query);
+        if (query_result.success) {
+            TablePrinter printer;
+            add_query_result_rows(printer, query_result);
             printer.print();
+            print_query_warnings(std::cout, query_result);
         } else {
             std::cerr << "Error: " << db.error() << "\n";
             result = 1;

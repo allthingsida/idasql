@@ -1,6 +1,8 @@
 #pragma once
 
 /**
+ * mcp_server.hpp - MCP server wrapper for IDASQL
+ *
  * IDAMCPServer - MCP server for IDASQL
  *
  * Thread-safe MCP server using command queue pattern.
@@ -20,7 +22,7 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
-#include <queue>
+#include <deque>
 #include <memory>
 
 namespace idasql {
@@ -37,9 +39,11 @@ struct MCPPendingCommand {
     Type type;
     std::string input;
     std::string result;
+    bool started = false;
+    bool canceled = false;
     bool completed = false;
-    std::mutex* done_mutex = nullptr;
-    std::condition_variable* done_cv = nullptr;
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
 };
 
 struct MCPQueueResult {
@@ -118,7 +122,7 @@ private:
     // Command queue for cross-thread execution (CLI mode)
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
-    std::queue<MCPPendingCommand*> pending_commands_;
+    std::deque<std::shared_ptr<MCPPendingCommand>> pending_commands_;
 
     // Callbacks stored for execution
     QueryCallback query_cb_;

@@ -1,3 +1,7 @@
+/**
+ * json_utils.hpp - Minimal JSON escaping helpers
+ */
+
 #pragma once
 
 #include <iomanip>

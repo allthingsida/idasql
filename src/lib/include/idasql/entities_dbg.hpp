@@ -267,29 +267,28 @@ inline VTableDef define_breakpoints() {
         //   loc_type_name(9), module(10), symbol(11), offset(12),
         //   source_file(13), source_line(14), is_hardware(15), is_active(16),
         //   group(17), bptid(18)
-        .insertable([](int argc, sqlite3_value** argv) -> bool {
+        .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
             // Determine location type from which columns are non-NULL
             // argv[0] = address, argv[11] = symbol, argv[10] = module,
             // argv[13] = source_file
 
             auto is_non_null = [&](int col) -> bool {
-                return col < argc && sqlite3_value_type(argv[col]) != SQLITE_NULL;
+                return col < argc && !argv[col].is_null();
             };
 
             auto get_text = [&](int col) -> const char* {
                 if (col >= argc) return nullptr;
-                const char* t = reinterpret_cast<const char*>(sqlite3_value_text(argv[col]));
-                return t;
+                return argv[col].as_c_str();
             };
 
             auto get_int = [&](int col, int def = 0) -> int {
                 if (!is_non_null(col)) return def;
-                return sqlite3_value_int(argv[col]);
+                return argv[col].as_int();
             };
 
             auto get_int64 = [&](int col, int64_t def = 0) -> int64_t {
                 if (!is_non_null(col)) return def;
-                return sqlite3_value_int64(argv[col]);
+                return argv[col].as_int64();
             };
 
             bool ok = false;
@@ -464,3 +463,4 @@ struct DebuggerRegistry {
 
 } // namespace debugger
 } // namespace idasql
+

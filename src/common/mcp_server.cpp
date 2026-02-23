@@ -1,4 +1,5 @@
 #include "mcp_server.hpp"
+#include <idasql/runtime_settings.hpp>
 
 #include <fastmcpp/mcp/handler.hpp>
 #include <fastmcpp/server/sse_server.hpp>
@@ -6,6 +7,7 @@
 #include <fastmcpp/tools/tool.hpp>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <random>
 #include <sstream>
@@ -31,32 +33,67 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
         return {false, "Error: MCP server is not running"};
     }
 
-    MCPPendingCommand cmd;
-    cmd.type = type;
-    cmd.input = input;
-    cmd.completed = false;
-
-    std::mutex done_mutex;
-    std::condition_variable done_cv;
-    cmd.done_mutex = &done_mutex;
-    cmd.done_cv = &done_cv;
+    auto cmd = std::make_shared<MCPPendingCommand>();
+    cmd->type = type;
+    cmd->input = input;
+    cmd->completed = false;
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        pending_commands_.push(&cmd);
+        const size_t max_queue = idasql::runtime_settings().max_queue();
+        if (max_queue > 0 && pending_commands_.size() >= max_queue) {
+            return {false, "Error: MCP queue is full (raise PRAGMA idasql.max_queue)"};
+        }
+        pending_commands_.push_back(cmd);
     }
     queue_cv_.notify_one();
 
     {
-        std::unique_lock<std::mutex> lock(done_mutex);
-        done_cv.wait(lock, [&]() { return cmd.completed || !running_.load(); });
+        std::unique_lock<std::mutex> lock(cmd->done_mutex);
+        const int timeout_ms = idasql::runtime_settings().queue_admission_timeout_ms();
+        if (timeout_ms <= 0) {
+            while (!cmd->completed && running_.load()) {
+                cmd->done_cv.wait_for(lock, std::chrono::milliseconds(100));
+            }
+        } else {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+            while (!cmd->completed && running_.load()) {
+                if (cmd->started) {
+                    cmd->done_cv.wait_for(lock, std::chrono::milliseconds(100),
+                                          [&]() { return cmd->completed || !running_.load(); });
+                    continue;
+                }
+
+                if (cmd->done_cv.wait_until(lock, deadline,
+                                            [&]() { return cmd->completed || cmd->started || !running_.load(); })) {
+                    continue;
+                }
+
+                // Timed out before command admission: mark canceled and remove from pending queue.
+                if (!cmd->completed && !cmd->started) {
+                    cmd->canceled = true;
+                }
+                lock.unlock();
+                {
+                    std::lock_guard<std::mutex> qlock(queue_mutex_);
+                    auto it = std::find(pending_commands_.begin(), pending_commands_.end(), cmd);
+                    if (it != pending_commands_.end()) {
+                        pending_commands_.erase(it);
+                    }
+                }
+                return {false, "Error: MCP request timed out in queue (raise PRAGMA idasql.queue_admission_timeout_ms)"};
+            }
+        }
     }
 
-    if (!cmd.completed) {
-        return {false, "Error: MCP server stopped"};
+    if (!cmd->completed) {
+        if (!running_.load()) {
+            return {false, "Error: MCP server stopped"};
+        }
+        return {false, "Error: MCP request timed out in queue (raise PRAGMA idasql.queue_admission_timeout_ms)"};
     }
 
-    return {true, cmd.result};
+    return {true, cmd->result};
 }
 
 int IDAMCPServer::start(int port, QueryCallback query_cb, AskCallback ask_cb,
@@ -255,7 +292,7 @@ void IDAMCPServer::run_until_stopped() {
             break;
         }
 
-        MCPPendingCommand* cmd = nullptr;
+        std::shared_ptr<MCPPendingCommand> cmd;
 
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
@@ -263,31 +300,49 @@ void IDAMCPServer::run_until_stopped() {
                                    [this]() { return !pending_commands_.empty() || !running_.load(); })) {
                 if (!pending_commands_.empty()) {
                     cmd = pending_commands_.front();
-                    pending_commands_.pop();
+                    pending_commands_.pop_front();
                 }
             }
         }
 
         if (cmd) {
-            try {
-                if (cmd->type == MCPPendingCommand::Type::Query && query_cb_) {
-                    cmd->result = query_cb_(cmd->input);
-                } else if (cmd->type == MCPPendingCommand::Type::Ask && ask_cb_) {
-                    cmd->result = ask_cb_(cmd->input);
-                } else {
-                    cmd->result = "Error: No handler for command type";
-                }
-            } catch (const std::exception& e) {
-                cmd->result = std::string("Error: ") + e.what();
-            }
-
-            if (cmd->done_mutex && cmd->done_cv) {
-                {
-                    std::lock_guard<std::mutex> lock(*cmd->done_mutex);
+            bool should_execute = false;
+            {
+                std::lock_guard<std::mutex> lock(cmd->done_mutex);
+                if (!cmd->completed && !cmd->canceled) {
+                    cmd->started = true;
+                    should_execute = true;
+                } else if (!cmd->completed && cmd->canceled) {
                     cmd->completed = true;
                 }
-                cmd->done_cv->notify_one();
             }
+
+            if (!should_execute) {
+                cmd->done_cv.notify_one();
+                continue;
+            }
+
+            std::string result;
+            try {
+                if (cmd->type == MCPPendingCommand::Type::Query && query_cb_) {
+                    result = query_cb_(cmd->input);
+                } else if (cmd->type == MCPPendingCommand::Type::Ask && ask_cb_) {
+                    result = ask_cb_(cmd->input);
+                } else {
+                    result = "Error: No handler for command type";
+                }
+            } catch (const std::exception& e) {
+                result = std::string("Error: ") + e.what();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(cmd->done_mutex);
+                if (!cmd->completed) {
+                    cmd->result = std::move(result);
+                    cmd->completed = true;
+                }
+            }
+            cmd->done_cv.notify_one();
         }
     }
 }
@@ -305,27 +360,27 @@ void IDAMCPServer::stop() {
 }
 
 void IDAMCPServer::complete_pending_commands(const std::string& result) {
-    std::queue<MCPPendingCommand*> pending;
+    std::deque<std::shared_ptr<MCPPendingCommand>> pending;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         std::swap(pending, pending_commands_);
     }
 
     while (!pending.empty()) {
-        MCPPendingCommand* cmd = pending.front();
-        pending.pop();
-        if (!cmd || !cmd->done_mutex || !cmd->done_cv) {
+        auto cmd = pending.front();
+        pending.pop_front();
+        if (!cmd) {
             continue;
         }
 
         {
-            std::lock_guard<std::mutex> lock(*cmd->done_mutex);
+            std::lock_guard<std::mutex> lock(cmd->done_mutex);
             if (!cmd->completed) {
                 cmd->result = result;
                 cmd->completed = true;
             }
         }
-        cmd->done_cv->notify_one();
+        cmd->done_cv.notify_one();
     }
 }
 

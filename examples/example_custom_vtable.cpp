@@ -71,8 +71,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Get SQLite handle for registration
-    sqlite3* db = session.handle();
+    idasql::QueryEngine* engine = session.engine();
+    if (!engine) {
+        std::cerr << "Error: session query engine is not available\n";
+        return 1;
+    }
+    xsql::Database& db = engine->database();
 
     // =========================================================================
     // Step 2: Register your custom table
@@ -81,11 +85,13 @@ int main(int argc, char* argv[]) {
     // Create the table definition (must outlive the registration)
     static auto user_funcs_def = make_user_functions_table();
 
-    // Register the vtable module with SQLite
-    idasql::register_vtable(db, "user_functions_module", &user_funcs_def);
-
-    // Create the actual table instance
-    idasql::create_vtable(db, "user_functions", "user_functions_module");
+    // Register the virtual table module and create an instance.
+    if (!db.register_table("user_functions_module", &user_funcs_def)
+        || !db.create_table("user_functions", "user_functions_module"))
+    {
+        std::cerr << "Error: failed to register custom table: " << db.last_error() << "\n";
+        return 1;
+    }
 
     std::cout << "Registered custom table: user_functions\n\n";
 

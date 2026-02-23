@@ -25,6 +25,14 @@ endif()
 include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
+# Make imported IDA SDK targets globally visible so sibling directories
+# (e.g. additional test or example targets) can link against them.
+foreach(_idasdk_imported_target idasdk::plugin idasdk::loader idasdk::procmod idasdk::idalib)
+    if(TARGET ${_idasdk_imported_target})
+        set_property(TARGET ${_idasdk_imported_target} PROPERTY IMPORTED_GLOBAL TRUE)
+    endif()
+endforeach()
+
 # ============================================================================
 # HTTP Server Support - must be set BEFORE libxsql
 # ============================================================================
@@ -39,10 +47,10 @@ set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
 # ============================================================================
 
 if(TARGET xsql::xsql)
-    # Monorepo: already available from parent
+    # Parent project: already available from parent
     message(STATUS "idasql: Using xsql::xsql from parent project")
 elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../libxsql/CMakeLists.txt")
-    # Monorepo: sibling directory (private test infrastructure)
+    # Parent project: sibling directory
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
     message(STATUS "idasql: Added libxsql from sibling directory")
 else()
@@ -68,6 +76,24 @@ option(IDASQL_WITH_AI_AGENT "Build with AI agent support (libagents)" ON)
 
 if(IDASQL_WITH_AI_AGENT)
     message(STATUS "idasql: Building with AI agent support via libagents")
+
+    # Prompt header generation is required when AI agent support is enabled.
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(PROMPT_MD "${CMAKE_CURRENT_SOURCE_DIR}/prompts/idasql_agent.md")
+    set(IDASQL_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated" CACHE INTERNAL "")
+    set(PROMPT_HPP "${IDASQL_GENERATED_INCLUDE_DIR}/idasql_agent_prompt.hpp")
+
+    file(MAKE_DIRECTORY ${IDASQL_GENERATED_INCLUDE_DIR})
+
+    add_custom_command(
+        OUTPUT ${PROMPT_HPP}
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_prompt.py
+            ${PROMPT_MD} ${PROMPT_HPP}
+        DEPENDS ${PROMPT_MD}
+        COMMENT "Checking/regenerating idasql_agent_prompt.hpp"
+    )
+    add_custom_target(generate_prompt DEPENDS ${PROMPT_HPP})
 
     # libagents build options
     set(LIBAGENTS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -113,22 +139,6 @@ if(IDASQL_WITH_AI_AGENT)
         endif()
     endforeach()
 
-    # Generate prompt header if needed (conditional on source file age)
-    find_package(Python3 COMPONENTS Interpreter)
-    if(Python3_FOUND)
-        set(PROMPT_MD "${CMAKE_CURRENT_SOURCE_DIR}/prompts/idasql_agent.md")
-        set(PROMPT_HPP "${CMAKE_CURRENT_SOURCE_DIR}/src/common/idasql_agent_prompt.hpp")
-
-        add_custom_command(
-            OUTPUT ${PROMPT_HPP}
-            COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_prompt.py
-                ${PROMPT_MD} ${PROMPT_HPP}
-            DEPENDS ${PROMPT_MD}
-            COMMENT "Checking/regenerating idasql_agent_prompt.hpp"
-        )
-        add_custom_target(generate_prompt DEPENDS ${PROMPT_HPP})
-    endif()
 endif()
 
 # Add subdirectories

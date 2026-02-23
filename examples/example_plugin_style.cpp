@@ -60,41 +60,19 @@ void plugin_main() {
     }
 
     // =========================================================================
-    // OPTION 3: Callback-based streaming (for large result sets)
+    // OPTION 3: Aggregation query (wrapper-only API)
     // =========================================================================
 
-    std::cout << "\n=== Using Callback for Streaming ===\n";
+    std::cout << "\n=== Aggregate Query ===\n";
 
-    struct Counter {
-        int count = 0;
-        int total_size = 0;
-    } counter;
-
-    qe.exec(
-        "SELECT size FROM funcs",
-        [](void* data, int argc, char** argv, char**) -> int {
-            auto* c = static_cast<Counter*>(data);
-            c->count++;
-            if (argv[0]) c->total_size += std::atoi(argv[0]);
-            return 0;  // Continue
-        },
-        &counter
+    auto totals = qe.query(
+        "SELECT COUNT(*) as func_count, COALESCE(SUM(size), 0) as total_size "
+        "FROM funcs"
     );
-
-    std::cout << "Processed " << counter.count << " functions\n";
-    std::cout << "Total code size: " << counter.total_size << " bytes\n";
-
-    // =========================================================================
-    // Advanced: Raw SQLite handle access
-    // =========================================================================
-
-    std::cout << "\n=== Raw SQLite Handle ===\n";
-
-    sqlite3* db = qe.handle();
-    std::cout << "SQLite handle: " << (db ? "valid" : "null") << "\n";
-
-    // You can use db with any SQLite C API directly
-    // sqlite3_prepare_v2, sqlite3_bind, etc. for prepared statements
+    if (totals.row_count() > 0) {
+        std::cout << "Processed " << totals.rows[0][0] << " functions\n";
+        std::cout << "Total code size: " << totals.rows[0][1] << " bytes\n";
+    }
 }
 
 int main(int argc, char* argv[]) {

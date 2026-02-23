@@ -1,6 +1,8 @@
 #pragma once
 
 /**
+ * idasql_cli.hpp - IDA plugin CLI integration wrapper
+ *
  * IdasqlCLI - IDA plugin command line interface
  *
  * Wraps SessionHandler and provides cli_t integration for IDA.

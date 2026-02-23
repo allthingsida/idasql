@@ -1,5 +1,5 @@
 /**
- * ida_metadata.hpp - IDA database metadata as virtual tables
+ * metadata.hpp - IDA database metadata as virtual tables
  *
  * These tables provide metadata about the database itself, not entities within it.
  * Many of these work even without a fully loaded database.
@@ -40,28 +40,22 @@ struct MetadataItem {
 // DB_INFO Table - Database information
 // ============================================================================
 
-inline std::vector<MetadataItem>& get_db_info_cache() {
-    static std::vector<MetadataItem> cache;
-    return cache;
-}
-
-inline void rebuild_db_info_cache() {
-    auto& cache = get_db_info_cache();
-    cache.clear();
+inline void collect_db_info(std::vector<MetadataItem>& rows) {
+    rows.clear();
 
     auto add_str = [&](const char* k, const std::string& v) {
-        cache.push_back({k, v, "string"});
+        rows.push_back({k, v, "string"});
     };
     auto add_int = [&](const char* k, int64_t v) {
-        cache.push_back({k, std::to_string(v), "int"});
+        rows.push_back({k, std::to_string(v), "int"});
     };
     auto add_hex = [&](const char* k, uint64_t v) {
         char buf[32];
         qsnprintf(buf, sizeof(buf), "0x%llX", (unsigned long long)v);
-        cache.push_back({k, buf, "hex"});
+        rows.push_back({k, buf, "hex"});
     };
     auto add_bool = [&](const char* k, bool v) {
-        cache.push_back({k, v ? "true" : "false", "bool"});
+        rows.push_back({k, v ? "true" : "false", "bool"});
     };
 
     // Processor info
@@ -87,23 +81,21 @@ inline void rebuild_db_info_cache() {
     add_int("version", IDA_SDK_VERSION);
 }
 
-inline VTableDef define_db_info() {
-    return table("db_info")
-        .count([]() {
-            rebuild_db_info_cache();
-            return get_db_info_cache().size();
+inline CachedTableDef<MetadataItem> define_db_info() {
+    return cached_table<MetadataItem>("db_info")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t { return 16; })
+        .cache_builder([](std::vector<MetadataItem>& rows) {
+            collect_db_info(rows);
         })
-        .column_text("key", [](size_t i) -> std::string {
-            auto& cache = get_db_info_cache();
-            return i < cache.size() ? cache[i].key : "";
+        .column_text("key", [](const MetadataItem& row) -> std::string {
+            return row.key;
         })
-        .column_text("value", [](size_t i) -> std::string {
-            auto& cache = get_db_info_cache();
-            return i < cache.size() ? cache[i].value : "";
+        .column_text("value", [](const MetadataItem& row) -> std::string {
+            return row.value;
         })
-        .column_text("type", [](size_t i) -> std::string {
-            auto& cache = get_db_info_cache();
-            return i < cache.size() ? cache[i].type : "";
+        .column_text("type", [](const MetadataItem& row) -> std::string {
+            return row.type;
         })
         .build();
 }
@@ -112,20 +104,14 @@ inline VTableDef define_db_info() {
 // IDA_INFO Table - IDA analysis flags (from inf structure)
 // ============================================================================
 
-inline std::vector<MetadataItem>& get_ida_info_cache() {
-    static std::vector<MetadataItem> cache;
-    return cache;
-}
-
-inline void rebuild_ida_info_cache() {
-    auto& cache = get_ida_info_cache();
-    cache.clear();
+inline void collect_ida_info(std::vector<MetadataItem>& rows) {
+    rows.clear();
 
     auto add_bool = [&](const char* k, bool v) {
-        cache.push_back({k, v ? "1" : "0", "bool"});
+        rows.push_back({k, v ? "1" : "0", "bool"});
     };
     auto add_int = [&](const char* k, int64_t v) {
-        cache.push_back({k, std::to_string(v), "int"});
+        rows.push_back({k, std::to_string(v), "int"});
     };
 
     // Analysis flags
@@ -144,23 +130,21 @@ inline void rebuild_ida_info_cache() {
     add_int("max_autoname_len", inf_get_max_autoname_len());
 }
 
-inline VTableDef define_ida_info() {
-    return table("ida_info")
-        .count([]() {
-            rebuild_ida_info_cache();
-            return get_ida_info_cache().size();
+inline CachedTableDef<MetadataItem> define_ida_info() {
+    return cached_table<MetadataItem>("ida_info")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t { return 16; })
+        .cache_builder([](std::vector<MetadataItem>& rows) {
+            collect_ida_info(rows);
         })
-        .column_text("key", [](size_t i) -> std::string {
-            auto& cache = get_ida_info_cache();
-            return i < cache.size() ? cache[i].key : "";
+        .column_text("key", [](const MetadataItem& row) -> std::string {
+            return row.key;
         })
-        .column_text("value", [](size_t i) -> std::string {
-            auto& cache = get_ida_info_cache();
-            return i < cache.size() ? cache[i].value : "";
+        .column_text("value", [](const MetadataItem& row) -> std::string {
+            return row.value;
         })
-        .column_text("type", [](size_t i) -> std::string {
-            auto& cache = get_ida_info_cache();
-            return i < cache.size() ? cache[i].type : "";
+        .column_text("type", [](const MetadataItem& row) -> std::string {
+            return row.type;
         })
         .build();
 }
@@ -170,8 +154,8 @@ inline VTableDef define_ida_info() {
 // ============================================================================
 
 struct MetadataRegistry {
-    VTableDef db_info;
-    VTableDef ida_info;
+    CachedTableDef<MetadataItem> db_info;
+    CachedTableDef<MetadataItem> ida_info;
 
     MetadataRegistry()
         : db_info(define_db_info())
@@ -179,10 +163,10 @@ struct MetadataRegistry {
     {}
 
     void register_all(xsql::Database& db) {
-        db.register_table("ida_db_info", &db_info);
+        db.register_cached_table("ida_db_info", &db_info);
         db.create_table("db_info", "ida_db_info");
 
-        db.register_table("ida_ida_info", &ida_info);
+        db.register_cached_table("ida_ida_info", &ida_info);
         db.create_table("ida_info", "ida_ida_info");
     }
 };

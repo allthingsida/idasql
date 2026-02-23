@@ -17,6 +17,7 @@ set_target_properties(idasql_cli PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${IDABIN}"
     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${IDABIN}"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${IDABIN}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${IDABIN}"
 )
 
 # Add Windows manifest for UTF-8 support (Windows 10 1903+)
@@ -28,6 +29,7 @@ endif()
 
 # Platform-specific settings
 if(MSVC)
+    target_compile_options(idasql_cli PRIVATE /bigobj)
     file(TO_NATIVE_PATH "${IDABIN}" IDABIN_NATIVE)
     set_target_properties(idasql_cli PROPERTIES
         VS_DEBUGGER_ENVIRONMENT "PATH=${IDABIN_NATIVE};%PATH%"
@@ -60,6 +62,7 @@ if(IDASQL_WITH_AI_AGENT)
     target_include_directories(idasql_cli PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common
         ${CMAKE_CURRENT_SOURCE_DIR}/../../external/libagents/external/fastmcpp/include
+        ${IDASQL_GENERATED_INCLUDE_DIR}
     )
     target_link_libraries(idasql_cli PRIVATE libagents fastmcpp_core)
     target_compile_definitions(idasql_cli PRIVATE IDASQL_HAS_AI_AGENT)

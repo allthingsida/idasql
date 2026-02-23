@@ -1,5 +1,5 @@
 /**
- * ida_vtable_policy.hpp - Policy and configuration system for IDASQL
+ * vtable_policy.hpp - Policy and configuration system for IDASQL
  *
  * This allows passing options to virtual tables via:
  *   1. Module arguments: CREATE VIRTUAL TABLE funcs USING ida_funcs(cache=off)
@@ -180,7 +180,7 @@ inline void idasql_config_func(xsql::FunctionContext& ctx, int argc, xsql::Funct
 
 // Register the config function with SQLite
 inline bool register_config_function(xsql::Database& db) {
-    return db.register_function("idasql_config", -1, xsql::ScalarFn(idasql_config_func)) == SQLITE_OK;
+    return xsql::is_ok(db.register_function("idasql_config", -1, xsql::ScalarFn(idasql_config_func)));
 }
 
 // ============================================================================
@@ -201,7 +201,7 @@ inline bool create_config_table(xsql::Database& db) {
             ('verbose', '0', 'Debug output: 0 or 1');
     )";
 
-    return db.exec(sql) == SQLITE_OK;
+    return xsql::is_ok(db.exec(sql));
 }
 
 // Sync config from table to memory

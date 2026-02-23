@@ -1,4 +1,5 @@
 #include "http_server.hpp"
+#include <idasql/runtime_settings.hpp>
 
 #include <sstream>
 
@@ -39,8 +40,21 @@ int IDAHTTPServer::start(int port, HTTPQueryCallback query_cb,
     config.bind_address = bind_addr;
     config.query_fn = std::move(query_cb);
     config.use_queue = use_queue;
+    config.queue_admission_timeout_ms_fn = []() {
+        return idasql::runtime_settings().queue_admission_timeout_ms();
+    };
+    config.max_queue_fn = []() {
+        return idasql::runtime_settings().max_queue();
+    };
     config.status_fn = []() {
-        return xsql::json{{"mode", "repl"}};
+        const auto settings = idasql::runtime_settings().snapshot();
+        return xsql::json{
+            {"mode", "repl"},
+            {"query_timeout_ms", settings.query_timeout_ms},
+            {"queue_admission_timeout_ms", settings.queue_admission_timeout_ms},
+            {"max_queue", settings.max_queue},
+            {"hints_enabled", settings.hints_enabled ? 1 : 0}
+        };
     };
 
     impl_ = std::make_unique<xsql::thinclient::http_query_server>(config);

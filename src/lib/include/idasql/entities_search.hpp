@@ -1,39 +1,27 @@
 /**
- * entities_search.hpp - Table-valued function for unified entity search
+ * entities_search.hpp - Grep-style entity search table
  *
- * Provides the `jump_entities` virtual table for "Jump to Anything" functionality.
- * This is an eponymous virtual table that acts like a table-valued function:
+ * Usage:
+ *   SELECT name, kind FROM grep WHERE pattern = 'main' LIMIT 20;
+ *   SELECT * FROM grep WHERE pattern = 'sub%' AND kind = 'function';
  *
- *   SELECT * FROM jump_entities('pattern', 'mode') LIMIT 10;
- *
- * Or equivalently:
- *
- *   SELECT * FROM jump_entities WHERE pattern = 'main' AND mode = 'prefix' LIMIT 10;
- *
- * Parameters:
- *   pattern - Search pattern (required)
- *   mode    - 'prefix' (LIKE 'x%') or 'contains' (LIKE '%x%')
- *
- * Columns returned:
- *   name        - Entity name
- *   kind        - 'function', 'label', 'segment', 'struct', 'union', 'enum', 'member', 'enum_member'
- *   address     - Address (for functions, labels, segments) or NULL
- *   ordinal     - Type ordinal (for types, members) or NULL
- *   parent_name - Parent type name (for members) or NULL
- *   full_name   - Fully qualified name (parent.member for members)
- *
- * The table lazily iterates through source tables, stopping when LIMIT is reached.
+ * Pattern behavior:
+ *   - Plain text: case-insensitive contains match (auto '%text%')
+ *   - '%' and '_' : SQL LIKE wildcards
+ *   - '*' is accepted and normalized to '%'
  */
 
 #pragma once
 
 #include <idasql/platform.hpp>
 
+#include <idasql/vtable.hpp>
 #include <xsql/database.hpp>
-#include <string>
-#include <cstring>
-#include <cctype>
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <memory>
+#include <string>
 
 #include <idasql/platform_undef.hpp>
 
@@ -47,9 +35,91 @@
 namespace idasql {
 namespace search {
 
-// ============================================================================
-// Entity Sources - each represents one category of searchable entities
-// ============================================================================
+struct EntityRow {
+    std::string name;
+    std::string kind;
+    ea_t address = BADADDR;
+    uint32 ordinal = 0;
+    std::string parent_name;
+    std::string full_name;
+    bool has_address = false;
+    bool has_ordinal = false;
+};
+
+class NamePattern {
+    std::string pattern_;
+    bool valid_ = false;
+
+public:
+    explicit NamePattern(const std::string& raw) {
+        std::string lowered = to_lower(raw);
+        std::replace(lowered.begin(), lowered.end(), '*', '%');
+        if (lowered.empty()) {
+            return;
+        }
+
+        if (!has_wildcards(lowered)) {
+            // Grep-style default: plain text means "contains".
+            lowered = "%" + lowered + "%";
+        }
+
+        pattern_ = std::move(lowered);
+        valid_ = true;
+    }
+
+    bool valid() const { return valid_; }
+
+    bool matches(const std::string& value) const {
+        if (!valid_) return false;
+        return like_match(to_lower(value), pattern_);
+    }
+
+private:
+    static std::string to_lower(const std::string& s) {
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s) {
+            out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+        return out;
+    }
+
+    static bool has_wildcards(const std::string& s) {
+        return s.find('%') != std::string::npos || s.find('_') != std::string::npos;
+    }
+
+    // SQL LIKE matcher supporting '%' and '_'
+    static bool like_match(const std::string& text, const std::string& pattern) {
+        size_t ti = 0;
+        size_t pi = 0;
+        size_t star = std::string::npos;
+        size_t retry = 0;
+
+        while (ti < text.size()) {
+            if (pi < pattern.size() && (pattern[pi] == '_' || pattern[pi] == text[ti])) {
+                ++ti;
+                ++pi;
+                continue;
+            }
+            if (pi < pattern.size() && pattern[pi] == '%') {
+                star = pi++;
+                retry = ti;
+                continue;
+            }
+            if (star != std::string::npos) {
+                pi = star + 1;
+                ti = ++retry;
+                continue;
+            }
+            return false;
+        }
+
+        while (pi < pattern.size() && pattern[pi] == '%') {
+            ++pi;
+        }
+        return pi == pattern.size();
+    }
+};
 
 enum class EntitySource {
     Functions = 0,
@@ -63,33 +133,12 @@ enum class EntitySource {
     Done
 };
 
-// ============================================================================
-// Entity Row - one result row
-// ============================================================================
-
-struct EntityRow {
-    std::string name;
-    std::string kind;
-    ea_t address = BADADDR;
-    uint32 ordinal = 0;
-    std::string parent_name;
-    std::string full_name;
-    bool has_address = false;
-    bool has_ordinal = false;
-};
-
-// ============================================================================
-// Entity Generator - iterates through all matching entities
-// ============================================================================
-
 class EntityGenerator {
-    std::string pattern_;
-    bool contains_mode_;
+    NamePattern pattern_;
 
     EntitySource current_source_ = EntitySource::Functions;
     size_t current_index_ = 0;
     EntityRow current_row_;
-    bool has_current_ = false;
 
     // For type iteration
     uint32 type_ordinal_ = 0;
@@ -97,18 +146,15 @@ class EntityGenerator {
     tinfo_t current_type_;
 
 public:
-    EntityGenerator(const std::string& pattern, bool contains_mode)
-        : pattern_(to_lower(pattern)), contains_mode_(contains_mode) {}
+    explicit EntityGenerator(const std::string& pattern) : pattern_(pattern) {}
 
     bool next() {
-        has_current_ = false;
+        if (!pattern_.valid()) return false;
 
         while (current_source_ != EntitySource::Done) {
             if (advance_current_source()) {
-                has_current_ = true;
                 return true;
             }
-            // Move to next source
             current_source_ = static_cast<EntitySource>(static_cast<int>(current_source_) + 1);
             current_index_ = 0;
             type_ordinal_ = 0;
@@ -118,38 +164,23 @@ public:
     }
 
     const EntityRow& current() const { return current_row_; }
-    bool eof() const { return !has_current_ && current_source_ == EntitySource::Done; }
 
 private:
-    static std::string to_lower(const std::string& s) {
-        std::string result;
-        result.reserve(s.size());
-        for (char c : s) {
-            result += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-        return result;
-    }
-
     bool matches(const std::string& name) const {
-        std::string lower_name = to_lower(name);
-        if (contains_mode_) {
-            return lower_name.find(pattern_) != std::string::npos;
-        } else {
-            return lower_name.compare(0, pattern_.size(), pattern_) == 0;
-        }
+        return pattern_.matches(name);
     }
 
     bool advance_current_source() {
         switch (current_source_) {
-            case EntitySource::Functions:  return advance_functions();
-            case EntitySource::Labels:     return advance_labels();
-            case EntitySource::Segments:   return advance_segments();
-            case EntitySource::Structs:    return advance_structs();
-            case EntitySource::Unions:     return advance_unions();
-            case EntitySource::Enums:      return advance_enums();
-            case EntitySource::Members:    return advance_members();
+            case EntitySource::Functions:   return advance_functions();
+            case EntitySource::Labels:      return advance_labels();
+            case EntitySource::Segments:    return advance_segments();
+            case EntitySource::Structs:     return advance_structs();
+            case EntitySource::Unions:      return advance_unions();
+            case EntitySource::Enums:       return advance_enums();
+            case EntitySource::Members:     return advance_members();
             case EntitySource::EnumMembers: return advance_enum_members();
-            case EntitySource::Done:       return false;
+            case EntitySource::Done:        return false;
         }
         return false;
     }
@@ -179,8 +210,6 @@ private:
     }
 
     bool advance_labels() {
-        // Iterate named locations that aren't function starts
-        // Use get_nlist_size/get_nlist_ea/get_nlist_name
         size_t count = get_nlist_size();
         while (current_index_ < count) {
             ea_t ea = get_nlist_ea(current_index_);
@@ -189,7 +218,6 @@ private:
 
             if (!name || !*name) continue;
 
-            // Skip if it's a function start
             func_t* fn = get_func(ea);
             if (fn && fn->start_ea == ea) continue;
 
@@ -265,24 +293,14 @@ private:
         return false;
     }
 
-    bool advance_structs() {
-        return advance_types_of_kind("struct", true, false, false);
-    }
-
-    bool advance_unions() {
-        return advance_types_of_kind("union", false, true, false);
-    }
-
-    bool advance_enums() {
-        return advance_types_of_kind("enum", false, false, true);
-    }
+    bool advance_structs() { return advance_types_of_kind("struct", true, false, false); }
+    bool advance_unions()  { return advance_types_of_kind("union", false, true, false); }
+    bool advance_enums()   { return advance_types_of_kind("enum", false, false, true); }
 
     bool advance_members() {
-        // Iterate struct/union members
         uint32 count = get_ordinal_count(nullptr);
 
         while (type_ordinal_ < count) {
-            // Get current type if not already loaded
             if (!current_type_.get_numbered_type(nullptr, type_ordinal_)) {
                 type_ordinal_++;
                 member_index_ = 0;
@@ -321,7 +339,6 @@ private:
                 }
             }
 
-            // Exhausted members of this type, move to next
             type_ordinal_++;
             member_index_ = 0;
         }
@@ -329,7 +346,6 @@ private:
     }
 
     bool advance_enum_members() {
-        // Iterate enum values
         uint32 count = get_ordinal_count(nullptr);
 
         while (type_ordinal_ < count) {
@@ -378,254 +394,96 @@ private:
     }
 };
 
-// ============================================================================
-// SQLite Virtual Table Implementation
-// ============================================================================
+class GrepIterator : public xsql::RowIterator {
+    EntityGenerator generator_;
+    bool started_ = false;
+    bool valid_ = false;
+    int64_t rowid_ = -1;
 
-// Column indices
-enum {
-    COL_NAME = 0,
-    COL_KIND,
-    COL_ADDRESS,
-    COL_ORDINAL,
-    COL_PARENT_NAME,
-    COL_FULL_NAME,
-    COL_PATTERN,    // HIDDEN
-    COL_MODE        // HIDDEN
-};
+public:
+    explicit GrepIterator(const std::string& pattern)
+        : generator_(pattern) {}
 
-struct JumpEntitiesVtab : sqlite3_vtab {
-    // No extra data needed
-};
-
-struct JumpEntitiesCursor : sqlite3_vtab_cursor {
-    std::unique_ptr<EntityGenerator> generator;
-    int64_t rowid = 0;
-};
-
-inline int je_connect(sqlite3* db, void*, int, const char* const*,
-                      sqlite3_vtab** ppVtab, char**) {
-    int rc = sqlite3_declare_vtab(db,
-        "CREATE TABLE x("
-        "  name TEXT,"
-        "  kind TEXT,"
-        "  address INTEGER,"
-        "  ordinal INTEGER,"
-        "  parent_name TEXT,"
-        "  full_name TEXT,"
-        "  pattern TEXT HIDDEN,"
-        "  mode TEXT HIDDEN"
-        ")"
-    );
-    if (rc != SQLITE_OK) return rc;
-
-    auto* vtab = new JumpEntitiesVtab();
-    memset(static_cast<sqlite3_vtab*>(vtab), 0, sizeof(sqlite3_vtab));
-    *ppVtab = vtab;
-    return SQLITE_OK;
-}
-
-inline int je_disconnect(sqlite3_vtab* pVtab) {
-    delete static_cast<JumpEntitiesVtab*>(pVtab);
-    return SQLITE_OK;
-}
-
-inline int je_open(sqlite3_vtab*, sqlite3_vtab_cursor** ppCursor) {
-    auto* cursor = new JumpEntitiesCursor();
-    memset(static_cast<sqlite3_vtab_cursor*>(cursor), 0, sizeof(sqlite3_vtab_cursor));
-    *ppCursor = cursor;
-    return SQLITE_OK;
-}
-
-inline int je_close(sqlite3_vtab_cursor* pCursor) {
-    delete static_cast<JumpEntitiesCursor*>(pCursor);
-    return SQLITE_OK;
-}
-
-inline int je_best_index(sqlite3_vtab*, sqlite3_index_info* pInfo) {
-    int pattern_idx = -1;
-    int mode_idx = -1;
-
-    // Look for constraints on the hidden columns
-    for (int i = 0; i < pInfo->nConstraint; i++) {
-        const auto& c = pInfo->aConstraint[i];
-        if (!c.usable) continue;
-        if (c.op != SQLITE_INDEX_CONSTRAINT_EQ) continue;
-
-        if (c.iColumn == COL_PATTERN) pattern_idx = i;
-        if (c.iColumn == COL_MODE) mode_idx = i;
+    bool next() override {
+        started_ = true;
+        valid_ = generator_.next();
+        if (valid_) {
+            ++rowid_;
+        }
+        return valid_;
     }
 
-    if (pattern_idx >= 0) {
-        // We have a pattern - this is usable
-        pInfo->aConstraintUsage[pattern_idx].argvIndex = 1;
-        pInfo->aConstraintUsage[pattern_idx].omit = 1;
+    bool eof() const override {
+        return started_ && !valid_;
+    }
 
-        if (mode_idx >= 0) {
-            pInfo->aConstraintUsage[mode_idx].argvIndex = 2;
-            pInfo->aConstraintUsage[mode_idx].omit = 1;
-            pInfo->idxNum = 2;  // Both pattern and mode
-        } else {
-            pInfo->idxNum = 1;  // Pattern only (default to prefix mode)
+    void column(xsql::FunctionContext& ctx, int col) override {
+        if (!valid_) {
+            ctx.result_null();
+            return;
         }
 
-        pInfo->estimatedCost = 1000.0;
-        pInfo->estimatedRows = 100;
-    } else {
-        // No pattern constraint - discourage full table scan
-        pInfo->estimatedCost = 1000000.0;
-        pInfo->estimatedRows = 100000;
-        pInfo->idxNum = 0;
-    }
-
-    return SQLITE_OK;
-}
-
-inline int je_filter(sqlite3_vtab_cursor* pCursor, int idxNum, const char*,
-                     int argc, sqlite3_value** argv) {
-    auto* cursor = static_cast<JumpEntitiesCursor*>(pCursor);
-    cursor->generator.reset();
-    cursor->rowid = 0;
-
-    if (idxNum == 0 || argc < 1) {
-        // No pattern - return empty result
-        return SQLITE_OK;
-    }
-
-    const char* pattern = reinterpret_cast<const char*>(sqlite3_value_text(argv[0]));
-    if (!pattern || !*pattern) {
-        return SQLITE_OK;
-    }
-
-    bool contains_mode = false;
-    if (argc >= 2 && idxNum >= 2) {
-        const char* mode = reinterpret_cast<const char*>(sqlite3_value_text(argv[1]));
-        if (mode && strcmp(mode, "contains") == 0) {
-            contains_mode = true;
+        const EntityRow& row = generator_.current();
+        switch (col) {
+            case 0: // pattern (input column)
+                ctx.result_null();
+                break;
+            case 1:
+                ctx.result_text(row.name);
+                break;
+            case 2:
+                ctx.result_text(row.kind);
+                break;
+            case 3:
+                if (row.has_address) ctx.result_int64(static_cast<int64_t>(row.address));
+                else ctx.result_null();
+                break;
+            case 4:
+                if (row.has_ordinal) ctx.result_int64(row.ordinal);
+                else ctx.result_null();
+                break;
+            case 5:
+                if (row.parent_name.empty()) ctx.result_null();
+                else ctx.result_text(row.parent_name);
+                break;
+            case 6:
+                ctx.result_text(row.full_name);
+                break;
+            default:
+                ctx.result_null();
+                break;
         }
     }
 
-    cursor->generator = std::make_unique<EntityGenerator>(pattern, contains_mode);
-    cursor->generator->next();  // Position to first row
-
-    return SQLITE_OK;
-}
-
-inline int je_next(sqlite3_vtab_cursor* pCursor) {
-    auto* cursor = static_cast<JumpEntitiesCursor*>(pCursor);
-    if (cursor->generator) {
-        cursor->generator->next();
-        cursor->rowid++;
+    int64_t rowid() const override {
+        return rowid_;
     }
-    return SQLITE_OK;
+};
+
+inline VTableDef define_grep() {
+    return table("grep")
+        .count([]() -> size_t {
+            // Full scans without a pattern are disabled.
+            return 0;
+        })
+        // Required filter input.
+        .column_text("pattern", [](size_t) -> std::string { return ""; })
+        // Output columns.
+        .column_text("name", [](size_t) -> std::string { return ""; })
+        .column_text("kind", [](size_t) -> std::string { return ""; })
+        .column_int64("address", [](size_t) -> int64_t { return 0; })
+        .column_int64("ordinal", [](size_t) -> int64_t { return 0; })
+        .column_text("parent_name", [](size_t) -> std::string { return ""; })
+        .column_text("full_name", [](size_t) -> std::string { return ""; })
+        .filter_eq_text("pattern", [](const char* pattern) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<GrepIterator>(pattern ? pattern : "");
+        }, 25.0, 100.0)
+        .build();
 }
 
-inline int je_eof(sqlite3_vtab_cursor* pCursor) {
-    auto* cursor = static_cast<JumpEntitiesCursor*>(pCursor);
-    if (!cursor->generator) return 1;
-    return cursor->generator->eof() ? 1 : 0;
-}
-
-inline int je_column(sqlite3_vtab_cursor* pCursor, sqlite3_context* ctx, int col) {
-    auto* cursor = static_cast<JumpEntitiesCursor*>(pCursor);
-    if (!cursor->generator || cursor->generator->eof()) {
-        sqlite3_result_null(ctx);
-        return SQLITE_OK;
-    }
-
-    const EntityRow& row = cursor->generator->current();
-
-    switch (col) {
-        case COL_NAME:
-            sqlite3_result_text(ctx, row.name.c_str(), -1, SQLITE_TRANSIENT);
-            break;
-        case COL_KIND:
-            sqlite3_result_text(ctx, row.kind.c_str(), -1, SQLITE_TRANSIENT);
-            break;
-        case COL_ADDRESS:
-            if (row.has_address) {
-                sqlite3_result_int64(ctx, static_cast<sqlite3_int64>(row.address));
-            } else {
-                sqlite3_result_null(ctx);
-            }
-            break;
-        case COL_ORDINAL:
-            if (row.has_ordinal) {
-                sqlite3_result_int64(ctx, row.ordinal);
-            } else {
-                sqlite3_result_null(ctx);
-            }
-            break;
-        case COL_PARENT_NAME:
-            if (!row.parent_name.empty()) {
-                sqlite3_result_text(ctx, row.parent_name.c_str(), -1, SQLITE_TRANSIENT);
-            } else {
-                sqlite3_result_null(ctx);
-            }
-            break;
-        case COL_FULL_NAME:
-            sqlite3_result_text(ctx, row.full_name.c_str(), -1, SQLITE_TRANSIENT);
-            break;
-        case COL_PATTERN:
-        case COL_MODE:
-            // Hidden columns - return null (they're inputs, not outputs)
-            sqlite3_result_null(ctx);
-            break;
-        default:
-            sqlite3_result_null(ctx);
-            break;
-    }
-    return SQLITE_OK;
-}
-
-inline int je_rowid(sqlite3_vtab_cursor* pCursor, sqlite3_int64* pRowid) {
-    auto* cursor = static_cast<JumpEntitiesCursor*>(pCursor);
-    *pRowid = cursor->rowid;
-    return SQLITE_OK;
-}
-
-// Module definition
-inline sqlite3_module& get_jump_entities_module() {
-    static sqlite3_module mod = {
-        0,              // iVersion
-        je_connect,     // xCreate
-        je_connect,     // xConnect
-        je_best_index,  // xBestIndex
-        je_disconnect,  // xDisconnect
-        je_disconnect,  // xDestroy
-        je_open,        // xOpen
-        je_close,       // xClose
-        je_filter,      // xFilter
-        je_next,        // xNext
-        je_eof,         // xEof
-        je_column,      // xColumn
-        je_rowid,       // xRowid
-        nullptr,        // xUpdate
-        nullptr,        // xBegin
-        nullptr,        // xSync
-        nullptr,        // xCommit
-        nullptr,        // xRollback
-        nullptr,        // xFindFunction
-        nullptr,        // xRename
-        nullptr,        // xSavepoint
-        nullptr,        // xRelease
-        nullptr,        // xRollbackTo
-        nullptr         // xShadowName
-    };
-    return mod;
-}
-
-/**
- * Register the jump_entities table-valued function.
- *
- * Usage after registration:
- *   SELECT * FROM jump_entities('pattern', 'prefix') LIMIT 10;
- *   SELECT * FROM jump_entities('main', 'contains');
- *   SELECT * FROM jump_entities WHERE pattern = 'sub' AND mode = 'prefix' LIMIT 20;
- */
-inline bool register_jump_entities(xsql::Database& db) {
-    int rc = sqlite3_create_module(db.handle(), "jump_entities", &get_jump_entities_module(), nullptr);
-    return rc == SQLITE_OK;
+inline bool register_grep_entities(xsql::Database& db) {
+    static VTableDef grep = define_grep();
+    return db.register_table("ida_grep", &grep) && db.create_table("grep", "ida_grep");
 }
 
 } // namespace search

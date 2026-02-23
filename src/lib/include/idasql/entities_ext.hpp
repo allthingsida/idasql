@@ -1,5 +1,5 @@
 /**
- * ida_entities_extended.hpp - Additional IDA entities as virtual tables
+ * entities_ext.hpp - Additional IDA entities as virtual tables
  *
  * This file provides additional virtual tables beyond the core entities.
  * These tables cover: fixups, hidden ranges, problems, function chunks,
@@ -47,45 +47,36 @@ struct FixupEntry {
     fixup_data_t data;
 };
 
-inline std::vector<FixupEntry>& get_fixups_cache() {
-    static std::vector<FixupEntry> cache;
-    return cache;
-}
-
-inline void rebuild_fixups_cache() {
-    auto& cache = get_fixups_cache();
-    cache.clear();
+inline void collect_fixups(std::vector<FixupEntry>& rows) {
+    rows.clear();
 
     for (ea_t ea = get_first_fixup_ea(); ea != BADADDR; ea = get_next_fixup_ea(ea)) {
         FixupEntry entry;
         entry.ea = ea;
         if (get_fixup(&entry.data, ea)) {
-            cache.push_back(entry);
+            rows.push_back(entry);
         }
     }
 }
 
-inline VTableDef define_fixups() {
-    return table("fixups")
-        .count([]() {
-            rebuild_fixups_cache();
-            return get_fixups_cache().size();
+inline CachedTableDef<FixupEntry> define_fixups() {
+    return cached_table<FixupEntry>("fixups")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t { return 512; })
+        .cache_builder([](std::vector<FixupEntry>& rows) {
+            collect_fixups(rows);
         })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& cache = get_fixups_cache();
-            return i < cache.size() ? cache[i].ea : 0;
+        .column_int64("address", [](const FixupEntry& row) -> int64_t {
+            return static_cast<int64_t>(row.ea);
         })
-        .column_int64("target", [](size_t i) -> int64_t {
-            auto& cache = get_fixups_cache();
-            return i < cache.size() ? cache[i].data.off : 0;
+        .column_int64("target", [](const FixupEntry& row) -> int64_t {
+            return static_cast<int64_t>(row.data.off);
         })
-        .column_int("type", [](size_t i) -> int {
-            auto& cache = get_fixups_cache();
-            return i < cache.size() ? cache[i].data.get_type() : 0;
+        .column_int("type", [](const FixupEntry& row) -> int {
+            return row.data.get_type();
         })
-        .column_int("flags", [](size_t i) -> int {
-            auto& cache = get_fixups_cache();
-            return i < cache.size() ? cache[i].data.get_flags() : 0;
+        .column_int("flags", [](const FixupEntry& row) -> int {
+            return row.data.get_flags();
         })
         .build();
 }
@@ -145,14 +136,8 @@ struct ProblemEntry {
     std::string type_name;
 };
 
-inline std::vector<ProblemEntry>& get_problems_cache() {
-    static std::vector<ProblemEntry> cache;
-    return cache;
-}
-
-inline void rebuild_problems_cache() {
-    auto& cache = get_problems_cache();
-    cache.clear();
+inline void collect_problems(std::vector<ProblemEntry>& rows) {
+    rows.clear();
 
     // Iterate all problem types
     for (int t = PR_NOBASE; t < PR_END; ++t) {
@@ -169,32 +154,29 @@ inline void rebuild_problems_cache() {
             if (get_problem_desc(&desc, ptype, ea) > 0) {
                 entry.description = desc.c_str();
             }
-            cache.push_back(entry);
+            rows.push_back(entry);
         }
     }
 }
 
-inline VTableDef define_problems() {
-    return table("problems")
-        .count([]() {
-            rebuild_problems_cache();
-            return get_problems_cache().size();
+inline CachedTableDef<ProblemEntry> define_problems() {
+    return cached_table<ProblemEntry>("problems")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t { return 512; })
+        .cache_builder([](std::vector<ProblemEntry>& rows) {
+            collect_problems(rows);
         })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& cache = get_problems_cache();
-            return i < cache.size() ? cache[i].ea : 0;
+        .column_int64("address", [](const ProblemEntry& row) -> int64_t {
+            return static_cast<int64_t>(row.ea);
         })
-        .column_int("type_id", [](size_t i) -> int {
-            auto& cache = get_problems_cache();
-            return i < cache.size() ? cache[i].type : 0;
+        .column_int("type_id", [](const ProblemEntry& row) -> int {
+            return row.type;
         })
-        .column_text("type", [](size_t i) -> std::string {
-            auto& cache = get_problems_cache();
-            return i < cache.size() ? cache[i].type_name : "";
+        .column_text("type", [](const ProblemEntry& row) -> std::string {
+            return row.type_name;
         })
-        .column_text("description", [](size_t i) -> std::string {
-            auto& cache = get_problems_cache();
-            return i < cache.size() ? cache[i].description : "";
+        .column_text("description", [](const ProblemEntry& row) -> std::string {
+            return row.description;
         })
         .build();
 }
@@ -250,14 +232,8 @@ struct SignatureEntry {
     int32 state;
 };
 
-inline std::vector<SignatureEntry>& get_signatures_cache() {
-    static std::vector<SignatureEntry> cache;
-    return cache;
-}
-
-inline void rebuild_signatures_cache() {
-    auto& cache = get_signatures_cache();
-    cache.clear();
+inline void collect_signatures(std::vector<SignatureEntry>& rows) {
+    rows.clear();
 
     int qty = get_idasgn_qty();
     for (int i = 0; i < qty; ++i) {
@@ -268,31 +244,28 @@ inline void rebuild_signatures_cache() {
         entry.state = get_idasgn_desc(&signame, &optlibs, i);
         entry.name = signame.c_str();
         entry.optlibs = optlibs.c_str();
-        cache.push_back(entry);
+        rows.push_back(entry);
     }
 }
 
-inline VTableDef define_signatures() {
-    return table("signatures")
-        .count([]() {
-            rebuild_signatures_cache();
-            return get_signatures_cache().size();
+inline CachedTableDef<SignatureEntry> define_signatures() {
+    return cached_table<SignatureEntry>("signatures")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t { return 128; })
+        .cache_builder([](std::vector<SignatureEntry>& rows) {
+            collect_signatures(rows);
         })
-        .column_int("index", [](size_t i) -> int {
-            auto& cache = get_signatures_cache();
-            return i < cache.size() ? cache[i].index : 0;
+        .column_int("index", [](const SignatureEntry& row) -> int {
+            return row.index;
         })
-        .column_text("name", [](size_t i) -> std::string {
-            auto& cache = get_signatures_cache();
-            return i < cache.size() ? cache[i].name : "";
+        .column_text("name", [](const SignatureEntry& row) -> std::string {
+            return row.name;
         })
-        .column_text("optlibs", [](size_t i) -> std::string {
-            auto& cache = get_signatures_cache();
-            return i < cache.size() ? cache[i].optlibs : "";
+        .column_text("optlibs", [](const SignatureEntry& row) -> std::string {
+            return row.optlibs;
         })
-        .column_int("state", [](size_t i) -> int {
-            auto& cache = get_signatures_cache();
-            return i < cache.size() ? cache[i].state : 0;
+        .column_int("state", [](const SignatureEntry& row) -> int {
+            return row.state;
         })
         .build();
 }
@@ -310,14 +283,8 @@ struct LocalTypeEntry {
     bool is_typedef;
 };
 
-inline std::vector<LocalTypeEntry>& get_local_types_cache() {
-    static std::vector<LocalTypeEntry> cache;
-    return cache;
-}
-
-inline void rebuild_local_types_cache() {
-    auto& cache = get_local_types_cache();
-    cache.clear();
+inline void collect_local_types(std::vector<LocalTypeEntry>& rows) {
+    rows.clear();
 
     til_t* ti = get_idati();
     if (!ti) return;
@@ -346,40 +313,35 @@ inline void rebuild_local_types_cache() {
             entry.is_typedef = false;
         }
 
-        cache.push_back(entry);
+        rows.push_back(entry);
         ++ord;
     }
 }
 
-inline VTableDef define_local_types() {
-    return table("local_types")
-        .count([]() {
-            rebuild_local_types_cache();
-            return get_local_types_cache().size();
+inline CachedTableDef<LocalTypeEntry> define_local_types() {
+    return cached_table<LocalTypeEntry>("local_types")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t { return 256; })
+        .cache_builder([](std::vector<LocalTypeEntry>& rows) {
+            collect_local_types(rows);
         })
-        .column_int("ordinal", [](size_t i) -> int {
-            auto& cache = get_local_types_cache();
-            return i < cache.size() ? cache[i].ordinal : 0;
+        .column_int("ordinal", [](const LocalTypeEntry& row) -> int {
+            return static_cast<int>(row.ordinal);
         })
-        .column_text("name", [](size_t i) -> std::string {
-            auto& cache = get_local_types_cache();
-            return i < cache.size() ? cache[i].name : "";
+        .column_text("name", [](const LocalTypeEntry& row) -> std::string {
+            return row.name;
         })
-        .column_text("type", [](size_t i) -> std::string {
-            auto& cache = get_local_types_cache();
-            return i < cache.size() ? cache[i].type_str : "";
+        .column_text("type", [](const LocalTypeEntry& row) -> std::string {
+            return row.type_str;
         })
-        .column_int("is_struct", [](size_t i) -> int {
-            auto& cache = get_local_types_cache();
-            return i < cache.size() ? (cache[i].is_struct ? 1 : 0) : 0;
+        .column_int("is_struct", [](const LocalTypeEntry& row) -> int {
+            return row.is_struct ? 1 : 0;
         })
-        .column_int("is_enum", [](size_t i) -> int {
-            auto& cache = get_local_types_cache();
-            return i < cache.size() ? (cache[i].is_enum ? 1 : 0) : 0;
+        .column_int("is_enum", [](const LocalTypeEntry& row) -> int {
+            return row.is_enum ? 1 : 0;
         })
-        .column_int("is_typedef", [](size_t i) -> int {
-            auto& cache = get_local_types_cache();
-            return i < cache.size() ? (cache[i].is_typedef ? 1 : 0) : 0;
+        .column_int("is_typedef", [](const LocalTypeEntry& row) -> int {
+            return row.is_typedef ? 1 : 0;
         })
         .build();
 }
@@ -425,12 +387,12 @@ inline VTableDef define_mappings() {
 // ============================================================================
 
 struct ExtendedRegistry {
-    VTableDef fixups;
+    CachedTableDef<FixupEntry> fixups;
     VTableDef hidden_ranges;
-    VTableDef problems;
+    CachedTableDef<ProblemEntry> problems;
     VTableDef fchunks;
-    VTableDef signatures;
-    VTableDef local_types;
+    CachedTableDef<SignatureEntry> signatures;
+    CachedTableDef<LocalTypeEntry> local_types;
     VTableDef mappings;
 
     ExtendedRegistry()
@@ -444,22 +406,22 @@ struct ExtendedRegistry {
     {}
 
     void register_all(xsql::Database& db) {
-        db.register_table("ida_fixups", &fixups);
+        db.register_cached_table("ida_fixups", &fixups);
         db.create_table("fixups", "ida_fixups");
 
         db.register_table("ida_hidden_ranges", &hidden_ranges);
         db.create_table("hidden_ranges", "ida_hidden_ranges");
 
-        db.register_table("ida_problems", &problems);
+        db.register_cached_table("ida_problems", &problems);
         db.create_table("problems", "ida_problems");
 
         db.register_table("ida_fchunks", &fchunks);
         db.create_table("fchunks", "ida_fchunks");
 
-        db.register_table("ida_signatures", &signatures);
+        db.register_cached_table("ida_signatures", &signatures);
         db.create_table("signatures", "ida_signatures");
 
-        db.register_table("ida_local_types", &local_types);
+        db.register_cached_table("ida_local_types", &local_types);
         db.create_table("local_types", "ida_local_types");
 
         db.register_table("ida_mappings", &mappings);

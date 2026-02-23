@@ -84,11 +84,7 @@ template<typename RowData>
 using CachedCursor = xsql::CachedCursor<RowData>;
 
 // Cached table registration
-template<typename RowData>
-inline bool register_cached_vtable(sqlite3* db, const char* module_name,
-                                   const CachedTableDef<RowData>* def) {
-    return xsql::register_cached_vtable(db, module_name, def);
-}
+using xsql::register_cached_vtable;
 
 // Cached table builder
 template<typename RowData>
@@ -112,11 +108,7 @@ using GeneratorTableDef = xsql::GeneratorTableDef<RowData>;
 template<typename RowData>
 using GeneratorCursor = xsql::GeneratorCursor<RowData>;
 
-template<typename RowData>
-inline bool register_generator_vtable(sqlite3* db, const char* module_name,
-                                      const GeneratorTableDef<RowData>* def) {
-    return xsql::register_generator_vtable(db, module_name, def);
-}
+using xsql::register_generator_vtable;
 
 template<typename RowData>
 using GeneratorTableBuilder = xsql::GeneratorTableBuilder<RowData>;

@@ -69,14 +69,8 @@ struct TypeEntry {
     std::string resolved;  // For typedefs: what it resolves to
 };
 
-inline std::vector<TypeEntry>& get_types_cache() {
-    static std::vector<TypeEntry> cache;
-    return cache;
-}
-
-inline void rebuild_types_cache() {
-    auto& cache = get_types_cache();
-    cache.clear();
+inline void collect_types(std::vector<TypeEntry>& rows) {
+    rows.clear();
 
     til_t* ti = get_idati();
     if (!ti) return;
@@ -141,7 +135,7 @@ inline void rebuild_types_cache() {
             entry.is_array = false;
         }
 
-        cache.push_back(entry);
+        rows.push_back(std::move(entry));
     }
 }
 
@@ -149,110 +143,89 @@ inline void rebuild_types_cache() {
 // TYPES Table - All local types (enhanced)
 // ============================================================================
 
-inline VTableDef define_types() {
-    return table("types")
+inline CachedTableDef<TypeEntry> define_types() {
+    return cached_table<TypeEntry>("types")
+        .no_shared_cache()
         .on_modify(ida_undo_hook)
-        .count([]() {
-            rebuild_types_cache();
-            return get_types_cache().size();
+        .estimate_rows([]() -> size_t {
+            til_t* ti = get_idati();
+            return ti ? static_cast<size_t>(get_ordinal_limit(ti)) : 0;
         })
-        .column_int("ordinal", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].ordinal : 0;
+        .cache_builder([](std::vector<TypeEntry>& rows) {
+            collect_types(rows);
+        })
+        .column_int("ordinal", [](const TypeEntry& row) -> int {
+            return static_cast<int>(row.ordinal);
         })
         .column_text_rw("name",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_types_cache();
-                return i < cache.size() ? cache[i].name : "";
+            [](const TypeEntry& row) -> std::string {
+                return row.name;
             },
-            // Setter - rename type
-            [](size_t i, const char* new_name) -> bool {
-                auto& cache = get_types_cache();
-                if (i >= cache.size()) return false;
+            [](TypeEntry& row, const char* new_name) -> bool {
+                if (!new_name || !new_name[0]) return false;
 
                 til_t* ti = get_idati();
                 if (!ti) return false;
 
-                // Get the type
                 tinfo_t tif;
-                if (!tif.get_numbered_type(ti, cache[i].ordinal)) return false;
+                if (!tif.get_numbered_type(ti, row.ordinal)) return false;
 
-                // Rename it using tinfo_t::rename_type()
-                return tif.rename_type(new_name) == TERR_OK;
+                bool ok = tif.rename_type(new_name) == TERR_OK;
+                if (ok) row.name = new_name;
+                return ok;
             })
-        .column_text("kind", [](size_t i) -> std::string {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].kind : "";
+        .column_text("kind", [](const TypeEntry& row) -> std::string {
+            return row.kind;
         })
-        .column_int64("size", [](size_t i) -> int64_t {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].size : -1;
+        .column_int64("size", [](const TypeEntry& row) -> int64_t {
+            return row.size;
         })
-        .column_int("alignment", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].alignment : 0;
+        .column_int("alignment", [](const TypeEntry& row) -> int {
+            return row.alignment;
         })
-        .column_int("is_struct", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_struct ? 1 : 0) : 0;
+        .column_int("is_struct", [](const TypeEntry& row) -> int {
+            return row.is_struct ? 1 : 0;
         })
-        .column_int("is_union", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_union ? 1 : 0) : 0;
+        .column_int("is_union", [](const TypeEntry& row) -> int {
+            return row.is_union ? 1 : 0;
         })
-        .column_int("is_enum", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_enum ? 1 : 0) : 0;
+        .column_int("is_enum", [](const TypeEntry& row) -> int {
+            return row.is_enum ? 1 : 0;
         })
-        .column_int("is_typedef", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_typedef ? 1 : 0) : 0;
+        .column_int("is_typedef", [](const TypeEntry& row) -> int {
+            return row.is_typedef ? 1 : 0;
         })
-        .column_int("is_func", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_func ? 1 : 0) : 0;
+        .column_int("is_func", [](const TypeEntry& row) -> int {
+            return row.is_func ? 1 : 0;
         })
-        .column_int("is_ptr", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_ptr ? 1 : 0) : 0;
+        .column_int("is_ptr", [](const TypeEntry& row) -> int {
+            return row.is_ptr ? 1 : 0;
         })
-        .column_int("is_array", [](size_t i) -> int {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? (cache[i].is_array ? 1 : 0) : 0;
+        .column_int("is_array", [](const TypeEntry& row) -> int {
+            return row.is_array ? 1 : 0;
         })
-        .column_text("definition", [](size_t i) -> std::string {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].definition : "";
+        .column_text("definition", [](const TypeEntry& row) -> std::string {
+            return row.definition;
         })
-        .column_text("resolved", [](size_t i) -> std::string {
-            auto& cache = get_types_cache();
-            return i < cache.size() ? cache[i].resolved : "";
+        .column_text("resolved", [](const TypeEntry& row) -> std::string {
+            return row.resolved;
         })
-        .deletable([](size_t i) -> bool {
-            auto& cache = get_types_cache();
-            if (i >= cache.size()) return false;
-
+        .deletable([](TypeEntry& row) -> bool {
             til_t* ti = get_idati();
             if (!ti) return false;
-
-            return del_numbered_type(ti, cache[i].ordinal);
+            return del_numbered_type(ti, row.ordinal);
         })
-        .insertable([](int argc, sqlite3_value** argv) -> bool {
-            // Column layout: ordinal(0), name(1), kind(2), ...
-            // name (col 1) is required
-            if (argc < 2 || sqlite3_value_type(argv[1]) == SQLITE_NULL)
+        .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
+            if (argc < 2 || argv[1].is_null())
                 return false;
 
-            const char* name = reinterpret_cast<const char*>(
-                sqlite3_value_text(argv[1]));
+            const char* name = argv[1].as_c_str();
             if (!name || !name[0]) return false;
 
             // kind (col 2): defaults to "struct"
             std::string kind = "struct";
-            if (argc > 2 && sqlite3_value_type(argv[2]) != SQLITE_NULL) {
-                const char* k = reinterpret_cast<const char*>(
-                    sqlite3_value_text(argv[2]));
+            if (argc > 2 && !argv[2].is_null()) {
+                const char* k = argv[2].as_c_str();
                 if (k && k[0]) kind = k;
             }
 
@@ -313,11 +286,6 @@ struct MemberEntry {
     int member_type_ordinal;  // -1 if member type not in local types
 };
 
-inline std::vector<MemberEntry>& get_members_cache() {
-    static std::vector<MemberEntry> cache;
-    return cache;
-}
-
 // Helper to get ordinal of a type by name
 inline int get_type_ordinal_by_name(til_t* ti, const char* type_name) {
     if (!ti || !type_name || !type_name[0]) return -1;
@@ -356,9 +324,8 @@ inline void classify_member_type(const tinfo_t& mtype, til_t* ti,
     }
 }
 
-inline void rebuild_members_cache() {
-    auto& cache = get_members_cache();
-    cache.clear();
+inline void collect_members(std::vector<MemberEntry>& rows) {
+    rows.clear();
 
     til_t* ti = get_idati();
     if (!ti) return;
@@ -399,7 +366,7 @@ inline void rebuild_members_cache() {
                             entry.mt_is_struct, entry.mt_is_union, entry.mt_is_enum,
                             entry.mt_is_ptr, entry.mt_is_array, entry.member_type_ordinal);
 
-                        cache.push_back(entry);
+                        rows.push_back(std::move(entry));
                     }
                 }
             }
@@ -447,30 +414,30 @@ public:
         return idx_ >= 0 && !valid_;
     }
 
-    void column(sqlite3_context* ctx, int col) override {
+    void column(xsql::FunctionContext& ctx, int col) override {
         if (!valid_ || idx_ < 0 || static_cast<size_t>(idx_) >= udt_.size()) {
-            sqlite3_result_null(ctx);
+            ctx.result_null();
             return;
         }
         const udm_t& m = udt_[idx_];
         switch (col) {
-            case 0: sqlite3_result_int(ctx, type_ordinal_); break;
-            case 1: sqlite3_result_text(ctx, type_name_.c_str(), -1, SQLITE_TRANSIENT); break;
-            case 2: sqlite3_result_int(ctx, idx_); break;
-            case 3: sqlite3_result_text(ctx, m.name.c_str(), -1, SQLITE_TRANSIENT); break;
-            case 4: sqlite3_result_int64(ctx, static_cast<int64_t>(m.offset / 8)); break;
-            case 5: sqlite3_result_int64(ctx, static_cast<int64_t>(m.offset)); break;
-            case 6: sqlite3_result_int64(ctx, static_cast<int64_t>(m.size / 8)); break;
-            case 7: sqlite3_result_int64(ctx, static_cast<int64_t>(m.size)); break;
+            case 0: ctx.result_int(type_ordinal_); break;
+            case 1: ctx.result_text(type_name_.c_str()); break;
+            case 2: ctx.result_int(idx_); break;
+            case 3: ctx.result_text(m.name.c_str()); break;
+            case 4: ctx.result_int64(static_cast<int64_t>(m.offset / 8)); break;
+            case 5: ctx.result_int64(static_cast<int64_t>(m.offset)); break;
+            case 6: ctx.result_int64(static_cast<int64_t>(m.size / 8)); break;
+            case 7: ctx.result_int64(static_cast<int64_t>(m.size)); break;
             case 8: {
                 qstring type_str;
                 m.type.print(&type_str);
-                sqlite3_result_text(ctx, type_str.c_str(), -1, SQLITE_TRANSIENT);
+                ctx.result_text(type_str.c_str());
                 break;
             }
-            case 9: sqlite3_result_int(ctx, m.is_bitfield() ? 1 : 0); break;
-            case 10: sqlite3_result_int(ctx, m.is_baseclass() ? 1 : 0); break;
-            case 11: sqlite3_result_text(ctx, m.cmt.c_str(), -1, SQLITE_TRANSIENT); break;
+            case 9: ctx.result_int(m.is_bitfield() ? 1 : 0); break;
+            case 10: ctx.result_int(m.is_baseclass() ? 1 : 0); break;
+            case 11: ctx.result_text(m.cmt.c_str()); break;
             // Member type classification columns
             case 12: case 13: case 14: case 15: case 16: case 17: {
                 // Classify the member type on-the-fly for iterator
@@ -480,16 +447,16 @@ public:
                     mt_is_struct, mt_is_union, mt_is_enum,
                     mt_is_ptr, mt_is_array, mt_ordinal);
                 switch (col) {
-                    case 12: sqlite3_result_int(ctx, mt_is_struct ? 1 : 0); break;
-                    case 13: sqlite3_result_int(ctx, mt_is_union ? 1 : 0); break;
-                    case 14: sqlite3_result_int(ctx, mt_is_enum ? 1 : 0); break;
-                    case 15: sqlite3_result_int(ctx, mt_is_ptr ? 1 : 0); break;
-                    case 16: sqlite3_result_int(ctx, mt_is_array ? 1 : 0); break;
-                    case 17: sqlite3_result_int(ctx, mt_ordinal); break;
+                    case 12: ctx.result_int(mt_is_struct ? 1 : 0); break;
+                    case 13: ctx.result_int(mt_is_union ? 1 : 0); break;
+                    case 14: ctx.result_int(mt_is_enum ? 1 : 0); break;
+                    case 15: ctx.result_int(mt_is_ptr ? 1 : 0); break;
+                    case 16: ctx.result_int(mt_is_array ? 1 : 0); break;
+                    case 17: ctx.result_int(mt_ordinal); break;
                 }
                 break;
             }
-            default: sqlite3_result_null(ctx); break;
+            default: ctx.result_null(); break;
         }
     }
 
@@ -523,181 +490,180 @@ struct TypeMemberRef {
     }
 };
 
-inline VTableDef define_types_members() {
-    return table("types_members")
+inline bool build_member_entry(uint32_t ordinal, int member_index, MemberEntry& entry) {
+    til_t* ti = get_idati();
+    if (!ti) return false;
+
+    const char* type_name = get_numbered_type_name(ti, ordinal);
+    if (!type_name) return false;
+
+    tinfo_t tif;
+    if (!tif.get_numbered_type(ti, ordinal)) return false;
+    if (!(tif.is_struct() || tif.is_union())) return false;
+
+    udt_type_data_t udt;
+    if (!tif.get_udt_details(&udt)) return false;
+    if (member_index < 0 || static_cast<size_t>(member_index) >= udt.size()) return false;
+
+    const udm_t& m = udt[member_index];
+    entry.type_ordinal = ordinal;
+    entry.type_name = type_name;
+    entry.member_index = member_index;
+    entry.member_name = m.name.c_str();
+    entry.offset = static_cast<int64_t>(m.offset / 8);
+    entry.offset_bits = static_cast<int64_t>(m.offset);
+    entry.size = static_cast<int64_t>(m.size / 8);
+    entry.size_bits = static_cast<int64_t>(m.size);
+    entry.is_bitfield = m.is_bitfield();
+    entry.is_baseclass = m.is_baseclass();
+    entry.comment = m.cmt.c_str();
+
+    qstring type_str;
+    m.type.print(&type_str);
+    entry.member_type = type_str.c_str();
+
+    classify_member_type(m.type, ti,
+        entry.mt_is_struct, entry.mt_is_union, entry.mt_is_enum,
+        entry.mt_is_ptr, entry.mt_is_array, entry.member_type_ordinal);
+    return true;
+}
+
+inline CachedTableDef<MemberEntry> define_types_members() {
+    return cached_table<MemberEntry>("types_members")
+        .no_shared_cache()
         .on_modify(ida_undo_hook)
-        .count([]() {
-            rebuild_members_cache();
-            return get_members_cache().size();
+        .estimate_rows([]() -> size_t {
+            til_t* ti = get_idati();
+            return ti ? static_cast<size_t>(get_ordinal_limit(ti)) * 8 : 0;
         })
-        .column_int("type_ordinal", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].type_ordinal : 0;
+        .cache_builder([](std::vector<MemberEntry>& rows) {
+            collect_members(rows);
         })
-        .column_text("type_name", [](size_t i) -> std::string {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].type_name : "";
+        .row_populator([](MemberEntry& row, int argc, xsql::FunctionArg* argv) {
+            if (argc > 2 && !argv[2].is_null()) row.type_ordinal = static_cast<uint32_t>(argv[2].as_int());
+            if (argc > 4 && !argv[4].is_null()) row.member_index = argv[4].as_int();
         })
-        .column_int("member_index", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].member_index : 0;
+        .row_lookup([](MemberEntry& row, int64_t rowid) -> bool {
+            if (rowid < 0) return false;
+            uint32_t ordinal = static_cast<uint32_t>(rowid / 10000);
+            int member_index = static_cast<int>(rowid % 10000);
+            return build_member_entry(ordinal, member_index, row);
+        })
+        .column_int("type_ordinal", [](const MemberEntry& row) -> int {
+            return static_cast<int>(row.type_ordinal);
+        })
+        .column_text("type_name", [](const MemberEntry& row) -> std::string {
+            return row.type_name;
+        })
+        .column_int("member_index", [](const MemberEntry& row) -> int {
+            return row.member_index;
         })
         .column_text_rw("member_name",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_members_cache();
-                return i < cache.size() ? cache[i].member_name : "";
+            [](const MemberEntry& row) -> std::string {
+                return row.member_name;
             },
-            // Setter - rename member
-            [](size_t i, const char* new_name) -> bool {
-                auto& cache = get_members_cache();
-                if (i >= cache.size()) return false;
-
-                TypeMemberRef ref(cache[i].type_ordinal);
+            [](MemberEntry& row, const char* new_name) -> bool {
+                TypeMemberRef ref(row.type_ordinal);
                 if (!ref.valid) return false;
-
-                int idx = cache[i].member_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) return false;
-
-                ref.udt[idx].name = new_name;
-                return ref.save();
+                if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) return false;
+                ref.udt[row.member_index].name = new_name ? new_name : "";
+                bool ok = ref.save();
+                if (ok) row.member_name = new_name ? new_name : "";
+                return ok;
             })
-        .column_int64("offset", [](size_t i) -> int64_t {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].offset : 0;
+        .column_int64("offset", [](const MemberEntry& row) -> int64_t {
+            return row.offset;
         })
-        .column_int64("offset_bits", [](size_t i) -> int64_t {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].offset_bits : 0;
+        .column_int64("offset_bits", [](const MemberEntry& row) -> int64_t {
+            return row.offset_bits;
         })
-        .column_int64("size", [](size_t i) -> int64_t {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].size : 0;
+        .column_int64("size", [](const MemberEntry& row) -> int64_t {
+            return row.size;
         })
-        .column_int64("size_bits", [](size_t i) -> int64_t {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].size_bits : 0;
+        .column_int64("size_bits", [](const MemberEntry& row) -> int64_t {
+            return row.size_bits;
         })
-        .column_text("member_type", [](size_t i) -> std::string {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].member_type : "";
+        .column_text("member_type", [](const MemberEntry& row) -> std::string {
+            return row.member_type;
         })
-        .column_int("is_bitfield", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].is_bitfield ? 1 : 0) : 0;
+        .column_int("is_bitfield", [](const MemberEntry& row) -> int {
+            return row.is_bitfield ? 1 : 0;
         })
-        .column_int("is_baseclass", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].is_baseclass ? 1 : 0) : 0;
+        .column_int("is_baseclass", [](const MemberEntry& row) -> int {
+            return row.is_baseclass ? 1 : 0;
         })
         .column_text_rw("comment",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_members_cache();
-                return i < cache.size() ? cache[i].comment : "";
+            [](const MemberEntry& row) -> std::string {
+                return row.comment;
             },
-            // Setter - update member comment
-            [](size_t i, const char* new_comment) -> bool {
-                auto& cache = get_members_cache();
-                if (i >= cache.size()) return false;
-
-                TypeMemberRef ref(cache[i].type_ordinal);
+            [](MemberEntry& row, const char* new_comment) -> bool {
+                TypeMemberRef ref(row.type_ordinal);
                 if (!ref.valid) return false;
-
-                int idx = cache[i].member_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) return false;
-
-                ref.udt[idx].cmt = new_comment;
-                return ref.save();
+                if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) return false;
+                ref.udt[row.member_index].cmt = new_comment ? new_comment : "";
+                bool ok = ref.save();
+                if (ok) row.comment = new_comment ? new_comment : "";
+                return ok;
             })
-        // Member type classification columns (for efficient filtering)
-        .column_int("mt_is_struct", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_struct ? 1 : 0) : 0;
+        .column_int("mt_is_struct", [](const MemberEntry& row) -> int {
+            return row.mt_is_struct ? 1 : 0;
         })
-        .column_int("mt_is_union", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_union ? 1 : 0) : 0;
+        .column_int("mt_is_union", [](const MemberEntry& row) -> int {
+            return row.mt_is_union ? 1 : 0;
         })
-        .column_int("mt_is_enum", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_enum ? 1 : 0) : 0;
+        .column_int("mt_is_enum", [](const MemberEntry& row) -> int {
+            return row.mt_is_enum ? 1 : 0;
         })
-        .column_int("mt_is_ptr", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_ptr ? 1 : 0) : 0;
+        .column_int("mt_is_ptr", [](const MemberEntry& row) -> int {
+            return row.mt_is_ptr ? 1 : 0;
         })
-        .column_int("mt_is_array", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? (cache[i].mt_is_array ? 1 : 0) : 0;
+        .column_int("mt_is_array", [](const MemberEntry& row) -> int {
+            return row.mt_is_array ? 1 : 0;
         })
-        .column_int("member_type_ordinal", [](size_t i) -> int {
-            auto& cache = get_members_cache();
-            return i < cache.size() ? cache[i].member_type_ordinal : -1;
+        .column_int("member_type_ordinal", [](const MemberEntry& row) -> int {
+            return row.member_type_ordinal;
         })
-        .deletable([](size_t i) -> bool {
-            auto& cache = get_members_cache();
-            if (i >= cache.size()) return false;
-
-            TypeMemberRef ref(cache[i].type_ordinal);
+        .deletable([](MemberEntry& row) -> bool {
+            TypeMemberRef ref(row.type_ordinal);
             if (!ref.valid) return false;
-
-            int idx = cache[i].member_index;
-            if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) return false;
-
-            ref.udt.erase(ref.udt.begin() + idx);
+            if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) return false;
+            ref.udt.erase(ref.udt.begin() + row.member_index);
             return ref.save();
         })
-        .insertable([](int argc, sqlite3_value** argv) -> bool {
-            // Column layout: type_ordinal(0), type_name(1), member_index(2),
-            //                 member_name(3), offset(4), ..., member_type(8), ..., comment(11)
-            // type_ordinal (col 0) and member_name (col 3) are required
+        .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
             if (argc < 4
-                || sqlite3_value_type(argv[0]) == SQLITE_NULL
-                || sqlite3_value_type(argv[3]) == SQLITE_NULL)
+                || argv[0].is_null()
+                || argv[3].is_null())
                 return false;
 
-            uint32_t ordinal = static_cast<uint32_t>(sqlite3_value_int(argv[0]));
-            const char* member_name = reinterpret_cast<const char*>(
-                sqlite3_value_text(argv[3]));
+            uint32_t ordinal = static_cast<uint32_t>(argv[0].as_int());
+            const char* member_name = argv[3].as_c_str();
             if (!member_name || !member_name[0]) return false;
 
             TypeMemberRef ref(ordinal);
             if (!ref.valid) return false;
 
-            // Build the new member
             udm_t new_member;
             new_member.name = member_name;
-
-            // member_type (col 8): parse type string, default to "int"
             std::string type_str = "int";
-            if (argc > 8 && sqlite3_value_type(argv[8]) != SQLITE_NULL) {
-                const char* mt = reinterpret_cast<const char*>(
-                    sqlite3_value_text(argv[8]));
+            if (argc > 8 && !argv[8].is_null()) {
+                const char* mt = argv[8].as_c_str();
                 if (mt && mt[0]) type_str = mt;
             }
-
-            // Parse the type string into a tinfo_t
             tinfo_t member_type;
             qstring parsed_name;
             if (parse_decl(&member_type, &parsed_name, nullptr,
                            (type_str + " x;").c_str(), PT_SIL)) {
                 new_member.type = member_type;
-                new_member.size = member_type.get_size() * 8;  // size in bits
+                new_member.size = member_type.get_size() * 8;
             } else {
-                // Fallback: default to int (4 bytes)
                 new_member.type = tinfo_t(BT_INT32);
                 new_member.size = 32;
             }
-
-            // comment (col 11)
-            if (argc > 11 && sqlite3_value_type(argv[11]) != SQLITE_NULL) {
-                const char* cmt = reinterpret_cast<const char*>(
-                    sqlite3_value_text(argv[11]));
+            if (argc > 11 && !argv[11].is_null()) {
+                const char* cmt = argv[11].as_c_str();
                 if (cmt) new_member.cmt = cmt;
             }
-
-            // Compute offset: append after last member
             if (!ref.udt.empty()) {
                 const udm_t& last = ref.udt.back();
                 new_member.offset = last.offset + last.size;
@@ -708,7 +674,6 @@ inline VTableDef define_types_members() {
             ref.udt.push_back(new_member);
             return ref.save();
         })
-        // Constraint pushdown: type_ordinal = X
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<MembersInTypeIterator>(static_cast<uint32_t>(ordinal));
         }, 10.0, 5.0)
@@ -729,14 +694,8 @@ struct EnumValueEntry {
     std::string comment;
 };
 
-inline std::vector<EnumValueEntry>& get_enum_values_cache() {
-    static std::vector<EnumValueEntry> cache;
-    return cache;
-}
-
-inline void rebuild_enum_values_cache() {
-    auto& cache = get_enum_values_cache();
-    cache.clear();
+inline void collect_enum_values(std::vector<EnumValueEntry>& rows) {
+    rows.clear();
 
     til_t* ti = get_idati();
     if (!ti) return;
@@ -763,7 +722,7 @@ inline void rebuild_enum_values_cache() {
                         entry.value = static_cast<int64_t>(e.value);
                         entry.uvalue = e.value;
                         entry.comment = e.cmt.c_str();
-                        cache.push_back(entry);
+                        rows.push_back(std::move(entry));
                     }
                 }
             }
@@ -811,21 +770,21 @@ public:
         return idx_ >= 0 && !valid_;
     }
 
-    void column(sqlite3_context* ctx, int col) override {
+    void column(xsql::FunctionContext& ctx, int col) override {
         if (!valid_ || idx_ < 0 || static_cast<size_t>(idx_) >= ei_.size()) {
-            sqlite3_result_null(ctx);
+            ctx.result_null();
             return;
         }
         const edm_t& e = ei_[idx_];
         switch (col) {
-            case 0: sqlite3_result_int(ctx, type_ordinal_); break;
-            case 1: sqlite3_result_text(ctx, type_name_.c_str(), -1, SQLITE_TRANSIENT); break;
-            case 2: sqlite3_result_int(ctx, idx_); break;
-            case 3: sqlite3_result_text(ctx, e.name.c_str(), -1, SQLITE_TRANSIENT); break;
-            case 4: sqlite3_result_int64(ctx, static_cast<int64_t>(e.value)); break;
-            case 5: sqlite3_result_int64(ctx, static_cast<int64_t>(e.value)); break;  // uvalue
-            case 6: sqlite3_result_text(ctx, e.cmt.c_str(), -1, SQLITE_TRANSIENT); break;
-            default: sqlite3_result_null(ctx); break;
+            case 0: ctx.result_int(type_ordinal_); break;
+            case 1: ctx.result_text(type_name_.c_str()); break;
+            case 2: ctx.result_int(idx_); break;
+            case 3: ctx.result_text(e.name.c_str()); break;
+            case 4: ctx.result_int64(static_cast<int64_t>(e.value)); break;
+            case 5: ctx.result_int64(static_cast<int64_t>(e.value)); break;  // uvalue
+            case 6: ctx.result_text(e.cmt.c_str()); break;
+            default: ctx.result_null(); break;
         }
     }
 
@@ -859,146 +818,145 @@ struct EnumTypeRef {
     }
 };
 
-inline VTableDef define_types_enum_values() {
-    return table("types_enum_values")
+inline bool build_enum_value_entry(uint32_t ordinal, int value_index, EnumValueEntry& entry) {
+    til_t* ti = get_idati();
+    if (!ti) return false;
+    const char* type_name = get_numbered_type_name(ti, ordinal);
+    if (!type_name) return false;
+
+    tinfo_t tif;
+    if (!tif.get_numbered_type(ti, ordinal)) return false;
+    if (!tif.is_enum()) return false;
+
+    enum_type_data_t ei;
+    if (!tif.get_enum_details(&ei)) return false;
+    if (value_index < 0 || static_cast<size_t>(value_index) >= ei.size()) return false;
+
+    const edm_t& e = ei[value_index];
+    entry.type_ordinal = ordinal;
+    entry.type_name = type_name;
+    entry.value_index = value_index;
+    entry.value_name = e.name.c_str();
+    entry.value = static_cast<int64_t>(e.value);
+    entry.uvalue = e.value;
+    entry.comment = e.cmt.c_str();
+    return true;
+}
+
+inline CachedTableDef<EnumValueEntry> define_types_enum_values() {
+    return cached_table<EnumValueEntry>("types_enum_values")
+        .no_shared_cache()
         .on_modify(ida_undo_hook)
-        .count([]() {
-            rebuild_enum_values_cache();
-            return get_enum_values_cache().size();
+        .estimate_rows([]() -> size_t {
+            til_t* ti = get_idati();
+            return ti ? static_cast<size_t>(get_ordinal_limit(ti)) * 8 : 0;
         })
-        .column_int("type_ordinal", [](size_t i) -> int {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? cache[i].type_ordinal : 0;
+        .cache_builder([](std::vector<EnumValueEntry>& rows) {
+            collect_enum_values(rows);
         })
-        .column_text("type_name", [](size_t i) -> std::string {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? cache[i].type_name : "";
+        .row_populator([](EnumValueEntry& row, int argc, xsql::FunctionArg* argv) {
+            if (argc > 2 && !argv[2].is_null()) row.type_ordinal = static_cast<uint32_t>(argv[2].as_int());
+            if (argc > 4 && !argv[4].is_null()) row.value_index = argv[4].as_int();
         })
-        .column_int("value_index", [](size_t i) -> int {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? cache[i].value_index : 0;
+        .row_lookup([](EnumValueEntry& row, int64_t rowid) -> bool {
+            if (rowid < 0) return false;
+            uint32_t ordinal = static_cast<uint32_t>(rowid / 10000);
+            int value_index = static_cast<int>(rowid % 10000);
+            return build_enum_value_entry(ordinal, value_index, row);
+        })
+        .column_int("type_ordinal", [](const EnumValueEntry& row) -> int {
+            return static_cast<int>(row.type_ordinal);
+        })
+        .column_text("type_name", [](const EnumValueEntry& row) -> std::string {
+            return row.type_name;
+        })
+        .column_int("value_index", [](const EnumValueEntry& row) -> int {
+            return row.value_index;
         })
         .column_text_rw("value_name",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_enum_values_cache();
-                return i < cache.size() ? cache[i].value_name : "";
+            [](const EnumValueEntry& row) -> std::string {
+                return row.value_name;
             },
-            // Setter - rename enum value
-            [](size_t i, const char* new_name) -> bool {
-                auto& cache = get_enum_values_cache();
-                if (i >= cache.size()) return false;
-
-                EnumTypeRef ref(cache[i].type_ordinal);
+            [](EnumValueEntry& row, const char* new_name) -> bool {
+                EnumTypeRef ref(row.type_ordinal);
                 if (!ref.valid) return false;
-
-                int idx = cache[i].value_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
-
-                ref.ei[idx].name = new_name;
-                return ref.save();
+                if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) return false;
+                ref.ei[row.value_index].name = new_name ? new_name : "";
+                bool ok = ref.save();
+                if (ok) row.value_name = new_name ? new_name : "";
+                return ok;
             })
         .column_int64_rw("value",
-            // Getter
-            [](size_t i) -> int64_t {
-                auto& cache = get_enum_values_cache();
-                return i < cache.size() ? cache[i].value : 0;
+            [](const EnumValueEntry& row) -> int64_t {
+                return row.value;
             },
-            // Setter - change enum value
-            [](size_t i, int64_t new_value) -> bool {
-                auto& cache = get_enum_values_cache();
-                if (i >= cache.size()) return false;
-
-                EnumTypeRef ref(cache[i].type_ordinal);
+            [](EnumValueEntry& row, int64_t new_value) -> bool {
+                EnumTypeRef ref(row.type_ordinal);
                 if (!ref.valid) return false;
-
-                int idx = cache[i].value_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
-
-                ref.ei[idx].value = static_cast<uint64_t>(new_value);
-                return ref.save();
+                if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) return false;
+                ref.ei[row.value_index].value = static_cast<uint64_t>(new_value);
+                bool ok = ref.save();
+                if (ok) {
+                    row.value = new_value;
+                    row.uvalue = static_cast<uint64_t>(new_value);
+                }
+                return ok;
             })
-        .column_int64("uvalue", [](size_t i) -> int64_t {
-            auto& cache = get_enum_values_cache();
-            return i < cache.size() ? static_cast<int64_t>(cache[i].uvalue) : 0;
+        .column_int64("uvalue", [](const EnumValueEntry& row) -> int64_t {
+            return static_cast<int64_t>(row.uvalue);
         })
         .column_text_rw("comment",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& cache = get_enum_values_cache();
-                return i < cache.size() ? cache[i].comment : "";
+            [](const EnumValueEntry& row) -> std::string {
+                return row.comment;
             },
-            // Setter - update enum value comment
-            [](size_t i, const char* new_comment) -> bool {
-                auto& cache = get_enum_values_cache();
-                if (i >= cache.size()) return false;
-
-                EnumTypeRef ref(cache[i].type_ordinal);
+            [](EnumValueEntry& row, const char* new_comment) -> bool {
+                EnumTypeRef ref(row.type_ordinal);
                 if (!ref.valid) return false;
-
-                int idx = cache[i].value_index;
-                if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
-
-                ref.ei[idx].cmt = new_comment;
-                return ref.save();
+                if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) return false;
+                ref.ei[row.value_index].cmt = new_comment ? new_comment : "";
+                bool ok = ref.save();
+                if (ok) row.comment = new_comment ? new_comment : "";
+                return ok;
             })
-        .deletable([](size_t i) -> bool {
-            auto& cache = get_enum_values_cache();
-            if (i >= cache.size()) return false;
-
-            EnumTypeRef ref(cache[i].type_ordinal);
+        .deletable([](EnumValueEntry& row) -> bool {
+            EnumTypeRef ref(row.type_ordinal);
             if (!ref.valid) return false;
-
-            int idx = cache[i].value_index;
-            if (idx < 0 || static_cast<size_t>(idx) >= ref.ei.size()) return false;
-
-            ref.ei.erase(ref.ei.begin() + idx);
+            if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) return false;
+            ref.ei.erase(ref.ei.begin() + row.value_index);
             return ref.save();
         })
-        .insertable([](int argc, sqlite3_value** argv) -> bool {
-            // Column layout: type_ordinal(0), type_name(1), value_index(2),
-            //                 value_name(3), value(4), uvalue(5), comment(6)
-            // type_ordinal (col 0) and value_name (col 3) are required
+        .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
             if (argc < 4
-                || sqlite3_value_type(argv[0]) == SQLITE_NULL
-                || sqlite3_value_type(argv[3]) == SQLITE_NULL)
+                || argv[0].is_null()
+                || argv[3].is_null())
                 return false;
 
-            uint32_t ordinal = static_cast<uint32_t>(sqlite3_value_int(argv[0]));
-            const char* value_name = reinterpret_cast<const char*>(
-                sqlite3_value_text(argv[3]));
+            uint32_t ordinal = static_cast<uint32_t>(argv[0].as_int());
+            const char* value_name = argv[3].as_c_str();
             if (!value_name || !value_name[0]) return false;
 
             EnumTypeRef ref(ordinal);
             if (!ref.valid) return false;
 
-            // Build the new enum member
             edm_t new_edm;
             new_edm.name = value_name;
-
-            // value (col 4): default to 0
-            if (argc > 4 && sqlite3_value_type(argv[4]) != SQLITE_NULL) {
-                new_edm.value = static_cast<uint64_t>(sqlite3_value_int64(argv[4]));
+            if (argc > 4 && !argv[4].is_null()) {
+                new_edm.value = static_cast<uint64_t>(argv[4].as_int64());
             } else {
-                // Auto-assign: next value after last member
                 if (!ref.ei.empty()) {
                     new_edm.value = ref.ei.back().value + 1;
                 } else {
                     new_edm.value = 0;
                 }
             }
-
-            // comment (col 6)
-            if (argc > 6 && sqlite3_value_type(argv[6]) != SQLITE_NULL) {
-                const char* cmt = reinterpret_cast<const char*>(
-                    sqlite3_value_text(argv[6]));
+            if (argc > 6 && !argv[6].is_null()) {
+                const char* cmt = argv[6].as_c_str();
                 if (cmt) new_edm.cmt = cmt;
             }
 
             ref.ei.push_back(new_edm);
             return ref.save();
         })
-        // Constraint pushdown: type_ordinal = X
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<EnumValuesInTypeIterator>(static_cast<uint32_t>(ordinal));
         }, 10.0, 10.0)
@@ -1149,11 +1107,6 @@ struct FuncArgEntry {
     TypeClassification tc;
 };
 
-inline std::vector<FuncArgEntry>& get_func_args_cache() {
-    static std::vector<FuncArgEntry> cache;
-    return cache;
-}
-
 inline const char* get_calling_convention_name(cm_t cc) {
     // Extract calling convention from cm_t (using CM_CC_MASK)
     callcnv_t conv = cc & CM_CC_MASK;
@@ -1174,9 +1127,8 @@ inline const char* get_calling_convention_name(cm_t cc) {
     }
 }
 
-inline void rebuild_func_args_cache() {
-    auto& cache = get_func_args_cache();
-    cache.clear();
+inline void collect_func_args(std::vector<FuncArgEntry>& rows) {
+    rows.clear();
 
     til_t* ti = get_idati();
     if (!ti) return;
@@ -1205,7 +1157,7 @@ inline void rebuild_func_args_cache() {
                     ret_entry.arg_type = ret_str.c_str();
                     ret_entry.calling_conv = get_calling_convention_name(fi.get_cc());
                     ret_entry.tc = classify_arg_type(fi.rettype);
-                    cache.push_back(ret_entry);
+                    rows.push_back(std::move(ret_entry));
 
                     // Arguments
                     for (size_t i = 0; i < fi.size(); i++) {
@@ -1221,7 +1173,7 @@ inline void rebuild_func_args_cache() {
                         entry.arg_type = type_str.c_str();
                         entry.tc = classify_arg_type(a.type);
                         // calling_conv only on return type row
-                        cache.push_back(entry);
+                        rows.push_back(std::move(entry));
                     }
                 }
             }
@@ -1261,17 +1213,7 @@ public:
     bool next() override {
         if (!has_data_) return false;
         ++idx_;
-        // idx_=-1 is return type, then 0..n-1 are args
-        valid_ = (idx_ >= -1 && static_cast<size_t>(idx_) < fi_.size() + 1);
-        // Adjust: idx_=-1 is return, idx_=0 is first arg, etc.
-        // Total items = 1 (return) + fi_.size() (args)
-        valid_ = (idx_ >= -1 && idx_ < static_cast<int>(fi_.size()));
-        // Correction: idx=-1 is return, idx=0..fi_.size()-1 are args
-        // So valid when idx >= -1 and idx < fi_.size()
-        // Actually: return type is one row, args are fi_.size() rows
-        // Total rows = 1 + fi_.size()
-        valid_ = (idx_ >= -1 && idx_ <= static_cast<int>(fi_.size()) - 1 + 1 - 1);
-        // Simpler: idx=-1 valid, idx=0..fi_.size()-1 valid
+        // idx=-1 is return type, idx=0..fi_.size()-1 are arguments
         valid_ = (idx_ == -1) || (idx_ >= 0 && static_cast<size_t>(idx_) < fi_.size());
         return valid_;
     }
@@ -1280,9 +1222,9 @@ public:
         return idx_ >= -1 && !valid_;
     }
 
-    void column(sqlite3_context* ctx, int col) override {
+    void column(xsql::FunctionContext& ctx, int col) override {
         if (!valid_) {
-            sqlite3_result_null(ctx);
+            ctx.result_null();
             return;
         }
 
@@ -1295,41 +1237,41 @@ public:
 
         switch (col) {
             case 0: // type_ordinal
-                sqlite3_result_int(ctx, type_ordinal_);
+                ctx.result_int(type_ordinal_);
                 break;
             case 1: // type_name
-                sqlite3_result_text(ctx, type_name_.c_str(), -1, SQLITE_TRANSIENT);
+                ctx.result_text(type_name_.c_str());
                 break;
             case 2: // arg_index
-                sqlite3_result_int(ctx, idx_);
+                ctx.result_int(idx_);
                 break;
             case 3: // arg_name
                 if (idx_ == -1) {
-                    sqlite3_result_text(ctx, "(return)", -1, SQLITE_STATIC);
+                    ctx.result_text_static("(return)");
                 } else if (static_cast<size_t>(idx_) < fi_.size()) {
-                    sqlite3_result_text(ctx, fi_[idx_].name.c_str(), -1, SQLITE_TRANSIENT);
+                    ctx.result_text(fi_[idx_].name.c_str());
                 } else {
-                    sqlite3_result_null(ctx);
+                    ctx.result_null();
                 }
                 break;
             case 4: // arg_type
                 if (idx_ == -1) {
                     qstring ret_str;
                     fi_.rettype.print(&ret_str);
-                    sqlite3_result_text(ctx, ret_str.c_str(), -1, SQLITE_TRANSIENT);
+                    ctx.result_text(ret_str.c_str());
                 } else if (static_cast<size_t>(idx_) < fi_.size()) {
                     qstring type_str;
                     fi_[idx_].type.print(&type_str);
-                    sqlite3_result_text(ctx, type_str.c_str(), -1, SQLITE_TRANSIENT);
+                    ctx.result_text(type_str.c_str());
                 } else {
-                    sqlite3_result_null(ctx);
+                    ctx.result_null();
                 }
                 break;
             case 5: // calling_conv
                 if (idx_ == -1) {
-                    sqlite3_result_text(ctx, get_calling_convention_name(fi_.get_cc()), -1, SQLITE_STATIC);
+                    ctx.result_text_static(get_calling_convention_name(fi_.get_cc()));
                 } else {
-                    sqlite3_result_text(ctx, "", -1, SQLITE_STATIC);
+                    ctx.result_text_static("");
                 }
                 break;
             // Type classification columns (computed on-the-fly)
@@ -1337,27 +1279,27 @@ public:
             case 15: case 16: case 17: case 18: case 19: case 20: case 21: {
                 TypeClassification tc = classify_arg_type(get_current_type());
                 switch (col) {
-                    case 6:  sqlite3_result_int(ctx, tc.is_ptr ? 1 : 0); break;
-                    case 7:  sqlite3_result_int(ctx, tc.is_int ? 1 : 0); break;
-                    case 8:  sqlite3_result_int(ctx, tc.is_integral ? 1 : 0); break;
-                    case 9:  sqlite3_result_int(ctx, tc.is_float ? 1 : 0); break;
-                    case 10: sqlite3_result_int(ctx, tc.is_void ? 1 : 0); break;
-                    case 11: sqlite3_result_int(ctx, tc.is_struct ? 1 : 0); break;
-                    case 12: sqlite3_result_int(ctx, tc.is_array ? 1 : 0); break;
-                    case 13: sqlite3_result_int(ctx, tc.ptr_depth); break;
-                    case 14: sqlite3_result_text(ctx, tc.base_type.c_str(), -1, SQLITE_TRANSIENT); break;
-                    case 15: sqlite3_result_int(ctx, tc.is_ptr_resolved ? 1 : 0); break;
-                    case 16: sqlite3_result_int(ctx, tc.is_int_resolved ? 1 : 0); break;
-                    case 17: sqlite3_result_int(ctx, tc.is_integral_resolved ? 1 : 0); break;
-                    case 18: sqlite3_result_int(ctx, tc.is_float_resolved ? 1 : 0); break;
-                    case 19: sqlite3_result_int(ctx, tc.is_void_resolved ? 1 : 0); break;
-                    case 20: sqlite3_result_int(ctx, tc.ptr_depth_resolved); break;
-                    case 21: sqlite3_result_text(ctx, tc.base_type_resolved.c_str(), -1, SQLITE_TRANSIENT); break;
+                    case 6:  ctx.result_int(tc.is_ptr ? 1 : 0); break;
+                    case 7:  ctx.result_int(tc.is_int ? 1 : 0); break;
+                    case 8:  ctx.result_int(tc.is_integral ? 1 : 0); break;
+                    case 9:  ctx.result_int(tc.is_float ? 1 : 0); break;
+                    case 10: ctx.result_int(tc.is_void ? 1 : 0); break;
+                    case 11: ctx.result_int(tc.is_struct ? 1 : 0); break;
+                    case 12: ctx.result_int(tc.is_array ? 1 : 0); break;
+                    case 13: ctx.result_int(tc.ptr_depth); break;
+                    case 14: ctx.result_text(tc.base_type.c_str()); break;
+                    case 15: ctx.result_int(tc.is_ptr_resolved ? 1 : 0); break;
+                    case 16: ctx.result_int(tc.is_int_resolved ? 1 : 0); break;
+                    case 17: ctx.result_int(tc.is_integral_resolved ? 1 : 0); break;
+                    case 18: ctx.result_int(tc.is_float_resolved ? 1 : 0); break;
+                    case 19: ctx.result_int(tc.is_void_resolved ? 1 : 0); break;
+                    case 20: ctx.result_int(tc.ptr_depth_resolved); break;
+                    case 21: ctx.result_text(tc.base_type_resolved.c_str()); break;
                 }
                 break;
             }
             default:
-                sqlite3_result_null(ctx);
+                ctx.result_null();
                 break;
         }
     }
@@ -1367,103 +1309,82 @@ public:
     }
 };
 
-inline VTableDef define_types_func_args() {
-    return table("types_func_args")
-        .count([]() {
-            rebuild_func_args_cache();
-            return get_func_args_cache().size();
+inline CachedTableDef<FuncArgEntry> define_types_func_args() {
+    return cached_table<FuncArgEntry>("types_func_args")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t {
+            til_t* ti = get_idati();
+            return ti ? static_cast<size_t>(get_ordinal_limit(ti)) * 4 : 0;
         })
-        .column_int("type_ordinal", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].type_ordinal : 0;
+        .cache_builder([](std::vector<FuncArgEntry>& rows) {
+            collect_func_args(rows);
         })
-        .column_text("type_name", [](size_t i) -> std::string {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].type_name : "";
+        .column_int("type_ordinal", [](const FuncArgEntry& row) -> int {
+            return static_cast<int>(row.type_ordinal);
         })
-        .column_int("arg_index", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].arg_index : 0;
+        .column_text("type_name", [](const FuncArgEntry& row) -> std::string {
+            return row.type_name;
         })
-        .column_text("arg_name", [](size_t i) -> std::string {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].arg_name : "";
+        .column_int("arg_index", [](const FuncArgEntry& row) -> int {
+            return row.arg_index;
         })
-        .column_text("arg_type", [](size_t i) -> std::string {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].arg_type : "";
+        .column_text("arg_name", [](const FuncArgEntry& row) -> std::string {
+            return row.arg_name;
         })
-        .column_text("calling_conv", [](size_t i) -> std::string {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].calling_conv : "";
+        .column_text("arg_type", [](const FuncArgEntry& row) -> std::string {
+            return row.arg_type;
         })
-        // Surface-level type classification
-        .column_int("is_ptr", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_ptr ? 1 : 0) : 0;
+        .column_text("calling_conv", [](const FuncArgEntry& row) -> std::string {
+            return row.calling_conv;
         })
-        .column_int("is_int", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_int ? 1 : 0) : 0;
+        .column_int("is_ptr", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_ptr ? 1 : 0;
         })
-        .column_int("is_integral", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_integral ? 1 : 0) : 0;
+        .column_int("is_int", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_int ? 1 : 0;
         })
-        .column_int("is_float", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_float ? 1 : 0) : 0;
+        .column_int("is_integral", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_integral ? 1 : 0;
         })
-        .column_int("is_void", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_void ? 1 : 0) : 0;
+        .column_int("is_float", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_float ? 1 : 0;
         })
-        .column_int("is_struct", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_struct ? 1 : 0) : 0;
+        .column_int("is_void", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_void ? 1 : 0;
         })
-        .column_int("is_array", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_array ? 1 : 0) : 0;
+        .column_int("is_struct", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_struct ? 1 : 0;
         })
-        .column_int("ptr_depth", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].tc.ptr_depth : 0;
+        .column_int("is_array", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_array ? 1 : 0;
         })
-        .column_text("base_type", [](size_t i) -> std::string {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].tc.base_type : "";
+        .column_int("ptr_depth", [](const FuncArgEntry& row) -> int {
+            return row.tc.ptr_depth;
         })
-        // Resolved type classification (after typedef resolution)
-        .column_int("is_ptr_resolved", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_ptr_resolved ? 1 : 0) : 0;
+        .column_text("base_type", [](const FuncArgEntry& row) -> std::string {
+            return row.tc.base_type;
         })
-        .column_int("is_int_resolved", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_int_resolved ? 1 : 0) : 0;
+        .column_int("is_ptr_resolved", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_ptr_resolved ? 1 : 0;
         })
-        .column_int("is_integral_resolved", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_integral_resolved ? 1 : 0) : 0;
+        .column_int("is_int_resolved", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_int_resolved ? 1 : 0;
         })
-        .column_int("is_float_resolved", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_float_resolved ? 1 : 0) : 0;
+        .column_int("is_integral_resolved", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_integral_resolved ? 1 : 0;
         })
-        .column_int("is_void_resolved", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? (cache[i].tc.is_void_resolved ? 1 : 0) : 0;
+        .column_int("is_float_resolved", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_float_resolved ? 1 : 0;
         })
-        .column_int("ptr_depth_resolved", [](size_t i) -> int {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].tc.ptr_depth_resolved : 0;
+        .column_int("is_void_resolved", [](const FuncArgEntry& row) -> int {
+            return row.tc.is_void_resolved ? 1 : 0;
         })
-        .column_text("base_type_resolved", [](size_t i) -> std::string {
-            auto& cache = get_func_args_cache();
-            return i < cache.size() ? cache[i].tc.base_type_resolved : "";
+        .column_int("ptr_depth_resolved", [](const FuncArgEntry& row) -> int {
+            return row.tc.ptr_depth_resolved;
         })
-        // Constraint pushdown: type_ordinal = X
+        .column_text("base_type_resolved", [](const FuncArgEntry& row) -> std::string {
+            return row.tc.base_type_resolved;
+        })
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<FuncArgsInTypeIterator>(static_cast<uint32_t>(ordinal));
         }, 10.0, 5.0)
@@ -1475,10 +1396,10 @@ inline VTableDef define_types_func_args() {
 // ============================================================================
 
 struct TypesRegistry {
-    VTableDef types;
-    VTableDef types_members;
-    VTableDef types_enum_values;
-    VTableDef types_func_args;
+    CachedTableDef<TypeEntry> types;
+    CachedTableDef<MemberEntry> types_members;
+    CachedTableDef<EnumValueEntry> types_enum_values;
+    CachedTableDef<FuncArgEntry> types_func_args;
 
     TypesRegistry()
         : types(define_types())
@@ -1488,17 +1409,16 @@ struct TypesRegistry {
     {}
 
     void register_all(xsql::Database& db) {
-        // Register tables
-        db.register_table("ida_types", &types);
+        db.register_cached_table("ida_types", &types);
         db.create_table("types", "ida_types");
 
-        db.register_table("ida_types_members", &types_members);
+        db.register_cached_table("ida_types_members", &types_members);
         db.create_table("types_members", "ida_types_members");
 
-        db.register_table("ida_types_enum_values", &types_enum_values);
+        db.register_cached_table("ida_types_enum_values", &types_enum_values);
         db.create_table("types_enum_values", "ida_types_enum_values");
 
-        db.register_table("ida_types_func_args", &types_func_args);
+        db.register_cached_table("ida_types_func_args", &types_func_args);
         db.create_table("types_func_args", "ida_types_func_args");
 
         // Create views
@@ -1518,3 +1438,5 @@ private:
 
 } // namespace types
 } // namespace idasql
+
+

@@ -142,25 +142,23 @@ public:
         return started_ && !valid_;
     }
 
-    void column(sqlite3_context* ctx, int col) override {
+    void column(xsql::FunctionContext& ctx, int col) override {
         switch (col) {
             case 0: // func_addr
-                sqlite3_result_int64(ctx, static_cast<int64_t>(func_addr_));
+                ctx.result_int64(static_cast<int64_t>(func_addr_));
                 break;
             case 1: // ea
-                sqlite3_result_int64(ctx, static_cast<int64_t>(current_ea_));
+                ctx.result_int64(static_cast<int64_t>(current_ea_));
                 break;
             case 2: // callee_addr
                 if (callee_addr_ != BADADDR) {
-                    sqlite3_result_int64(ctx, static_cast<int64_t>(callee_addr_));
+                    ctx.result_int64(static_cast<int64_t>(callee_addr_));
                 } else {
-                    sqlite3_result_int64(ctx, 0);
+                    ctx.result_int64(0);
                 }
                 break;
             case 3: // callee_name
-                sqlite3_result_text(ctx, callee_name_.c_str(),
-                                    static_cast<int>(callee_name_.size()),
-                                    SQLITE_TRANSIENT);
+                ctx.result_text(callee_name_.c_str());
                 break;
         }
     }
@@ -234,7 +232,7 @@ public:
 
     const DisasmCallInfo& current() const override { return current_; }
 
-    sqlite3_int64 rowid() const override { return static_cast<sqlite3_int64>(current_.ea); }
+    int64_t rowid() const override { return static_cast<int64_t>(current_.ea); }
 };
 
 inline GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
@@ -333,16 +331,16 @@ public:
 
     bool eof() const override { return started_ && idx_ >= loops_.size(); }
 
-    void column(sqlite3_context* ctx, int col) override {
-        if (idx_ >= loops_.size()) { sqlite3_result_null(ctx); return; }
+    void column(xsql::FunctionContext& ctx, int col) override {
+        if (idx_ >= loops_.size()) { ctx.result_null(); return; }
         const auto& li = loops_[idx_];
         switch (col) {
-            case 0: sqlite3_result_int64(ctx, static_cast<int64_t>(li.func_addr)); break;
-            case 1: sqlite3_result_int(ctx, li.loop_id); break;
-            case 2: sqlite3_result_int64(ctx, static_cast<int64_t>(li.header_ea)); break;
-            case 3: sqlite3_result_int64(ctx, static_cast<int64_t>(li.header_end_ea)); break;
-            case 4: sqlite3_result_int64(ctx, static_cast<int64_t>(li.back_edge_block_ea)); break;
-            case 5: sqlite3_result_int64(ctx, static_cast<int64_t>(li.back_edge_block_end)); break;
+            case 0: ctx.result_int64(static_cast<int64_t>(li.func_addr)); break;
+            case 1: ctx.result_int(li.loop_id); break;
+            case 2: ctx.result_int64(static_cast<int64_t>(li.header_ea)); break;
+            case 3: ctx.result_int64(static_cast<int64_t>(li.header_end_ea)); break;
+            case 4: ctx.result_int64(static_cast<int64_t>(li.back_edge_block_ea)); break;
+            case 5: ctx.result_int64(static_cast<int64_t>(li.back_edge_block_end)); break;
         }
     }
 
@@ -353,7 +351,7 @@ class DisasmLoopsGenerator : public xsql::Generator<LoopInfo> {
     size_t func_idx_ = 0;
     std::vector<LoopInfo> loops_;
     size_t idx_ = 0;
-    sqlite3_int64 rowid_ = -1;
+    int64_t rowid_ = -1;
     bool started_ = false;
 
     bool load_next_func() {
@@ -394,7 +392,7 @@ public:
 
     const LoopInfo& current() const override { return loops_[idx_]; }
 
-    sqlite3_int64 rowid() const override { return rowid_; }
+    int64_t rowid() const override { return rowid_; }
 };
 
 inline GeneratorTableDef<LoopInfo> define_disasm_loops() {
@@ -527,3 +525,4 @@ struct DisassemblyRegistry {
 
 } // namespace disassembly
 } // namespace idasql
+

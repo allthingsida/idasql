@@ -1,3 +1,7 @@
+/**
+ * plugin_control.hpp - Plugin control codes used by IDASQL
+ */
+
 #pragma once
 // IDASQL Plugin Control Codes
 

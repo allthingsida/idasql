@@ -1,3 +1,10 @@
+/**
+ * agent_settings.hpp - AI agent configuration persistence
+ *
+ * Stores provider selection, timeout, custom prompt, and BYOK settings
+ * under the user's idasql settings directory.
+ */
+
 #pragma once
 
 #ifdef IDASQL_HAS_AI_AGENT

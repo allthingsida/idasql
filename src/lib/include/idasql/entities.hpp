@@ -1,5 +1,5 @@
 /**
- * ida_entities.hpp - IDA entity definitions for SQLite virtual tables
+ * entities.hpp - IDA entity definitions for SQLite virtual tables
  *
  * Defines all IDA entities as virtual tables using the clean ida_vtable.hpp framework.
  *
@@ -20,6 +20,14 @@
 #include <idasql/vtable.hpp>
 #include <xsql/database.hpp>
 #include <idasql/entities_search.hpp>
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstring>
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 #include <idasql/platform_undef.hpp>
 
@@ -131,6 +139,37 @@ inline VTableDef define_funcs() {
                 auto_wait();
                 return ok;
             })
+        .column_text_rw("prototype",
+            // Getter
+            [](size_t i) -> std::string {
+                func_t* f = getn_func(i);
+                if (!f) return "";
+                qstring out;
+                if (print_type(&out, f->start_ea, PRTYPE_1LINE | PRTYPE_SEMI)) {
+                    return out.c_str();
+                }
+                return "";
+            },
+            // Setter - apply/clear function prototype declaration.
+            [](size_t i, const char* new_decl) -> bool {
+                auto_wait();
+                func_t* f = getn_func(i);
+                if (!f) return false;
+
+                bool ok = false;
+                if (new_decl == nullptr || new_decl[0] == '\0') {
+                    del_tinfo(f->start_ea);
+                    ok = true;
+                } else {
+                    ok = apply_cdecl(nullptr, f->start_ea, new_decl, 0);
+                }
+
+                if (ok) {
+                    decompiler::invalidate_decompiler_cache(f->start_ea);
+                }
+                auto_wait();
+                return ok;
+            })
         .column_int64("size", [](size_t i) -> int64_t {
             func_t* f = getn_func(i);
             return f ? static_cast<int64_t>(f->size()) : 0;
@@ -227,12 +266,12 @@ inline VTableDef define_funcs() {
             auto_wait();
             return ok;
         })
-        .insertable([](int argc, sqlite3_value** argv) -> bool {
+        .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
             // address (col 0) is required
-            if (argc < 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL)
+            if (argc < 1 || argv[0].is_null())
                 return false;
 
-            ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
+            ea_t ea = static_cast<ea_t>(argv[0].as_int64());
 
             // Check if function already exists at this address
             if (get_func(ea) != nullptr)
@@ -241,8 +280,8 @@ inline VTableDef define_funcs() {
             auto_wait();
             // end_ea from col 3 if provided, else BADADDR (IDA auto-detects)
             ea_t end = BADADDR;
-            if (argc > 3 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
-                end = static_cast<ea_t>(sqlite3_value_int64(argv[3]));
+            if (argc > 3 && !argv[3].is_null())
+                end = static_cast<ea_t>(argv[3].as_int64());
 
             bool ok = add_func(ea, end);
             auto_wait();
@@ -250,9 +289,8 @@ inline VTableDef define_funcs() {
             if (!ok) return false;
 
             // Optional: set name (col 1) after creation
-            if (argc > 1 && sqlite3_value_type(argv[1]) != SQLITE_NULL) {
-                const char* name = reinterpret_cast<const char*>(
-                    sqlite3_value_text(argv[1]));
+            if (argc > 1 && !argv[1].is_null()) {
+                const char* name = argv[1].as_c_str();
                 if (name && name[0])
                     set_name(ea, name, SN_CHECK);
             }
@@ -375,16 +413,15 @@ inline VTableDef define_names() {
             auto_wait();
             return ok;
         })
-        .insertable([](int argc, sqlite3_value** argv) -> bool {
+        .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
             // address (col 0) and name (col 1) are both required
             if (argc < 2
-                || sqlite3_value_type(argv[0]) == SQLITE_NULL
-                || sqlite3_value_type(argv[1]) == SQLITE_NULL)
+                || argv[0].is_null()
+                || argv[1].is_null())
                 return false;
 
-            ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
-            const char* name = reinterpret_cast<const char*>(
-                sqlite3_value_text(argv[1]));
+            ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+            const char* name = argv[1].as_c_str();
             if (!name || !name[0]) return false;
 
             auto_wait();
@@ -420,116 +457,106 @@ inline VTableDef define_entries() {
 // COMMENTS Table (with UPDATE/DELETE support)
 // ============================================================================
 
-// Helper to iterate addresses with comments
-struct CommentIterator {
-    static std::vector<ea_t>& get_addresses() {
-        static std::vector<ea_t> addrs;
-        return addrs;
-    }
-
-    static void rebuild() {
-        auto& addrs = get_addresses();
-        addrs.clear();
-
-        ea_t ea = inf_get_min_ea();
-        ea_t max_ea = inf_get_max_ea();
-
-        while (ea < max_ea) {
-            qstring cmt, rpt;
-            bool has_cmt = get_cmt(&cmt, ea, false) > 0;
-            bool has_rpt = get_cmt(&rpt, ea, true) > 0;
-
-            if (has_cmt || has_rpt) {
-                addrs.push_back(ea);
-            }
-
-            ea = next_head(ea, max_ea);
-            if (ea == BADADDR) break;
-        }
-    }
+struct CommentRow {
+    ea_t ea = BADADDR;
+    std::string comment;
+    std::string rpt_comment;
 };
 
-inline VTableDef define_comments() {
-    return table("comments")
-        .count([]() {
-            CommentIterator::rebuild();
-            return CommentIterator::get_addresses().size();
+inline void collect_comment_rows(std::vector<CommentRow>& rows) {
+    rows.clear();
+
+    ea_t ea = inf_get_min_ea();
+    ea_t max_ea = inf_get_max_ea();
+
+    while (ea < max_ea) {
+        qstring cmt;
+        qstring rpt;
+        bool has_cmt = get_cmt(&cmt, ea, false) > 0;
+        bool has_rpt = get_cmt(&rpt, ea, true) > 0;
+
+        if (has_cmt || has_rpt) {
+            CommentRow row;
+            row.ea = ea;
+            row.comment = has_cmt ? std::string(cmt.c_str()) : std::string();
+            row.rpt_comment = has_rpt ? std::string(rpt.c_str()) : std::string();
+            rows.push_back(std::move(row));
+        }
+
+        ea = next_head(ea, max_ea);
+        if (ea == BADADDR) break;
+    }
+}
+
+inline CachedTableDef<CommentRow> define_comments() {
+    return cached_table<CommentRow>("comments")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t {
+            return static_cast<size_t>(get_nlist_size());
         })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& addrs = CommentIterator::get_addresses();
-            return i < addrs.size() ? addrs[i] : 0;
+        .cache_builder([](std::vector<CommentRow>& rows) {
+            collect_comment_rows(rows);
+        })
+        .row_populator([](CommentRow& row, int argc, xsql::FunctionArg* argv) {
+            // argv[2]=address, argv[3]=comment, argv[4]=rpt_comment
+            if (argc > 2) row.ea = static_cast<ea_t>(argv[2].as_int64());
+            if (argc > 3 && !argv[3].is_null()) {
+                const char* c = argv[3].as_c_str();
+                row.comment = c ? c : "";
+            }
+            if (argc > 4 && !argv[4].is_null()) {
+                const char* c = argv[4].as_c_str();
+                row.rpt_comment = c ? c : "";
+            }
+        })
+        .column_int64("address", [](const CommentRow& row) -> int64_t {
+            return static_cast<int64_t>(row.ea);
         })
         .column_text_rw("comment",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& addrs = CommentIterator::get_addresses();
-                if (i >= addrs.size()) return "";
-                qstring cmt;
-                get_cmt(&cmt, addrs[i], false);
-                return cmt.c_str();
+            [](const CommentRow& row) -> std::string {
+                return row.comment;
             },
-            // Setter
-            [](size_t i, const char* new_cmt) -> bool {
+            [](CommentRow& row, const char* new_cmt) -> bool {
                 auto_wait();
-                auto& addrs = CommentIterator::get_addresses();
-                if (i >= addrs.size()) return false;
-                bool ok = set_cmt(addrs[i], new_cmt, false);
+                bool ok = set_cmt(row.ea, new_cmt ? new_cmt : "", false);
+                if (ok) row.comment = new_cmt ? new_cmt : "";
                 auto_wait();
                 return ok;
             })
         .column_text_rw("rpt_comment",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& addrs = CommentIterator::get_addresses();
-                if (i >= addrs.size()) return "";
-                qstring cmt;
-                get_cmt(&cmt, addrs[i], true);
-                return cmt.c_str();
+            [](const CommentRow& row) -> std::string {
+                return row.rpt_comment;
             },
-            // Setter
-            [](size_t i, const char* new_cmt) -> bool {
+            [](CommentRow& row, const char* new_cmt) -> bool {
                 auto_wait();
-                auto& addrs = CommentIterator::get_addresses();
-                if (i >= addrs.size()) return false;
-                bool ok = set_cmt(addrs[i], new_cmt, true);
+                bool ok = set_cmt(row.ea, new_cmt ? new_cmt : "", true);
+                if (ok) row.rpt_comment = new_cmt ? new_cmt : "";
                 auto_wait();
                 return ok;
             })
-        .deletable([](size_t i) -> bool {
+        .deletable([](CommentRow& row) -> bool {
             auto_wait();
-            // Delete both comments at this address
-            auto& addrs = CommentIterator::get_addresses();
-            if (i >= addrs.size()) return false;
-            ea_t ea = addrs[i];
-            set_cmt(ea, "", false);  // Delete regular
-            set_cmt(ea, "", true);   // Delete repeatable
+            set_cmt(row.ea, "", false);
+            set_cmt(row.ea, "", true);
             auto_wait();
             return true;
         })
-        .insertable([](int argc, sqlite3_value** argv) -> bool {
-            // address (col 0) is required, plus at least one comment column
-            if (argc < 1 || sqlite3_value_type(argv[0]) == SQLITE_NULL)
+        .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
+            if (argc < 1 || argv[0].is_null())
                 return false;
 
-            ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[0]));
-
+            ea_t ea = static_cast<ea_t>(argv[0].as_int64());
             bool did_something = false;
             auto_wait();
-
-            // Regular comment (col 1)
-            if (argc > 1 && sqlite3_value_type(argv[1]) != SQLITE_NULL) {
-                const char* cmt = reinterpret_cast<const char*>(
-                    sqlite3_value_text(argv[1]));
+            if (argc > 1 && !argv[1].is_null()) {
+                const char* cmt = argv[1].as_c_str();
                 if (cmt) {
                     set_cmt(ea, cmt, false);
                     did_something = true;
                 }
             }
-
-            // Repeatable comment (col 2)
-            if (argc > 2 && sqlite3_value_type(argv[2]) != SQLITE_NULL) {
-                const char* rpt = reinterpret_cast<const char*>(
-                    sqlite3_value_text(argv[2]));
+            if (argc > 2 && !argv[2].is_null()) {
+                const char* rpt = argv[2].as_c_str();
                 if (rpt) {
                     set_cmt(ea, rpt, true);
                     did_something = true;
@@ -664,17 +691,17 @@ public:
         return started_ && !valid_;
     }
 
-    void column(sqlite3_context* ctx, int col) override {
+    void column(xsql::FunctionContext& ctx, int col) override {
         if (!valid_) {
-            sqlite3_result_null(ctx);
+            ctx.result_null();
             return;
         }
         switch (col) {
-            case 0: sqlite3_result_int64(ctx, static_cast<int64_t>(xb_.from)); break;
-            case 1: sqlite3_result_int64(ctx, static_cast<int64_t>(target_)); break;
-            case 2: sqlite3_result_int(ctx, xb_.type); break;
-            case 3: sqlite3_result_int(ctx, xb_.iscode ? 1 : 0); break;
-            default: sqlite3_result_null(ctx); break;
+            case 0: ctx.result_int64(static_cast<int64_t>(xb_.from)); break;
+            case 1: ctx.result_int64(static_cast<int64_t>(target_)); break;
+            case 2: ctx.result_int(xb_.type); break;
+            case 3: ctx.result_int(xb_.iscode ? 1 : 0); break;
+            default: ctx.result_null(); break;
         }
     }
 
@@ -711,17 +738,17 @@ public:
         return started_ && !valid_;
     }
 
-    void column(sqlite3_context* ctx, int col) override {
+    void column(xsql::FunctionContext& ctx, int col) override {
         if (!valid_) {
-            sqlite3_result_null(ctx);
+            ctx.result_null();
             return;
         }
         switch (col) {
-            case 0: sqlite3_result_int64(ctx, static_cast<int64_t>(source_)); break;
-            case 1: sqlite3_result_int64(ctx, static_cast<int64_t>(xb_.to)); break;
-            case 2: sqlite3_result_int(ctx, xb_.type); break;
-            case 3: sqlite3_result_int(ctx, xb_.iscode ? 1 : 0); break;
-            default: sqlite3_result_null(ctx); break;
+            case 0: ctx.result_int64(static_cast<int64_t>(source_)); break;
+            case 1: ctx.result_int64(static_cast<int64_t>(xb_.to)); break;
+            case 2: ctx.result_int(xb_.type); break;
+            case 3: ctx.result_int(xb_.iscode ? 1 : 0); break;
+            default: ctx.result_null(); break;
         }
     }
 
@@ -740,6 +767,7 @@ public:
  */
 inline CachedTableDef<XrefInfo> define_xrefs() {
     return cached_table<XrefInfo>("xrefs")
+        .no_shared_cache()
         // Estimate row count without building cache
         .estimate_rows([]() -> size_t {
             // Heuristic: ~10 xrefs per function on average
@@ -826,18 +854,18 @@ public:
         return idx_ >= 0 && !valid_;
     }
 
-    void column(sqlite3_context* ctx, int col) override {
+    void column(xsql::FunctionContext& ctx, int col) override {
         if (!valid_ || idx_ < 0 || idx_ >= fc_.size()) {
-            sqlite3_result_null(ctx);
+            ctx.result_null();
             return;
         }
         const qbasic_block_t& bb = fc_.blocks[idx_];
         switch (col) {
-            case 0: sqlite3_result_int64(ctx, static_cast<int64_t>(func_ea_)); break;
-            case 1: sqlite3_result_int64(ctx, static_cast<int64_t>(bb.start_ea)); break;
-            case 2: sqlite3_result_int64(ctx, static_cast<int64_t>(bb.end_ea)); break;
-            case 3: sqlite3_result_int64(ctx, static_cast<int64_t>(bb.end_ea - bb.start_ea)); break;
-            default: sqlite3_result_null(ctx); break;
+            case 0: ctx.result_int64(static_cast<int64_t>(func_ea_)); break;
+            case 1: ctx.result_int64(static_cast<int64_t>(bb.start_ea)); break;
+            case 2: ctx.result_int64(static_cast<int64_t>(bb.end_ea)); break;
+            case 3: ctx.result_int64(static_cast<int64_t>(bb.end_ea - bb.start_ea)); break;
+            default: ctx.result_null(); break;
         }
     }
 
@@ -849,6 +877,7 @@ public:
 
 inline CachedTableDef<BlockInfo> define_blocks() {
     return cached_table<BlockInfo>("blocks")
+        .no_shared_cache()
         .estimate_rows([]() -> size_t {
             // Heuristic: ~10 blocks per function
             return get_func_qty() * 10;
@@ -902,6 +931,7 @@ struct ImportEnumContext {
 
 inline CachedTableDef<ImportInfo> define_imports() {
     return cached_table<ImportInfo>("imports")
+        .no_shared_cache()
         .estimate_rows([]() -> size_t {
             // Estimate: ~100 imports per module
             return get_import_module_qty() * 100;
@@ -949,6 +979,7 @@ inline CachedTableDef<ImportInfo> define_imports() {
 
 inline CachedTableDef<string_info_t> define_strings() {
     return cached_table<string_info_t>("strings")
+        .no_shared_cache()
         .estimate_rows([]() -> size_t {
             return get_strlist_qty();
         })
@@ -998,101 +1029,91 @@ inline CachedTableDef<string_info_t> define_strings() {
 // BOOKMARKS Table (with UPDATE/DELETE support)
 // ============================================================================
 
-struct BookmarkIterator {
-    struct Entry {
-        uint32_t index;
-        ea_t ea;
-        std::string desc;
-    };
-
-    static std::vector<Entry>& get_entries() {
-        static std::vector<Entry> entries;
-        return entries;
-    }
-
-    static void rebuild() {
-        auto& entries = get_entries();
-        entries.clear();
-
-        // Get bookmarks for IDA View (disassembly)
-        idaplace_t idaplace(inf_get_min_ea(), 0);
-        renderer_info_t rinfo;
-        lochist_entry_t loc(&idaplace, rinfo);
-
-        uint32_t count = bookmarks_t::size(loc, nullptr);
-
-        for (uint32_t idx = 0; idx < count; ++idx) {
-            idaplace_t place(0, 0);
-            lochist_entry_t entry(&place, rinfo);
-            qstring desc;
-            uint32_t index = idx;
-
-            if (bookmarks_t::get(&entry, &desc, &index, nullptr)) {
-                Entry e;
-                e.index = index;
-                e.ea = ((idaplace_t*)entry.place())->ea;
-                e.desc = desc.c_str();
-                entries.push_back(e);
-            }
-        }
-    }
+struct BookmarkRow {
+    uint32_t index = 0;
+    ea_t ea = BADADDR;
+    std::string desc;
 };
 
-inline VTableDef define_bookmarks() {
-    return table("bookmarks")
-        .count([]() {
-            BookmarkIterator::rebuild();
-            return BookmarkIterator::get_entries().size();
+inline void collect_bookmark_rows(std::vector<BookmarkRow>& rows) {
+    rows.clear();
+
+    idaplace_t idaplace(inf_get_min_ea(), 0);
+    renderer_info_t rinfo;
+    lochist_entry_t loc(&idaplace, rinfo);
+    uint32_t count = bookmarks_t::size(loc, nullptr);
+
+    for (uint32_t idx = 0; idx < count; ++idx) {
+        idaplace_t place(0, 0);
+        lochist_entry_t entry(&place, rinfo);
+        qstring desc;
+        uint32_t index = idx;
+        if (bookmarks_t::get(&entry, &desc, &index, nullptr)) {
+            BookmarkRow row;
+            row.index = index;
+            row.ea = static_cast<idaplace_t*>(entry.place())->ea;
+            row.desc = desc.c_str();
+            rows.push_back(std::move(row));
+        }
+    }
+}
+
+inline CachedTableDef<BookmarkRow> define_bookmarks() {
+    return cached_table<BookmarkRow>("bookmarks")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t {
+            return 1024;
         })
-        .column_int("slot", [](size_t i) -> int {
-            auto& entries = BookmarkIterator::get_entries();
-            return i < entries.size() ? entries[i].index : 0;
+        .cache_builder([](std::vector<BookmarkRow>& rows) {
+            collect_bookmark_rows(rows);
         })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& entries = BookmarkIterator::get_entries();
-            return i < entries.size() ? entries[i].ea : 0;
+        .row_populator([](BookmarkRow& row, int argc, xsql::FunctionArg* argv) {
+            // argv[2]=slot, argv[3]=address, argv[4]=description
+            if (argc > 2 && !argv[2].is_null()) row.index = static_cast<uint32_t>(argv[2].as_int());
+            if (argc > 3 && !argv[3].is_null()) row.ea = static_cast<ea_t>(argv[3].as_int64());
+            if (argc > 4 && !argv[4].is_null()) {
+                const char* d = argv[4].as_c_str();
+                row.desc = d ? d : "";
+            }
+        })
+        .column_int("slot", [](const BookmarkRow& row) -> int {
+            return static_cast<int>(row.index);
+        })
+        .column_int64("address", [](const BookmarkRow& row) -> int64_t {
+            return static_cast<int64_t>(row.ea);
         })
         .column_text_rw("description",
-            // Getter
-            [](size_t i) -> std::string {
-                auto& entries = BookmarkIterator::get_entries();
-                return i < entries.size() ? entries[i].desc : "";
+            [](const BookmarkRow& row) -> std::string {
+                return row.desc;
             },
-            // Setter - update bookmark description
-            [](size_t i, const char* new_desc) -> bool {
+            [](BookmarkRow& row, const char* new_desc) -> bool {
                 auto_wait();
-                auto& entries = BookmarkIterator::get_entries();
-                if (i >= entries.size()) return false;
-
-                idaplace_t place(entries[i].ea, 0);
+                idaplace_t place(row.ea, 0);
                 renderer_info_t rinfo;
                 lochist_entry_t loc(&place, rinfo);
-                bool ok = bookmarks_t_set_desc(qstring(new_desc), loc, entries[i].index, nullptr);
+                bool ok = bookmarks_t_set_desc(qstring(new_desc ? new_desc : ""), loc, row.index, nullptr);
+                if (ok) row.desc = new_desc ? new_desc : "";
                 auto_wait();
                 return ok;
             })
-        .deletable([](size_t i) -> bool {
+        .deletable([](BookmarkRow& row) -> bool {
             auto_wait();
-            auto& entries = BookmarkIterator::get_entries();
-            if (i >= entries.size()) return false;
-
-            idaplace_t place(entries[i].ea, 0);
+            idaplace_t place(row.ea, 0);
             renderer_info_t rinfo;
             lochist_entry_t loc(&place, rinfo);
-            bool ok = bookmarks_t::erase(loc, entries[i].index, nullptr);
+            bool ok = bookmarks_t::erase(loc, row.index, nullptr);
             auto_wait();
             return ok;
         })
-        .insertable([](int argc, sqlite3_value** argv) -> bool {
-            // address (col 1) is required
-            if (argc < 2 || sqlite3_value_type(argv[1]) == SQLITE_NULL)
+        .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
+            if (argc < 2 || argv[1].is_null())
                 return false;
 
-            ea_t ea = static_cast<ea_t>(sqlite3_value_int64(argv[1]));
+            ea_t ea = static_cast<ea_t>(argv[1].as_int64());
 
             const char* desc = "";
-            if (argc > 2 && sqlite3_value_type(argv[2]) != SQLITE_NULL) {
-                desc = reinterpret_cast<const char*>(sqlite3_value_text(argv[2]));
+            if (argc > 2 && !argv[2].is_null()) {
+                desc = argv[2].as_c_str();
                 if (!desc) desc = "";
             }
 
@@ -1102,10 +1123,9 @@ inline VTableDef define_bookmarks() {
             renderer_info_t rinfo;
             lochist_entry_t loc(&place, rinfo);
 
-            // slot (col 0): use provided slot or auto-assign next
             uint32_t slot = bookmarks_t::size(loc, nullptr);
-            if (argc > 0 && sqlite3_value_type(argv[0]) != SQLITE_NULL)
-                slot = static_cast<uint32_t>(sqlite3_value_int(argv[0]));
+            if (argc > 0 && !argv[0].is_null())
+                slot = static_cast<uint32_t>(argv[0].as_int());
 
             uint32_t result = bookmarks_t::mark(loc, slot, nullptr, desc, nullptr);
             auto_wait();
@@ -1119,25 +1139,21 @@ inline VTableDef define_bookmarks() {
 // HEADS Table - All defined items in the database
 // ============================================================================
 
-struct HeadsIterator {
-    static std::vector<ea_t>& get_addresses() {
-        static std::vector<ea_t> addrs;
-        return addrs;
-    }
-
-    static void rebuild() {
-        auto& addrs = get_addresses();
-        addrs.clear();
-
-        ea_t ea = inf_get_min_ea();
-        ea_t max_ea = inf_get_max_ea();
-
-        while (ea < max_ea && ea != BADADDR) {
-            addrs.push_back(ea);
-            ea = next_head(ea, max_ea);
-        }
-    }
+struct HeadRow {
+    ea_t ea = BADADDR;
 };
+
+inline void collect_head_rows(std::vector<HeadRow>& rows) {
+    rows.clear();
+
+    ea_t ea = inf_get_min_ea();
+    ea_t max_ea = inf_get_max_ea();
+
+    while (ea < max_ea && ea != BADADDR) {
+        rows.push_back({ea});
+        ea = next_head(ea, max_ea);
+    }
+}
 
 inline const char* get_item_type_str(ea_t ea) {
     flags64_t f = get_flags(ea);
@@ -1150,36 +1166,30 @@ inline const char* get_item_type_str(ea_t ea) {
     return "other";
 }
 
-inline VTableDef define_heads() {
-    return table("heads")
-        .count([]() {
-            HeadsIterator::rebuild();
-            return HeadsIterator::get_addresses().size();
+inline CachedTableDef<HeadRow> define_heads() {
+    return cached_table<HeadRow>("heads")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t {
+            return static_cast<size_t>(get_nlist_size());
         })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& addrs = HeadsIterator::get_addresses();
-            return i < addrs.size() ? addrs[i] : 0;
+        .cache_builder([](std::vector<HeadRow>& rows) {
+            collect_head_rows(rows);
         })
-        .column_int64("size", [](size_t i) -> int64_t {
-            auto& addrs = HeadsIterator::get_addresses();
-            if (i >= addrs.size()) return 0;
-            return get_item_size(addrs[i]);
+        .column_int64("address", [](const HeadRow& row) -> int64_t {
+            return static_cast<int64_t>(row.ea);
         })
-        .column_text("type", [](size_t i) -> std::string {
-            auto& addrs = HeadsIterator::get_addresses();
-            if (i >= addrs.size()) return "";
-            return get_item_type_str(addrs[i]);
+        .column_int64("size", [](const HeadRow& row) -> int64_t {
+            return static_cast<int64_t>(get_item_size(row.ea));
         })
-        .column_int64("flags", [](size_t i) -> int64_t {
-            auto& addrs = HeadsIterator::get_addresses();
-            if (i >= addrs.size()) return 0;
-            return get_flags(addrs[i]);
+        .column_text("type", [](const HeadRow& row) -> std::string {
+            return get_item_type_str(row.ea);
         })
-        .column_text("disasm", [](size_t i) -> std::string {
-            auto& addrs = HeadsIterator::get_addresses();
-            if (i >= addrs.size()) return "";
+        .column_int64("flags", [](const HeadRow& row) -> int64_t {
+            return static_cast<int64_t>(get_flags(row.ea));
+        })
+        .column_text("disasm", [](const HeadRow& row) -> std::string {
             qstring line;
-            generate_disasm_line(&line, addrs[i], GENDSM_FORCE_CODE);
+            generate_disasm_line(&line, row.ea, GENDSM_FORCE_CODE);
             tag_remove(&line);
             return line.c_str();
         })
@@ -1187,8 +1197,172 @@ inline VTableDef define_heads() {
 }
 
 // ============================================================================
+// BYTES Table - Read/write byte values with patch support
+// ============================================================================
+
+// Iterator for single-address point query (constraint pushdown on ea)
+class BytesAtIterator : public xsql::RowIterator {
+    ea_t ea_;
+    bool yielded_ = false;  // true after next() returned true (row available)
+    bool exhausted_ = false; // true after next() returned false (no more rows)
+
+public:
+    explicit BytesAtIterator(ea_t ea) : ea_(ea) {}
+
+    bool next() override {
+        if (yielded_) {
+            // Second call — exhausted
+            exhausted_ = true;
+            return false;
+        }
+        // First call — yield the single row
+        yielded_ = true;
+        return true;
+    }
+
+    bool eof() const override { return exhausted_; }
+
+    void column(xsql::FunctionContext& ctx, int col) override {
+        switch (col) {
+            case 0: // ea
+                ctx.result_int64(ea_);
+                break;
+            case 1: // value
+                ctx.result_int(get_byte(ea_));
+                break;
+            case 2: // original_value
+                ctx.result_int(static_cast<int>(get_original_byte(ea_)));
+                break;
+            case 3: // size
+                ctx.result_int(get_item_size(ea_));
+                break;
+            case 4: // type
+                ctx.result_text(get_item_type_str(ea_));
+                break;
+            case 5: { // is_patched
+                int patched = (get_byte(ea_) != static_cast<uchar>(get_original_byte(ea_))) ? 1 : 0;
+                ctx.result_int(patched);
+                break;
+            }
+        }
+    }
+
+    int64_t rowid() const override { return static_cast<int64_t>(ea_); }
+};
+
+inline CachedTableDef<HeadRow> define_bytes() {
+    return cached_table<HeadRow>("bytes")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t {
+            return static_cast<size_t>(get_nlist_size());
+        })
+        .cache_builder([](std::vector<HeadRow>& rows) {
+            collect_head_rows(rows);
+        })
+        .row_populator([](HeadRow& row, int argc, xsql::FunctionArg* argv) {
+            // argv[2] = ea, argv[3] = value, ...
+            if (argc > 2) row.ea = static_cast<ea_t>(argv[2].as_int64());
+        })
+        .column_int64("ea", [](const HeadRow& row) -> int64_t {
+            return static_cast<int64_t>(row.ea);
+        })
+        .column_int_rw("value",
+            [](const HeadRow& row) -> int {
+                return get_byte(row.ea);
+            },
+            [](HeadRow& row, int val) -> bool {
+                return patch_byte(row.ea, static_cast<uint64>(val));
+            })
+        .column_int("original_value", [](const HeadRow& row) -> int {
+            return static_cast<int>(get_original_byte(row.ea));
+        })
+        .column_int("size", [](const HeadRow& row) -> int {
+            return get_item_size(row.ea);
+        })
+        .column_text("type", [](const HeadRow& row) -> std::string {
+            return get_item_type_str(row.ea);
+        })
+        .column_int("is_patched", [](const HeadRow& row) -> int {
+            return (get_byte(row.ea) != static_cast<uchar>(get_original_byte(row.ea))) ? 1 : 0;
+        })
+        .filter_eq("ea", [](int64_t ea_val) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<BytesAtIterator>(static_cast<ea_t>(ea_val));
+        }, 1.0)
+        .build();
+}
+
+// ============================================================================
+// PATCHED_BYTES Table - All patched locations via visit_patched_bytes()
+// ============================================================================
+
+struct PatchedByteInfo {
+    ea_t ea;
+    qoff64_t fpos;
+    uint64 original_value;
+    uint64 patched_value;
+};
+
+// Callback for visit_patched_bytes (requires idaapi calling convention)
+static int idaapi patched_bytes_visitor(ea_t ea, qoff64_t fpos, uint64 o, uint64 v, void* ud) {
+    auto* vec = static_cast<std::vector<PatchedByteInfo>*>(ud);
+    vec->push_back({ea, fpos, o, v});
+    return 0; // continue
+}
+
+inline CachedTableDef<PatchedByteInfo> define_patched_bytes() {
+    return cached_table<PatchedByteInfo>("patched_bytes")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t {
+            return 1024;
+        })
+        .cache_builder([](std::vector<PatchedByteInfo>& rows) {
+            rows.clear();
+            visit_patched_bytes(0, BADADDR, patched_bytes_visitor, &rows);
+        })
+        .column_int64("ea", [](const PatchedByteInfo& row) -> int64_t {
+            return static_cast<int64_t>(row.ea);
+        })
+        .column_int("original_value", [](const PatchedByteInfo& row) -> int {
+            return static_cast<int>(row.original_value);
+        })
+        .column_int("patched_value", [](const PatchedByteInfo& row) -> int {
+            return static_cast<int>(row.patched_value);
+        })
+        .column_int64("fpos", [](const PatchedByteInfo& row) -> int64_t {
+            return static_cast<int64_t>(row.fpos);
+        })
+        .build();
+}
+
+// ============================================================================
 // INSTRUCTIONS Table - With func_addr constraint pushdown
 // ============================================================================
+
+inline std::string operand_kind_text(ea_t ea, int opnum);
+inline std::string operand_type_text(ea_t ea, int opnum);
+inline int operand_enum_serial(ea_t ea, int opnum);
+inline int64_t operand_stroff_delta(ea_t ea, int opnum);
+inline std::string operand_class_text(ea_t ea, int opnum);
+inline std::string operand_repr_kind_text(ea_t ea, int opnum);
+inline std::string operand_repr_type_name_text(ea_t ea, int opnum);
+inline std::string operand_repr_member_name_text(ea_t ea, int opnum);
+inline int operand_repr_serial(ea_t ea, int opnum);
+inline int64_t operand_repr_delta(ea_t ea, int opnum);
+inline std::string operand_format_spec_text(ea_t ea, int opnum);
+inline void instruction_column_common(xsql::FunctionContext& ctx, ea_t ea, ea_t func_addr, int col);
+
+inline constexpr int kInstructionOperandCount = 8;
+inline constexpr int kInstructionOperandBaseCol = 4;
+inline constexpr int kInstructionDisasmCol = kInstructionOperandBaseCol + kInstructionOperandCount;
+inline constexpr int kInstructionFuncAddrCol = kInstructionDisasmCol + 1;
+inline constexpr int kInstructionClassBaseCol = kInstructionFuncAddrCol + 1;
+inline constexpr int kInstructionReprKindBaseCol = kInstructionClassBaseCol + kInstructionOperandCount;
+inline constexpr int kInstructionReprTypeBaseCol = kInstructionReprKindBaseCol + kInstructionOperandCount;
+inline constexpr int kInstructionReprMemberBaseCol = kInstructionReprTypeBaseCol + kInstructionOperandCount;
+inline constexpr int kInstructionReprSerialBaseCol = kInstructionReprMemberBaseCol + kInstructionOperandCount;
+inline constexpr int kInstructionReprDeltaBaseCol = kInstructionReprSerialBaseCol + kInstructionOperandCount;
+inline constexpr int kInstructionFormatSpecBaseCol = kInstructionReprDeltaBaseCol + kInstructionOperandCount;
+inline constexpr int kInstructionColumnCount = kInstructionFormatSpecBaseCol + kInstructionOperandCount;
 
 // Iterator for instructions within a single function (constraint pushdown)
 class InstructionsInFuncIterator : public xsql::RowIterator {
@@ -1224,49 +1398,8 @@ public:
         return started_ && !valid_;
     }
 
-    void column(sqlite3_context* ctx, int col) override {
-        switch (col) {
-            case 0: // address
-                sqlite3_result_int64(ctx, current_ea_);
-                break;
-            case 1: { // itype
-                insn_t insn;
-                if (decode_insn(&insn, current_ea_) > 0) {
-                    sqlite3_result_int(ctx, insn.itype);
-                } else {
-                    sqlite3_result_int(ctx, 0);
-                }
-                break;
-            }
-            case 2: { // mnemonic
-                qstring mnem;
-                print_insn_mnem(&mnem, current_ea_);
-                sqlite3_result_text(ctx, mnem.c_str(), -1, SQLITE_TRANSIENT);
-                break;
-            }
-            case 3: // size
-                sqlite3_result_int(ctx, get_item_size(current_ea_));
-                break;
-            case 4: // operand0
-            case 5: // operand1
-            case 6: { // operand2
-                qstring op;
-                print_operand(&op, current_ea_, col - 4);
-                tag_remove(&op);
-                sqlite3_result_text(ctx, op.c_str(), -1, SQLITE_TRANSIENT);
-                break;
-            }
-            case 7: { // disasm
-                qstring line;
-                generate_disasm_line(&line, current_ea_, 0);
-                tag_remove(&line);
-                sqlite3_result_text(ctx, line.c_str(), -1, SQLITE_TRANSIENT);
-                break;
-            }
-            case 8: // func_addr
-                sqlite3_result_int64(ctx, func_addr_);
-                break;
-        }
+    void column(xsql::FunctionContext& ctx, int col) override {
+        instruction_column_common(ctx, current_ea_, func_addr_, col);
     }
 
     int64_t rowid() const override {
@@ -1274,112 +1407,856 @@ public:
     }
 };
 
-// Cache for full instruction scan
-struct InstructionsCache {
-    static std::vector<ea_t>& get() {
-        static std::vector<ea_t> cache;
-        return cache;
+// Iterator for a single instruction by exact address.
+class InstructionAtAddressIterator : public xsql::RowIterator {
+    ea_t ea_;
+    bool started_ = false;
+    bool valid_ = false;
+
+public:
+    explicit InstructionAtAddressIterator(ea_t ea) : ea_(ea) {}
+
+    bool next() override {
+        if (!started_) {
+            started_ = true;
+            valid_ = (ea_ != BADADDR) && is_code(get_flags(ea_));
+            return valid_;
+        }
+        valid_ = false;
+        return false;
     }
 
-    static void rebuild() {
-        auto& cache = get();
-        cache.clear();
+    bool eof() const override {
+        return started_ && !valid_;
+    }
 
-        ea_t ea = inf_get_min_ea();
-        ea_t max_ea = inf_get_max_ea();
+    void column(xsql::FunctionContext& ctx, int col) override {
+        func_t* f = get_func(ea_);
+        ea_t func_addr = f ? f->start_ea : 0;
+        instruction_column_common(ctx, ea_, func_addr, col);
+    }
 
-        while (ea < max_ea && ea != BADADDR) {
-            flags64_t f = get_flags(ea);
-            if (is_code(f)) {
-                cache.push_back(ea);
-            }
-            ea = next_head(ea, max_ea);
-        }
+    int64_t rowid() const override {
+        return static_cast<int64_t>(ea_);
     }
 };
 
-inline VTableDef define_instructions() {
-    return table("instructions")
-        .count([]() {
-            InstructionsCache::rebuild();
-            return InstructionsCache::get().size();
-        })
-        .column_int64("address", [](size_t i) -> int64_t {
-            auto& cache = InstructionsCache::get();
-            return i < cache.size() ? cache[i] : 0;
-        })
-        .column_int("itype", [](size_t i) -> int {
-            auto& cache = InstructionsCache::get();
-            if (i >= cache.size()) return 0;
+struct InstructionRow {
+    ea_t ea = BADADDR;
+};
+
+enum class OperandApplyKind {
+    None,
+    Clear,
+    Enum,
+    Stroff,
+};
+
+struct OperandApplyRequest {
+    OperandApplyKind kind = OperandApplyKind::None;
+    std::string enum_name;
+    std::string enum_member_name;
+    uchar enum_serial = 0;
+    std::vector<std::string> stroff_path_names;
+    adiff_t stroff_delta = 0;
+};
+
+inline std::string trim_copy(const std::string& in) {
+    size_t begin = 0;
+    size_t end = in.size();
+    while (begin < end && std::isspace(static_cast<unsigned char>(in[begin])) != 0) {
+        ++begin;
+    }
+    while (end > begin && std::isspace(static_cast<unsigned char>(in[end - 1])) != 0) {
+        --end;
+    }
+    return in.substr(begin, end - begin);
+}
+
+inline bool starts_with_ci(const std::string& text, const char* prefix) {
+    if (!prefix) return false;
+    const size_t prefix_len = std::strlen(prefix);
+    if (text.size() < prefix_len) return false;
+    for (size_t i = 0; i < prefix_len; ++i) {
+        const unsigned char a = static_cast<unsigned char>(text[i]);
+        const unsigned char b = static_cast<unsigned char>(prefix[i]);
+        if (std::tolower(a) != std::tolower(b)) return false;
+    }
+    return true;
+}
+
+inline bool equals_ci(const std::string& text, const char* token) {
+    if (!token) return false;
+    const size_t token_len = std::strlen(token);
+    if (text.size() != token_len) return false;
+    return starts_with_ci(text, token);
+}
+
+inline bool parse_int64(const std::string& text, int64_t& out_value) {
+    const std::string trimmed = trim_copy(text);
+    if (trimmed.empty()) return false;
+    char* end_ptr = nullptr;
+    const long long value = std::strtoll(trimmed.c_str(), &end_ptr, 0);
+    if (end_ptr == nullptr || *end_ptr != '\0') return false;
+    out_value = static_cast<int64_t>(value);
+    return true;
+}
+
+inline bool resolve_named_type_tid(const std::string& name, tid_t& out_tid, tinfo_t* out_tif = nullptr) {
+    if (name.empty()) return false;
+    tinfo_t tif;
+    if (!tif.get_named_type(nullptr, name.c_str())) {
+        return false;
+    }
+    const tid_t tid = tif.get_tid();
+    if (tid == BADNODE) {
+        return false;
+    }
+    if (out_tif) {
+        *out_tif = tif;
+    }
+    out_tid = tid;
+    return true;
+}
+
+inline std::string tid_name_or_fallback(tid_t tid) {
+    qstring out;
+    if (get_tid_name(&out, tid)) {
+        return std::string(out.c_str());
+    }
+    return "";
+}
+
+inline void split_path_names(const std::string& path_spec, std::vector<std::string>& out_names) {
+    out_names.clear();
+    size_t start = 0;
+    while (start <= path_spec.size()) {
+        const size_t slash = path_spec.find('/', start);
+        const size_t end = (slash == std::string::npos) ? path_spec.size() : slash;
+        std::string piece = trim_copy(path_spec.substr(start, end - start));
+        if (!piece.empty()) {
+            out_names.push_back(piece);
+        }
+        if (slash == std::string::npos) break;
+        start = slash + 1;
+    }
+}
+
+inline bool parse_operand_format_spec(const char* spec, OperandApplyRequest& out, std::string* out_error = nullptr) {
+    if (out_error) out_error->clear();
+    out = OperandApplyRequest{};
+    if (!spec) {
+        if (out_error) *out_error = "format spec is required";
+        return false;
+    }
+
+    const std::string text = trim_copy(spec);
+    if (text.empty()) {
+        if (out_error) *out_error = "format spec is empty";
+        return false;
+    }
+
+    if (equals_ci(text, "clear") || equals_ci(text, "plain") || equals_ci(text, "none")) {
+        out.kind = OperandApplyKind::Clear;
+        return true;
+    }
+
+    if (starts_with_ci(text, "enum:")) {
+        const std::string rest = trim_copy(text.substr(5));
+        if (rest.empty()) {
+            if (out_error) *out_error = "enum spec requires a type name";
+            return false;
+        }
+
+        std::string enum_name = rest;
+        std::string member_name;
+        uchar serial = 0;
+        bool has_serial = false;
+
+        const size_t serial_pos = rest.find(",serial=");
+        if (serial_pos != std::string::npos) {
+            enum_name = trim_copy(rest.substr(0, serial_pos));
+            const std::string serial_text = trim_copy(rest.substr(serial_pos + 8));
+            int64_t serial64 = 0;
+            if (!parse_int64(serial_text, serial64)) {
+                if (out_error) *out_error = "enum serial must be an integer";
+                return false;
+            }
+            if (serial64 < 0 || serial64 > 255) {
+                if (out_error) *out_error = "enum serial must be in range [0,255]";
+                return false;
+            }
+            serial = static_cast<uchar>(serial64);
+            has_serial = true;
+        }
+
+        const size_t member_pos = enum_name.rfind("::");
+        if (member_pos != std::string::npos) {
+            member_name = trim_copy(enum_name.substr(member_pos + 2));
+            enum_name = trim_copy(enum_name.substr(0, member_pos));
+            if (member_name.empty()) {
+                if (out_error) *out_error = "enum member name is empty";
+                return false;
+            }
+            if (has_serial) {
+                if (out_error) *out_error = "enum spec cannot use both member name and serial";
+                return false;
+            }
+        }
+
+        if (enum_name.empty()) {
+            if (out_error) *out_error = "enum type name is empty";
+            return false;
+        }
+        out.kind = OperandApplyKind::Enum;
+        out.enum_name = enum_name;
+        out.enum_member_name = member_name;
+        out.enum_serial = serial;
+        return true;
+    }
+
+    if (starts_with_ci(text, "stroff:")) {
+        const std::string rest = trim_copy(text.substr(7));
+        if (rest.empty()) {
+            if (out_error) *out_error = "stroff spec requires a type path";
+            return false;
+        }
+
+        std::string path_part = rest;
+        adiff_t delta = 0;
+
+        const size_t delta_pos = rest.find(",delta=");
+        if (delta_pos != std::string::npos) {
+            path_part = trim_copy(rest.substr(0, delta_pos));
+            const std::string delta_text = trim_copy(rest.substr(delta_pos + 7));
+            int64_t delta64 = 0;
+            if (!parse_int64(delta_text, delta64)) {
+                if (out_error) *out_error = "stroff delta must be an integer";
+                return false;
+            }
+            delta = static_cast<adiff_t>(delta64);
+        }
+
+        std::vector<std::string> path_names;
+        split_path_names(path_part, path_names);
+        if (path_names.empty()) {
+            if (out_error) *out_error = "stroff type path is empty";
+            return false;
+        }
+
+        out.kind = OperandApplyKind::Stroff;
+        out.stroff_path_names = std::move(path_names);
+        out.stroff_delta = delta;
+        return true;
+    }
+
+    if (out_error) *out_error = "unknown format spec mode";
+    return false;
+}
+
+inline bool parse_operand_apply_spec(const char* spec, OperandApplyRequest& out) {
+    return parse_operand_format_spec(spec, out, nullptr);
+}
+
+inline bool decode_operand(ea_t ea, int opnum, insn_t& out_insn, op_t& out_op, std::string* out_error = nullptr) {
+    if (out_error) out_error->clear();
+    if (ea == BADADDR || !is_code(get_flags(ea))) {
+        if (out_error) *out_error = "address is not code";
+        return false;
+    }
+    if (opnum < 0 || opnum >= UA_MAXOP) {
+        if (out_error) *out_error = "operand index out of range";
+        return false;
+    }
+    if (decode_insn(&out_insn, ea) <= 0) {
+        if (out_error) *out_error = "failed to decode instruction";
+        return false;
+    }
+    out_op = out_insn.ops[opnum];
+    if (out_op.type == o_void) {
+        if (out_error) *out_error = "operand slot is empty";
+        return false;
+    }
+    return true;
+}
+
+inline bool operand_numeric_value(ea_t ea, int opnum, uint64& out_value, std::string* out_error = nullptr) {
+    if (out_error) out_error->clear();
+    insn_t insn;
+    op_t op;
+    if (!decode_operand(ea, opnum, insn, op, out_error)) return false;
+
+    switch (op.type) {
+        case o_imm:
+            out_value = static_cast<uint64>(op.value);
+            return true;
+        case o_mem:
+        case o_near:
+        case o_far:
+        case o_displ:
+            out_value = static_cast<uint64>(op.addr);
+            return true;
+        default:
+            if (out_error) *out_error = "operand is not numeric";
+            return false;
+    }
+}
+
+inline bool resolve_enum_member_serial(const tinfo_t& enum_tif, const std::string& member_name, uchar& out_serial, std::string* out_error = nullptr) {
+    if (out_error) out_error->clear();
+    edm_t target;
+    const ssize_t idx = enum_tif.get_edm(&target, member_name.c_str());
+    if (idx < 0) {
+        if (out_error) *out_error = "enum member not found";
+        return false;
+    }
+
+    for (int s = 0; s <= 255; ++s) {
+        edm_t candidate;
+        const ssize_t by_val = enum_tif.get_edm_by_value(&candidate, target.value, DEFMASK64, static_cast<uchar>(s));
+        if (by_val < 0) break;
+        if (candidate.name == target.name) {
+            out_serial = static_cast<uchar>(s);
+            return true;
+        }
+    }
+
+    if (out_error) *out_error = "failed to resolve enum member serial";
+    return false;
+}
+
+inline bool apply_operand_representation(ea_t ea, int opnum, const OperandApplyRequest& req, std::string* out_error = nullptr) {
+    if (out_error) out_error->clear();
+    if (ea == BADADDR || !is_code(get_flags(ea))) {
+        if (out_error) *out_error = "address is not code";
+        return false;
+    }
+    if (opnum < 0 || opnum >= UA_MAXOP) {
+        if (out_error) *out_error = "operand index out of range";
+        return false;
+    }
+    if (req.kind == OperandApplyKind::None) {
+        if (out_error) *out_error = "format spec mode is none";
+        return false;
+    }
+
+    bool ok = false;
+    auto_wait();
+
+    switch (req.kind) {
+        case OperandApplyKind::Clear:
+            ok = clr_op_type(ea, opnum);
+            if (!ok) {
+                const flags64_t flags = get_flags(ea);
+                ok = !is_enum(flags, opnum) && !is_stroff(flags, opnum);
+            }
+            if (!ok && out_error) *out_error = "failed to clear operand representation";
+            break;
+
+        case OperandApplyKind::Enum: {
             insn_t insn;
-            if (decode_insn(&insn, cache[i]) > 0) return insn.itype;
+            op_t op;
+            if (!decode_operand(ea, opnum, insn, op, out_error)) {
+                auto_wait();
+                return false;
+            }
+
+            tid_t enum_tid = BADNODE;
+            tinfo_t enum_tif;
+            if (!resolve_named_type_tid(req.enum_name, enum_tid, &enum_tif) || !enum_tif.is_enum()) {
+                if (out_error) *out_error = "enum type not found";
+                auto_wait();
+                return false;
+            }
+
+            uchar serial = req.enum_serial;
+            if (!req.enum_member_name.empty()) {
+                uint64 operand_value = 0;
+                std::string value_err;
+                if (!operand_numeric_value(ea, opnum, operand_value, &value_err)) {
+                    if (out_error) *out_error = "enum member apply requires numeric operand: " + value_err;
+                    auto_wait();
+                    return false;
+                }
+
+                edm_t member;
+                if (enum_tif.get_edm(&member, req.enum_member_name.c_str()) < 0) {
+                    if (out_error) *out_error = "enum member not found";
+                    auto_wait();
+                    return false;
+                }
+                if (member.value != operand_value) {
+                    if (out_error) *out_error = "enum member value does not match operand value";
+                    auto_wait();
+                    return false;
+                }
+
+                std::string serial_err;
+                if (!resolve_enum_member_serial(enum_tif, req.enum_member_name, serial, &serial_err)) {
+                    if (out_error) *out_error = serial_err;
+                    auto_wait();
+                    return false;
+                }
+            }
+
+            ok = op_enum(ea, opnum, enum_tid, serial);
+            if (!ok && out_error) *out_error = "op_enum failed";
+            break;
+        }
+
+        case OperandApplyKind::Stroff: {
+            insn_t insn;
+            op_t op;
+            if (!decode_operand(ea, opnum, insn, op, out_error)) {
+                auto_wait();
+                return false;
+            }
+
+            std::vector<tid_t> path;
+            path.reserve(req.stroff_path_names.size());
+            for (const std::string& name : req.stroff_path_names) {
+                tid_t tid = BADNODE;
+                tinfo_t tif;
+                if (!resolve_named_type_tid(name, tid, &tif) || !tif.is_udt()) {
+                    if (out_error) *out_error = "stroff type path contains unknown or non-udt type";
+                    auto_wait();
+                    return false;
+                }
+                path.push_back(tid);
+            }
+
+            if (path.empty()) {
+                if (out_error) *out_error = "stroff type path is empty";
+                auto_wait();
+                return false;
+            }
+            ok = op_stroff(insn, opnum, path.data(), static_cast<int>(path.size()), req.stroff_delta);
+            if (!ok && out_error) *out_error = "op_stroff failed";
+            break;
+        }
+
+        case OperandApplyKind::None:
+            ok = false;
+            break;
+    }
+
+    if (ok) {
+        decompiler::invalidate_decompiler_cache(ea);
+    }
+    auto_wait();
+    return ok;
+}
+
+inline const char* operand_class_name(optype_t type) {
+    switch (type) {
+        case o_void:    return "";
+        case o_reg:     return "reg";
+        case o_mem:     return "mem";
+        case o_phrase:  return "phrase";
+        case o_displ:   return "displ";
+        case o_imm:     return "imm";
+        case o_far:     return "far";
+        case o_near:    return "near";
+        case o_idpspec0:
+        case o_idpspec1:
+        case o_idpspec2:
+        case o_idpspec3:
+        case o_idpspec4:
+        case o_idpspec5:
+            return "idpspec";
+        default:
+            return "unknown";
+    }
+}
+
+inline std::string operand_class_text(ea_t ea, int opnum) {
+    insn_t insn;
+    op_t op;
+    if (!decode_operand(ea, opnum, insn, op, nullptr)) return "";
+    return operand_class_name(op.type);
+}
+
+inline std::string operand_repr_kind_text(ea_t ea, int opnum) {
+    const flags64_t flags = get_flags(ea);
+    if (is_enum(flags, opnum)) return "enum";
+    if (is_stroff(flags, opnum)) return "stroff";
+    return "plain";
+}
+
+inline std::string operand_repr_type_name_text(ea_t ea, int opnum) {
+    const flags64_t flags = get_flags(ea);
+    if (is_enum(flags, opnum)) {
+        uchar serial = 0;
+        const tid_t enum_tid = get_enum_id(&serial, ea, opnum);
+        if (enum_tid != BADNODE) {
+            return tid_name_or_fallback(enum_tid);
+        }
+        return "";
+    }
+
+    if (is_stroff(flags, opnum)) {
+        std::array<tid_t, MAXSTRUCPATH> path{};
+        adiff_t delta = 0;
+        int path_len = get_stroff_path(path.data(), &delta, ea, opnum);
+        if (path_len <= 0) return "";
+        if (path_len > static_cast<int>(path.size())) {
+            path_len = static_cast<int>(path.size());
+        }
+
+        std::string joined;
+        for (int i = 0; i < path_len; ++i) {
+            const std::string name = tid_name_or_fallback(path[static_cast<size_t>(i)]);
+            if (name.empty()) continue;
+            if (!joined.empty()) joined += "/";
+            joined += name;
+        }
+        return joined;
+    }
+
+    return "";
+}
+
+inline std::string operand_repr_member_name_text(ea_t ea, int opnum) {
+    if (!is_enum(get_flags(ea), opnum)) return "";
+
+    uchar serial = 0;
+    const tid_t enum_tid = get_enum_id(&serial, ea, opnum);
+    if (enum_tid == BADNODE) return "";
+
+    uint64 value = 0;
+    if (!operand_numeric_value(ea, opnum, value, nullptr)) return "";
+
+    tinfo_t enum_tif;
+    if (!enum_tif.get_type_by_tid(enum_tid) || !enum_tif.is_enum()) return "";
+
+    qstring expr;
+    if (!get_enum_member_expr(&expr, enum_tif, static_cast<int>(serial), value)) {
+        return "";
+    }
+    return expr.c_str();
+}
+
+inline int operand_repr_serial(ea_t ea, int opnum) {
+    if (!is_enum(get_flags(ea), opnum)) return 0;
+    uchar serial = 0;
+    get_enum_id(&serial, ea, opnum);
+    return static_cast<int>(serial);
+}
+
+inline int64_t operand_repr_delta(ea_t ea, int opnum) {
+    if (!is_stroff(get_flags(ea), opnum)) return 0;
+    std::array<tid_t, MAXSTRUCPATH> path{};
+    adiff_t delta = 0;
+    get_stroff_path(path.data(), &delta, ea, opnum);
+    return static_cast<int64_t>(delta);
+}
+
+inline std::string operand_format_spec_text(ea_t ea, int opnum) {
+    const std::string kind = operand_repr_kind_text(ea, opnum);
+    if (kind == "enum") {
+        const std::string type_name = operand_repr_type_name_text(ea, opnum);
+        const int serial = operand_repr_serial(ea, opnum);
+        if (type_name.empty()) return "enum";
+        return "enum:" + type_name + ",serial=" + std::to_string(serial);
+    }
+    if (kind == "stroff") {
+        const std::string type_name = operand_repr_type_name_text(ea, opnum);
+        const int64_t delta = operand_repr_delta(ea, opnum);
+        if (type_name.empty()) return "stroff";
+        return "stroff:" + type_name + ",delta=" + std::to_string(delta);
+    }
+    return "plain";
+}
+
+// Legacy wrappers kept for compatibility with older call sites.
+inline std::string operand_kind_text(ea_t ea, int opnum) { return operand_repr_kind_text(ea, opnum); }
+inline std::string operand_type_text(ea_t ea, int opnum) { return operand_repr_type_name_text(ea, opnum); }
+inline int operand_enum_serial(ea_t ea, int opnum) { return operand_repr_serial(ea, opnum); }
+inline int64_t operand_stroff_delta(ea_t ea, int opnum) { return operand_repr_delta(ea, opnum); }
+
+inline void instruction_column_common(xsql::FunctionContext& ctx, ea_t ea, ea_t func_addr, int col) {
+    if (col == 0) {
+        ctx.result_int64(ea);
+        return;
+    }
+    if (col == 1) {
+        insn_t insn;
+        if (decode_insn(&insn, ea) > 0) ctx.result_int(insn.itype);
+        else ctx.result_int(0);
+        return;
+    }
+    if (col == 2) {
+        qstring mnem;
+        print_insn_mnem(&mnem, ea);
+        ctx.result_text(mnem.c_str());
+        return;
+    }
+    if (col == 3) {
+        ctx.result_int(get_item_size(ea));
+        return;
+    }
+    if (col >= kInstructionOperandBaseCol && col < (kInstructionOperandBaseCol + kInstructionOperandCount)) {
+        const int opnum = col - kInstructionOperandBaseCol;
+        qstring op;
+        print_operand(&op, ea, opnum);
+        tag_remove(&op);
+        ctx.result_text(op.c_str());
+        return;
+    }
+    if (col == kInstructionDisasmCol) {
+        qstring line;
+        generate_disasm_line(&line, ea, 0);
+        tag_remove(&line);
+        ctx.result_text(line.c_str());
+        return;
+    }
+    if (col == kInstructionFuncAddrCol) {
+        ctx.result_int64(func_addr);
+        return;
+    }
+    if (col >= kInstructionClassBaseCol && col < (kInstructionClassBaseCol + kInstructionOperandCount)) {
+        ctx.result_text(operand_class_text(ea, col - kInstructionClassBaseCol));
+        return;
+    }
+    if (col >= kInstructionReprKindBaseCol && col < (kInstructionReprKindBaseCol + kInstructionOperandCount)) {
+        ctx.result_text(operand_repr_kind_text(ea, col - kInstructionReprKindBaseCol));
+        return;
+    }
+    if (col >= kInstructionReprTypeBaseCol && col < (kInstructionReprTypeBaseCol + kInstructionOperandCount)) {
+        ctx.result_text(operand_repr_type_name_text(ea, col - kInstructionReprTypeBaseCol));
+        return;
+    }
+    if (col >= kInstructionReprMemberBaseCol && col < (kInstructionReprMemberBaseCol + kInstructionOperandCount)) {
+        ctx.result_text(operand_repr_member_name_text(ea, col - kInstructionReprMemberBaseCol));
+        return;
+    }
+    if (col >= kInstructionReprSerialBaseCol && col < (kInstructionReprSerialBaseCol + kInstructionOperandCount)) {
+        ctx.result_int(operand_repr_serial(ea, col - kInstructionReprSerialBaseCol));
+        return;
+    }
+    if (col >= kInstructionReprDeltaBaseCol && col < (kInstructionReprDeltaBaseCol + kInstructionOperandCount)) {
+        ctx.result_int64(operand_repr_delta(ea, col - kInstructionReprDeltaBaseCol));
+        return;
+    }
+    if (col >= kInstructionFormatSpecBaseCol && col < (kInstructionFormatSpecBaseCol + kInstructionOperandCount)) {
+        ctx.result_text(operand_format_spec_text(ea, col - kInstructionFormatSpecBaseCol));
+        return;
+    }
+    ctx.result_null();
+}
+
+inline void collect_instruction_rows(std::vector<InstructionRow>& rows) {
+    rows.clear();
+
+    ea_t ea = inf_get_min_ea();
+    ea_t max_ea = inf_get_max_ea();
+    while (ea < max_ea && ea != BADADDR) {
+        if (is_code(get_flags(ea))) {
+            rows.push_back({ea});
+        }
+        ea = next_head(ea, max_ea);
+    }
+}
+
+inline CachedTableDef<InstructionRow> define_instructions() {
+    auto builder = cached_table<InstructionRow>("instructions")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t {
+            return static_cast<size_t>(get_nlist_size());
+        })
+        .cache_builder([](std::vector<InstructionRow>& rows) {
+            collect_instruction_rows(rows);
+        })
+        .row_lookup([](InstructionRow& row, int64_t rowid) -> bool {
+            if (rowid < 0) return false;
+            const ea_t ea = static_cast<ea_t>(rowid);
+            if (ea != BADADDR && is_code(get_flags(ea))) {
+                row.ea = ea;
+                return true;
+            }
+            // Full scans use positional rowids; resolve through the instruction snapshot.
+            std::vector<InstructionRow> rows;
+            collect_instruction_rows(rows);
+            const size_t pos = static_cast<size_t>(rowid);
+            if (pos < rows.size() && rows[pos].ea != BADADDR && is_code(get_flags(rows[pos].ea))) {
+                row.ea = rows[pos].ea;
+                return true;
+            }
+            return false;
+        })
+        .column_int64("address", [](const InstructionRow& row) -> int64_t {
+            return static_cast<int64_t>(row.ea);
+        })
+        .column_int("itype", [](const InstructionRow& row) -> int {
+            insn_t insn;
+            if (decode_insn(&insn, row.ea) > 0) return insn.itype;
             return 0;
         })
-        .column_text("mnemonic", [](size_t i) -> std::string {
-            auto& cache = InstructionsCache::get();
-            if (i >= cache.size()) return "";
+        .column_text("mnemonic", [](const InstructionRow& row) -> std::string {
             qstring mnem;
-            print_insn_mnem(&mnem, cache[i]);
+            print_insn_mnem(&mnem, row.ea);
             return mnem.c_str();
         })
-        .column_int("size", [](size_t i) -> int {
-            auto& cache = InstructionsCache::get();
-            if (i >= cache.size()) return 0;
-            return get_item_size(cache[i]);
-        })
-        .column_text("operand0", [](size_t i) -> std::string {
-            auto& cache = InstructionsCache::get();
-            if (i >= cache.size()) return "";
+        .column_int("size", [](const InstructionRow& row) -> int {
+            return get_item_size(row.ea);
+        });
+
+    for (int opnum = 0; opnum < kInstructionOperandCount; ++opnum) {
+        const std::string op_col = "operand" + std::to_string(opnum);
+        builder.column_text(op_col.c_str(), [opnum](const InstructionRow& row) -> std::string {
             qstring op;
-            print_operand(&op, cache[i], 0);
+            print_operand(&op, row.ea, opnum);
             tag_remove(&op);
             return op.c_str();
-        })
-        .column_text("operand1", [](size_t i) -> std::string {
-            auto& cache = InstructionsCache::get();
-            if (i >= cache.size()) return "";
-            qstring op;
-            print_operand(&op, cache[i], 1);
-            tag_remove(&op);
-            return op.c_str();
-        })
-        .column_text("operand2", [](size_t i) -> std::string {
-            auto& cache = InstructionsCache::get();
-            if (i >= cache.size()) return "";
-            qstring op;
-            print_operand(&op, cache[i], 2);
-            tag_remove(&op);
-            return op.c_str();
-        })
-        .column_text("disasm", [](size_t i) -> std::string {
-            auto& cache = InstructionsCache::get();
-            if (i >= cache.size()) return "";
+        });
+    }
+
+    builder
+        .column_text("disasm", [](const InstructionRow& row) -> std::string {
             qstring line;
-            generate_disasm_line(&line, cache[i], 0);
+            generate_disasm_line(&line, row.ea, 0);
             tag_remove(&line);
             return line.c_str();
         })
-        .column_int64("func_addr", [](size_t i) -> int64_t {
-            auto& cache = InstructionsCache::get();
-            if (i >= cache.size()) return 0;
-            func_t* f = get_func(cache[i]);
+        .column_int64("func_addr", [](const InstructionRow& row) -> int64_t {
+            func_t* f = get_func(row.ea);
             return f ? f->start_ea : 0;
-        })
-        .deletable([](size_t i) -> bool {
+        });
+
+    for (int opnum = 0; opnum < kInstructionOperandCount; ++opnum) {
+        const std::string class_col = "operand" + std::to_string(opnum) + "_class";
+        builder.column_text(class_col.c_str(), [opnum](const InstructionRow& row) -> std::string {
+            return operand_class_text(row.ea, opnum);
+        });
+    }
+    for (int opnum = 0; opnum < kInstructionOperandCount; ++opnum) {
+        const std::string repr_kind_col = "operand" + std::to_string(opnum) + "_repr_kind";
+        builder.column_text(repr_kind_col.c_str(), [opnum](const InstructionRow& row) -> std::string {
+            return operand_repr_kind_text(row.ea, opnum);
+        });
+    }
+    for (int opnum = 0; opnum < kInstructionOperandCount; ++opnum) {
+        const std::string repr_type_col = "operand" + std::to_string(opnum) + "_repr_type_name";
+        builder.column_text(repr_type_col.c_str(), [opnum](const InstructionRow& row) -> std::string {
+            return operand_repr_type_name_text(row.ea, opnum);
+        });
+    }
+    for (int opnum = 0; opnum < kInstructionOperandCount; ++opnum) {
+        const std::string repr_member_col = "operand" + std::to_string(opnum) + "_repr_member_name";
+        builder.column_text(repr_member_col.c_str(), [opnum](const InstructionRow& row) -> std::string {
+            return operand_repr_member_name_text(row.ea, opnum);
+        });
+    }
+    for (int opnum = 0; opnum < kInstructionOperandCount; ++opnum) {
+        const std::string repr_serial_col = "operand" + std::to_string(opnum) + "_repr_serial";
+        builder.column_int(repr_serial_col.c_str(), [opnum](const InstructionRow& row) -> int {
+            return operand_repr_serial(row.ea, opnum);
+        });
+    }
+    for (int opnum = 0; opnum < kInstructionOperandCount; ++opnum) {
+        const std::string repr_delta_col = "operand" + std::to_string(opnum) + "_repr_delta";
+        builder.column_int64(repr_delta_col.c_str(), [opnum](const InstructionRow& row) -> int64_t {
+            return operand_repr_delta(row.ea, opnum);
+        });
+    }
+    for (int opnum = 0; opnum < kInstructionOperandCount; ++opnum) {
+        const std::string format_col = "operand" + std::to_string(opnum) + "_format_spec";
+        builder.column_text_rw(format_col.c_str(),
+            [opnum](const InstructionRow& row) -> std::string {
+                return operand_format_spec_text(row.ea, opnum);
+            },
+            [opnum](InstructionRow& row, xsql::FunctionArg val) -> bool {
+                if (val.is_nochange() || val.is_null()) {
+                    return true;
+                }
+                const std::string spec = val.as_text();
+                if (spec.empty()) {
+                    return true;
+                }
+                OperandApplyRequest req;
+                std::string parse_error;
+                if (!parse_operand_format_spec(spec.c_str(), req, &parse_error)) {
+                    xsql::set_vtab_error("invalid operand format spec '" + spec + "': " + parse_error);
+                    return false;
+                }
+
+                std::string apply_error;
+                if (!apply_operand_representation(row.ea, opnum, req, &apply_error)) {
+                    const std::string err = apply_error.empty() ? "apply failed" : apply_error;
+                    xsql::set_vtab_error("operand" + std::to_string(opnum) + " format apply failed at " +
+                                         std::to_string(static_cast<uint64_t>(row.ea)) + ": " + err);
+                    return false;
+                }
+
+                const std::string actual_kind = operand_repr_kind_text(row.ea, opnum);
+                if (req.kind == OperandApplyKind::Clear) {
+                    if (actual_kind != "plain") {
+                        xsql::set_vtab_error("post-apply verification failed: expected plain representation");
+                        return false;
+                    }
+                    return true;
+                }
+
+                if (req.kind == OperandApplyKind::Enum) {
+                    if (actual_kind != "enum") {
+                        xsql::set_vtab_error("post-apply verification failed: expected enum representation");
+                        return false;
+                    }
+                    const std::string actual_type = operand_repr_type_name_text(row.ea, opnum);
+                    if (!req.enum_name.empty() && actual_type != req.enum_name) {
+                        xsql::set_vtab_error("post-apply verification failed: enum type mismatch");
+                        return false;
+                    }
+                    if (!req.enum_member_name.empty()) {
+                        const std::string actual_member = operand_repr_member_name_text(row.ea, opnum);
+                        if (actual_member.find(req.enum_member_name) == std::string::npos) {
+                            xsql::set_vtab_error("post-apply verification failed: enum member mismatch");
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+
+                if (req.kind == OperandApplyKind::Stroff) {
+                    if (actual_kind != "stroff") {
+                        xsql::set_vtab_error("post-apply verification failed: expected stroff representation");
+                        return false;
+                    }
+                    const std::string actual_type = operand_repr_type_name_text(row.ea, opnum);
+                    if (!req.stroff_path_names.empty()) {
+                        const std::string& expected_root = req.stroff_path_names.front();
+                        if (!(actual_type == expected_root || actual_type.rfind(expected_root + "/", 0) == 0)) {
+                            xsql::set_vtab_error("post-apply verification failed: stroff type mismatch");
+                            return false;
+                        }
+                    }
+                    if (operand_repr_delta(row.ea, opnum) != static_cast<int64_t>(req.stroff_delta)) {
+                        xsql::set_vtab_error("post-apply verification failed: stroff delta mismatch");
+                        return false;
+                    }
+                    return true;
+                }
+
+                return true;
+            });
+    }
+
+    builder
+        .deletable([](InstructionRow& row) -> bool {
             auto_wait();
-            auto& cache = InstructionsCache::get();
-            if (i >= cache.size()) return false;
-            ea_t ea = cache[i];
-            asize_t sz = get_item_size(ea);
-            bool ok = del_items(ea, DELIT_SIMPLE, sz);
+            asize_t sz = get_item_size(row.ea);
+            bool ok = del_items(row.ea, DELIT_SIMPLE, sz);
             auto_wait();
             return ok;
         })
-        // Constraint pushdown: func_addr = X uses optimized iterator
+        .filter_eq("address", [](int64_t address) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<InstructionAtAddressIterator>(static_cast<ea_t>(address));
+        }, 1.0, 1.0)
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<InstructionsInFuncIterator>(static_cast<ea_t>(func_addr));
-        }, 100.0)
-        .build();
+        }, 100.0);
+
+    return builder.build();
 }
 
 // ============================================================================
@@ -1392,10 +2269,12 @@ struct TableRegistry {
     VTableDef segments;
     VTableDef names;
     VTableDef entries;
-    VTableDef comments;
-    VTableDef bookmarks;
-    VTableDef heads;
-    VTableDef instructions;
+    CachedTableDef<CommentRow> comments;
+    CachedTableDef<BookmarkRow> bookmarks;
+    CachedTableDef<HeadRow> heads;
+    CachedTableDef<HeadRow> bytes;
+    CachedTableDef<PatchedByteInfo> patched_bytes;
+    CachedTableDef<InstructionRow> instructions;
 
     // Cached tables (query-scoped cache - memory freed after query)
     CachedTableDef<XrefInfo> xrefs;
@@ -1414,6 +2293,8 @@ struct TableRegistry {
         , comments(define_comments())
         , bookmarks(define_bookmarks())
         , heads(define_heads())
+        , bytes(define_bytes())
+        , patched_bytes(define_patched_bytes())
         , instructions(define_instructions())
         , xrefs(define_xrefs())
         , blocks(define_blocks())
@@ -1443,19 +2324,21 @@ struct TableRegistry {
         register_index_table(db, "segments", &segments);
         register_index_table(db, "names", &names);
         register_index_table(db, "entries", &entries);
-        register_index_table(db, "comments", &comments);
-        register_index_table(db, "bookmarks", &bookmarks);
-        register_index_table(db, "heads", &heads);
-        register_index_table(db, "instructions", &instructions);
 
         // Cached tables (query-scoped cache)
+        register_cached_table(db, "comments", &comments);
+        register_cached_table(db, "bookmarks", &bookmarks);
+        register_cached_table(db, "heads", &heads);
+        register_cached_table(db, "bytes", &bytes);
+        register_cached_table(db, "patched_bytes", &patched_bytes);
+        register_cached_table(db, "instructions", &instructions);
         register_cached_table(db, "xrefs", &xrefs);
         register_cached_table(db, "blocks", &blocks);
         register_cached_table(db, "imports", &imports);
         register_cached_table(db, "strings", &strings);
 
-        // Table-valued function for entity search
-        search::register_jump_entities(db);
+        // Grep-style entity search table
+        search::register_grep_entities(db);
 
         // Create convenience views for common queries
         create_helper_views(db);
@@ -1492,21 +2375,6 @@ struct TableRegistry {
             WHERE x.is_code = 1
         )");
 
-        // string_refs view - which functions reference which strings
-        db.exec(R"(
-            CREATE VIEW IF NOT EXISTS string_refs AS
-            SELECT
-                s.address as string_addr,
-                s.content as string_value,
-                s.length as string_length,
-                x.from_ea as ref_addr,
-                f.address as func_addr,
-                f.name as func_name
-            FROM strings s
-            JOIN xrefs x ON x.to_ea = s.address
-            LEFT JOIN funcs f ON x.from_ea >= f.address
-                AND x.from_ea < f.end_ea
-        )");
     }
 
 private:
@@ -1526,3 +2394,5 @@ private:
 
 } // namespace entities
 } // namespace idasql
+
+

@@ -1,4 +1,6 @@
 claude-skill/bin/idasql.exe
+# Generated files
+src/common/idasql_agent_prompt.hpp
 # Build directories
 **/sqlite3.build/*
 build*/

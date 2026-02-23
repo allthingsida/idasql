@@ -1,8 +1,16 @@
+/**
+ * idasql_commands.hpp - Dot-command parser for interactive sessions
+ *
+ * Shared command handling for CLI and plugin session frontends.
+ */
+
 #pragma once
 
 #include <functional>
 #include <string>
 #include <sstream>
+
+#include <xsql/thinclient/clipboard.hpp>
 
 #ifdef IDASQL_HAS_AI_AGENT
 #include "agent_settings.hpp"
@@ -176,6 +184,13 @@ inline CommandResult handle_command(
             }
             if (callbacks.mcp_start) {
                 output = callbacks.mcp_start(port, bind_addr);
+                std::string host;
+                int actual_port = 0;
+                if (xsql::thinclient::extract_mcp_start_endpoint(output, host, actual_port)) {
+                    const std::string clipboard_text =
+                        xsql::thinclient::build_mcp_clipboard_payload("idasql", host, actual_port);
+                    (void)xsql::thinclient::try_copy_text_to_clipboard_windows(clipboard_text);
+                }
             } else {
                 output = "MCP server not available (plugin mode only)";
             }
@@ -255,6 +270,13 @@ inline CommandResult handle_command(
             }
             if (callbacks.http_start) {
                 output = callbacks.http_start(port, bind_addr);
+                std::string host;
+                int actual_port = 0;
+                if (xsql::thinclient::extract_http_start_endpoint(output, host, actual_port)) {
+                    const std::string clipboard_text =
+                        xsql::thinclient::build_http_clipboard_payload("idasql", host, actual_port);
+                    (void)xsql::thinclient::try_copy_text_to_clipboard_windows(clipboard_text);
+                }
             } else {
                 output = "HTTP server not available";
             }
