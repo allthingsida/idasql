@@ -358,7 +358,11 @@ struct idasql_plugmod_t : public plugmod_t
 static plugmod_t* idaapi init()
 {
     // Skip loading when running under idalib (e.g., idasql CLI)
+#if IDA_SDK_VERSION >= 930
     if (is_ida_library()) {
+#else
+    if (is_ida_library(nullptr, 0, nullptr)) {
+#endif
         msg("IDASQL: Running under idalib, plugin skipped\n");
         return nullptr;
     }

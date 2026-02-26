@@ -100,8 +100,12 @@ inline bool get_func_tinfo(ea_t ea, tinfo_t& tif) {
     return get_tinfo(&tif, ea);
 }
 
-// Helper to get calling convention name from callcnv_t
+// Helper to get calling convention name
+#if IDA_SDK_VERSION >= 930
 inline const char* get_cc_name(callcnv_t cc) {
+#else
+inline const char* get_cc_name(cm_t cc) {
+#endif
     switch (cc) {
         case CM_CC_CDECL:    return "cdecl";
         case CM_CC_STDCALL:  return "stdcall";

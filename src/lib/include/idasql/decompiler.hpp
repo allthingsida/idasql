@@ -410,7 +410,11 @@ struct ctree_collector_t : public ctree_parentee_t {
         ci.ea = insn->ea;
         ci.depth = parents.size();
 
+#if IDA_SDK_VERSION >= 930
         citem_t* p = parent_item();
+#else
+        citem_t* p = parents.empty() ? nullptr : parents.back();
+#endif
         if (p) {
             auto it = item_ids.find(p);
             if (it != item_ids.end()) ci.parent_id = it->second;
@@ -433,7 +437,11 @@ struct ctree_collector_t : public ctree_parentee_t {
         ci.ea = expr->ea;
         ci.depth = parents.size();
 
+#if IDA_SDK_VERSION >= 930
         citem_t* p = parent_item();
+#else
+        citem_t* p = parents.empty() ? nullptr : parents.back();
+#endif
         if (p) {
             auto it = item_ids.find(p);
             if (it != item_ids.end()) ci.parent_id = it->second;

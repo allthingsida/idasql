@@ -1109,7 +1109,11 @@ struct FuncArgEntry {
 
 inline const char* get_calling_convention_name(cm_t cc) {
     // Extract calling convention from cm_t (using CM_CC_MASK)
+#if IDA_SDK_VERSION >= 930
     callcnv_t conv = cc & CM_CC_MASK;
+#else
+    cm_t conv = cc & CM_CC_MASK;
+#endif
     switch (conv) {
         case CM_CC_CDECL: return "cdecl";
         case CM_CC_STDCALL: return "stdcall";
