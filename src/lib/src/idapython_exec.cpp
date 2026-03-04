@@ -80,13 +80,13 @@ ssize_t idaapi UiMessageCapture::on_event(ssize_t code, va_list va) {
     }
 
     const char* format = va_arg(va, const char*);
-    va_list format_args = va_arg(va, va_list);
+    va_list* format_args = va_arg(va, va_list*);
     if (format == nullptr) {
         return 0;
     }
 
     va_list copy;
-    va_copy(copy, format_args);
+    va_copy(copy, *format_args);
     qstring formatted;
     formatted.vsprnt(format, copy);
     va_end(copy);
