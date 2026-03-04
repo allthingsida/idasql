@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * example_decompiler.cpp - Hex-Rays decompiler analysis with IDASQL
  *

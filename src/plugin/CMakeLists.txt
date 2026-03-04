@@ -3,7 +3,9 @@
 
 # Plugin sources
 ida_add_plugin(idasql_plugin
-    SOURCES main.cpp
+    SOURCES
+        main.cpp
+        ui_context_function.cpp
 )
 
 # Output as idasql.dll (not idasql_plugin.dll)
@@ -13,11 +15,11 @@ set_target_properties(idasql_plugin PROPERTIES OUTPUT_NAME "idasql")
 target_include_directories(idasql_plugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include
 )
-target_link_libraries(idasql_plugin PRIVATE xsql::xsql)
+target_link_libraries(idasql_plugin PRIVATE idasql xsql::xsql)
 
 # USE_DANGEROUS_FUNCTIONS: Disable IDA's safe function macros (pro.h: strcpy, sprintf, getenv, etc.)
 # USE_STANDARD_FILE_FUNCTIONS: Disable IDA's file function macros (fpro.h: fgetc, fputc, etc.)
-#   Required for std::getenv and file I/O in agent_settings.hpp
+#   Required for std::lib/file APIs used by plugin and shared libraries.
 target_compile_definitions(idasql_plugin PRIVATE
     USE_DANGEROUS_FUNCTIONS
     USE_STANDARD_FILE_FUNCTIONS
@@ -39,33 +41,25 @@ endif()
 target_compile_definitions(idasql_plugin PRIVATE USE_HEXRAYS)
 
 # ============================================================================
-# AI Agent support (from parent project)
+# MCP support (from parent project)
 # ============================================================================
 
-if(IDASQL_WITH_AI_AGENT)
-    # Add ai_agent and mcp_server source files
+if(IDASQL_WITH_MCP)
+    # Add MCP server source files
     target_sources(idasql_plugin PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../common/ai_agent.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../common/mcp_server.cpp
     )
     target_include_directories(idasql_plugin PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../external/libagents/external/fastmcpp/include
-        ${IDASQL_GENERATED_INCLUDE_DIR}
     )
 
-    # Link against libagents and fastmcpp
-    target_link_libraries(idasql_plugin PRIVATE libagents fastmcpp_core)
+    # Link against fastmcpp
+    target_link_libraries(idasql_plugin PRIVATE fastmcpp_core)
 
     # Define the feature flag
-    target_compile_definitions(idasql_plugin PRIVATE IDASQL_HAS_AI_AGENT)
+    target_compile_definitions(idasql_plugin PRIVATE IDASQL_HAS_MCP)
 
-    # Add dependency on prompt generation
-    if(TARGET generate_prompt)
-        add_dependencies(idasql_plugin generate_prompt)
-    endif()
-
-    message(STATUS "idasql_plugin: AI agent support enabled")
+    message(STATUS "idasql_plugin: MCP support enabled")
 endif()
 
 # ============================================================================
@@ -74,6 +68,7 @@ endif()
 
 target_sources(idasql_plugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/http_server.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/welcome_query.cpp
 )
 target_include_directories(idasql_plugin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common

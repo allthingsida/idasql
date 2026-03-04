@@ -1,43 +1,22 @@
-/**
- * entities_types.hpp - IDA type system tables
- *
- * Provides SQL tables for querying IDA's type library:
- *   types             - All local types (structs, unions, enums, typedefs, funcs)
- *   types_members     - Struct/union member details
- *   types_enum_values - Enum constant values
- *   types_func_args   - Function prototype arguments
- *
- * Also provides views:
- *   types_v_structs   - Filter: structs only
- *   types_v_unions    - Filter: unions only
- *   types_v_enums     - Filter: enums only
- *   types_v_typedefs  - Filter: typedefs only
- *   types_v_funcs     - Filter: function types only
- */
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
 
-#pragma once
-
-#include <idasql/platform.hpp>
-
-#include <idasql/vtable.hpp>
-#include <xsql/database.hpp>
-
-#include <idasql/platform_undef.hpp>
-
-// IDA SDK headers
-#include <ida.hpp>
-#include <typeinf.hpp>
+#include "entities_types.hpp"
 
 namespace idasql {
 namespace types {
 
-inline void ida_undo_hook(const std::string&) {}
+// ============================================================================
+// Undo hook
+// ============================================================================
+
+void ida_undo_hook(const std::string&) {}
 
 // ============================================================================
 // Type Kind Classification
 // ============================================================================
 
-inline const char* get_type_kind(const tinfo_t& tif) {
+const char* get_type_kind(const tinfo_t& tif) {
     if (tif.is_struct()) return "struct";
     if (tif.is_union()) return "union";
     if (tif.is_enum()) return "enum";
@@ -52,24 +31,7 @@ inline const char* get_type_kind(const tinfo_t& tif) {
 // Type Entry Cache
 // ============================================================================
 
-struct TypeEntry {
-    uint32_t ordinal;
-    std::string name;
-    std::string kind;
-    int64_t size;
-    int alignment;
-    bool is_struct;
-    bool is_union;
-    bool is_enum;
-    bool is_typedef;
-    bool is_func;
-    bool is_ptr;
-    bool is_array;
-    std::string definition;
-    std::string resolved;  // For typedefs: what it resolves to
-};
-
-inline void collect_types(std::vector<TypeEntry>& rows) {
+void collect_types(std::vector<TypeEntry>& rows) {
     rows.clear();
 
     til_t* ti = get_idati();
@@ -143,7 +105,7 @@ inline void collect_types(std::vector<TypeEntry>& rows) {
 // TYPES Table - All local types (enhanced)
 // ============================================================================
 
-inline CachedTableDef<TypeEntry> define_types() {
+CachedTableDef<TypeEntry> define_types() {
     return cached_table<TypeEntry>("types")
         .no_shared_cache()
         .on_modify(ida_undo_hook)
@@ -264,39 +226,15 @@ inline CachedTableDef<TypeEntry> define_types() {
 // TYPES_MEMBERS Table - Struct/union field details
 // ============================================================================
 
-struct MemberEntry {
-    uint32_t type_ordinal;
-    std::string type_name;
-    int member_index;
-    std::string member_name;
-    int64_t offset;
-    int64_t offset_bits;
-    int64_t size;
-    int64_t size_bits;
-    std::string member_type;
-    bool is_bitfield;
-    bool is_baseclass;
-    std::string comment;
-    // Member type classification (for efficient filtering)
-    bool mt_is_struct;
-    bool mt_is_union;
-    bool mt_is_enum;
-    bool mt_is_ptr;
-    bool mt_is_array;
-    int member_type_ordinal;  // -1 if member type not in local types
-};
-
-// Helper to get ordinal of a type by name
-inline int get_type_ordinal_by_name(til_t* ti, const char* type_name) {
+int get_type_ordinal_by_name(til_t* ti, const char* type_name) {
     if (!ti || !type_name || !type_name[0]) return -1;
     uint32_t ord = get_type_ordinal(ti, type_name);
     return (ord != 0) ? static_cast<int>(ord) : -1;
 }
 
-// Helper to classify member type and get ordinal
-inline void classify_member_type(const tinfo_t& mtype, til_t* ti,
-                                  bool& is_struct, bool& is_union, bool& is_enum,
-                                  bool& is_ptr, bool& is_array, int& type_ordinal) {
+void classify_member_type(const tinfo_t& mtype, til_t* ti,
+                          bool& is_struct, bool& is_union, bool& is_enum,
+                          bool& is_ptr, bool& is_array, int& type_ordinal) {
     is_struct = false;
     is_union = false;
     is_enum = false;
@@ -324,7 +262,7 @@ inline void classify_member_type(const tinfo_t& mtype, til_t* ti,
     }
 }
 
-inline void collect_members(std::vector<MemberEntry>& rows) {
+void collect_members(std::vector<MemberEntry>& rows) {
     rows.clear();
 
     til_t* ti = get_idati();
@@ -374,123 +312,113 @@ inline void collect_members(std::vector<MemberEntry>& rows) {
     }
 }
 
-/**
- * Iterator for members of a specific type.
- * Used when query has: WHERE type_ordinal = X
- */
-class MembersInTypeIterator : public xsql::RowIterator {
-    uint32_t type_ordinal_;
-    std::string type_name_;
-    udt_type_data_t udt_;
-    int idx_ = -1;
-    bool valid_ = false;
-    bool has_data_ = false;
+// ============================================================================
+// MembersInTypeIterator
+// ============================================================================
 
-public:
-    explicit MembersInTypeIterator(uint32_t ordinal) : type_ordinal_(ordinal) {
-        til_t* ti = get_idati();
-        if (!ti) return;
+MembersInTypeIterator::MembersInTypeIterator(uint32_t ordinal) : type_ordinal_(ordinal) {
+    til_t* ti = get_idati();
+    if (!ti) return;
 
-        const char* name = get_numbered_type_name(ti, type_ordinal_);
-        if (!name) return;
-        type_name_ = name;
+    const char* name = get_numbered_type_name(ti, type_ordinal_);
+    if (!name) return;
+    type_name_ = name;
 
-        tinfo_t tif;
-        if (tif.get_numbered_type(ti, type_ordinal_)) {
-            if (tif.is_struct() || tif.is_union()) {
-                has_data_ = tif.get_udt_details(&udt_);
-            }
-        }
-    }
-
-    bool next() override {
-        if (!has_data_) return false;
-        ++idx_;
-        valid_ = (idx_ >= 0 && static_cast<size_t>(idx_) < udt_.size());
-        return valid_;
-    }
-
-    bool eof() const override {
-        return idx_ >= 0 && !valid_;
-    }
-
-    void column(xsql::FunctionContext& ctx, int col) override {
-        if (!valid_ || idx_ < 0 || static_cast<size_t>(idx_) >= udt_.size()) {
-            ctx.result_null();
-            return;
-        }
-        const udm_t& m = udt_[idx_];
-        switch (col) {
-            case 0: ctx.result_int(type_ordinal_); break;
-            case 1: ctx.result_text(type_name_.c_str()); break;
-            case 2: ctx.result_int(idx_); break;
-            case 3: ctx.result_text(m.name.c_str()); break;
-            case 4: ctx.result_int64(static_cast<int64_t>(m.offset / 8)); break;
-            case 5: ctx.result_int64(static_cast<int64_t>(m.offset)); break;
-            case 6: ctx.result_int64(static_cast<int64_t>(m.size / 8)); break;
-            case 7: ctx.result_int64(static_cast<int64_t>(m.size)); break;
-            case 8: {
-                qstring type_str;
-                m.type.print(&type_str);
-                ctx.result_text(type_str.c_str());
-                break;
-            }
-            case 9: ctx.result_int(m.is_bitfield() ? 1 : 0); break;
-            case 10: ctx.result_int(m.is_baseclass() ? 1 : 0); break;
-            case 11: ctx.result_text(m.cmt.c_str()); break;
-            // Member type classification columns
-            case 12: case 13: case 14: case 15: case 16: case 17: {
-                // Classify the member type on-the-fly for iterator
-                bool mt_is_struct, mt_is_union, mt_is_enum, mt_is_ptr, mt_is_array;
-                int mt_ordinal;
-                classify_member_type(m.type, get_idati(),
-                    mt_is_struct, mt_is_union, mt_is_enum,
-                    mt_is_ptr, mt_is_array, mt_ordinal);
-                switch (col) {
-                    case 12: ctx.result_int(mt_is_struct ? 1 : 0); break;
-                    case 13: ctx.result_int(mt_is_union ? 1 : 0); break;
-                    case 14: ctx.result_int(mt_is_enum ? 1 : 0); break;
-                    case 15: ctx.result_int(mt_is_ptr ? 1 : 0); break;
-                    case 16: ctx.result_int(mt_is_array ? 1 : 0); break;
-                    case 17: ctx.result_int(mt_ordinal); break;
-                }
-                break;
-            }
-            default: ctx.result_null(); break;
-        }
-    }
-
-    int64_t rowid() const override {
-        return static_cast<int64_t>(type_ordinal_) * 10000 + idx_;
-    }
-};
-
-// Helper to get type and member by ordinal/index (for write operations)
-struct TypeMemberRef {
     tinfo_t tif;
-    udt_type_data_t udt;
-    bool valid;
-    uint32_t ordinal;
-
-    TypeMemberRef(uint32_t ord) : valid(false), ordinal(ord) {
-        til_t* ti = get_idati();
-        if (!ti) return;
-        if (tif.get_numbered_type(ti, ord)) {
-            if (tif.is_struct() || tif.is_union()) {
-                valid = tif.get_udt_details(&udt);
-            }
+    if (tif.get_numbered_type(ti, type_ordinal_)) {
+        if (tif.is_struct() || tif.is_union()) {
+            has_data_ = tif.get_udt_details(&udt_);
         }
     }
+}
 
-    bool save() {
-        if (!valid) return false;
-        tinfo_t new_tif;
-        new_tif.create_udt(udt, tif.is_union() ? BTF_UNION : BTF_STRUCT);
-        return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr);
+bool MembersInTypeIterator::next() {
+    if (!has_data_) return false;
+    ++idx_;
+    valid_ = (idx_ >= 0 && static_cast<size_t>(idx_) < udt_.size());
+    return valid_;
+}
+
+bool MembersInTypeIterator::eof() const {
+    return idx_ >= 0 && !valid_;
+}
+
+void MembersInTypeIterator::column(xsql::FunctionContext& ctx, int col) {
+    if (!valid_ || idx_ < 0 || static_cast<size_t>(idx_) >= udt_.size()) {
+        ctx.result_null();
+        return;
     }
-};
+    const udm_t& m = udt_[idx_];
+    switch (col) {
+        case 0: ctx.result_int(type_ordinal_); break;
+        case 1: ctx.result_text(type_name_.c_str()); break;
+        case 2: ctx.result_int(idx_); break;
+        case 3: ctx.result_text(m.name.c_str()); break;
+        case 4: ctx.result_int64(static_cast<int64_t>(m.offset / 8)); break;
+        case 5: ctx.result_int64(static_cast<int64_t>(m.offset)); break;
+        case 6: ctx.result_int64(static_cast<int64_t>(m.size / 8)); break;
+        case 7: ctx.result_int64(static_cast<int64_t>(m.size)); break;
+        case 8: {
+            qstring type_str;
+            m.type.print(&type_str);
+            ctx.result_text(type_str.c_str());
+            break;
+        }
+        case 9: ctx.result_int(m.is_bitfield() ? 1 : 0); break;
+        case 10: ctx.result_int(m.is_baseclass() ? 1 : 0); break;
+        case 11: ctx.result_text(m.cmt.c_str()); break;
+        // Member type classification columns
+        case 12: case 13: case 14: case 15: case 16: case 17: {
+            // Classify the member type on-the-fly for iterator
+            bool mt_is_struct, mt_is_union, mt_is_enum, mt_is_ptr, mt_is_array;
+            int mt_ordinal;
+            classify_member_type(m.type, get_idati(),
+                mt_is_struct, mt_is_union, mt_is_enum,
+                mt_is_ptr, mt_is_array, mt_ordinal);
+            switch (col) {
+                case 12: ctx.result_int(mt_is_struct ? 1 : 0); break;
+                case 13: ctx.result_int(mt_is_union ? 1 : 0); break;
+                case 14: ctx.result_int(mt_is_enum ? 1 : 0); break;
+                case 15: ctx.result_int(mt_is_ptr ? 1 : 0); break;
+                case 16: ctx.result_int(mt_is_array ? 1 : 0); break;
+                case 17: ctx.result_int(mt_ordinal); break;
+            }
+            break;
+        }
+        default: ctx.result_null(); break;
+    }
+}
 
-inline bool build_member_entry(uint32_t ordinal, int member_index, MemberEntry& entry) {
+int64_t MembersInTypeIterator::rowid() const {
+    return static_cast<int64_t>(type_ordinal_) * 10000 + idx_;
+}
+
+// ============================================================================
+// TypeMemberRef
+// ============================================================================
+
+TypeMemberRef::TypeMemberRef(uint32_t ord) : valid(false), ordinal(ord) {
+    til_t* ti = get_idati();
+    if (!ti) return;
+    if (tif.get_numbered_type(ti, ord)) {
+        if (tif.is_struct() || tif.is_union()) {
+            valid = tif.get_udt_details(&udt);
+        }
+    }
+}
+
+bool TypeMemberRef::save() {
+    if (!valid) return false;
+    tinfo_t new_tif;
+    new_tif.create_udt(udt, tif.is_union() ? BTF_UNION : BTF_STRUCT);
+    return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr);
+}
+
+// ============================================================================
+// build_member_entry
+// ============================================================================
+
+bool build_member_entry(uint32_t ordinal, int member_index, MemberEntry& entry) {
     til_t* ti = get_idati();
     if (!ti) return false;
 
@@ -528,7 +456,11 @@ inline bool build_member_entry(uint32_t ordinal, int member_index, MemberEntry& 
     return true;
 }
 
-inline CachedTableDef<MemberEntry> define_types_members() {
+// ============================================================================
+// TYPES_MEMBERS Table Definition
+// ============================================================================
+
+CachedTableDef<MemberEntry> define_types_members() {
     return cached_table<MemberEntry>("types_members")
         .no_shared_cache()
         .on_modify(ida_undo_hook)
@@ -684,17 +616,7 @@ inline CachedTableDef<MemberEntry> define_types_members() {
 // TYPES_ENUM_VALUES Table - Enum constants
 // ============================================================================
 
-struct EnumValueEntry {
-    uint32_t type_ordinal;
-    std::string type_name;
-    int value_index;
-    std::string value_name;
-    int64_t value;
-    uint64_t uvalue;
-    std::string comment;
-};
-
-inline void collect_enum_values(std::vector<EnumValueEntry>& rows) {
+void collect_enum_values(std::vector<EnumValueEntry>& rows) {
     rows.clear();
 
     til_t* ti = get_idati();
@@ -730,95 +652,85 @@ inline void collect_enum_values(std::vector<EnumValueEntry>& rows) {
     }
 }
 
-/**
- * Iterator for enum values of a specific enum type.
- * Used when query has: WHERE type_ordinal = X
- */
-class EnumValuesInTypeIterator : public xsql::RowIterator {
-    uint32_t type_ordinal_;
-    std::string type_name_;
-    enum_type_data_t ei_;
-    int idx_ = -1;
-    bool valid_ = false;
-    bool has_data_ = false;
+// ============================================================================
+// EnumValuesInTypeIterator
+// ============================================================================
 
-public:
-    explicit EnumValuesInTypeIterator(uint32_t ordinal) : type_ordinal_(ordinal) {
-        til_t* ti = get_idati();
-        if (!ti) return;
+EnumValuesInTypeIterator::EnumValuesInTypeIterator(uint32_t ordinal) : type_ordinal_(ordinal) {
+    til_t* ti = get_idati();
+    if (!ti) return;
 
-        const char* name = get_numbered_type_name(ti, type_ordinal_);
-        if (!name) return;
-        type_name_ = name;
+    const char* name = get_numbered_type_name(ti, type_ordinal_);
+    if (!name) return;
+    type_name_ = name;
 
-        tinfo_t tif;
-        if (tif.get_numbered_type(ti, type_ordinal_)) {
-            if (tif.is_enum()) {
-                has_data_ = tif.get_enum_details(&ei_);
-            }
-        }
-    }
-
-    bool next() override {
-        if (!has_data_) return false;
-        ++idx_;
-        valid_ = (idx_ >= 0 && static_cast<size_t>(idx_) < ei_.size());
-        return valid_;
-    }
-
-    bool eof() const override {
-        return idx_ >= 0 && !valid_;
-    }
-
-    void column(xsql::FunctionContext& ctx, int col) override {
-        if (!valid_ || idx_ < 0 || static_cast<size_t>(idx_) >= ei_.size()) {
-            ctx.result_null();
-            return;
-        }
-        const edm_t& e = ei_[idx_];
-        switch (col) {
-            case 0: ctx.result_int(type_ordinal_); break;
-            case 1: ctx.result_text(type_name_.c_str()); break;
-            case 2: ctx.result_int(idx_); break;
-            case 3: ctx.result_text(e.name.c_str()); break;
-            case 4: ctx.result_int64(static_cast<int64_t>(e.value)); break;
-            case 5: ctx.result_int64(static_cast<int64_t>(e.value)); break;  // uvalue
-            case 6: ctx.result_text(e.cmt.c_str()); break;
-            default: ctx.result_null(); break;
-        }
-    }
-
-    int64_t rowid() const override {
-        return static_cast<int64_t>(type_ordinal_) * 10000 + idx_;
-    }
-};
-
-// Helper to get enum type by ordinal (for write operations)
-struct EnumTypeRef {
     tinfo_t tif;
-    enum_type_data_t ei;
-    bool valid;
-    uint32_t ordinal;
-
-    EnumTypeRef(uint32_t ord) : valid(false), ordinal(ord) {
-        til_t* ti = get_idati();
-        if (!ti) return;
-        if (tif.get_numbered_type(ti, ord)) {
-            if (tif.is_enum()) {
-                valid = tif.get_enum_details(&ei);
-            }
+    if (tif.get_numbered_type(ti, type_ordinal_)) {
+        if (tif.is_enum()) {
+            has_data_ = tif.get_enum_details(&ei_);
         }
     }
+}
 
-    bool save() {
-        if (!valid) return false;
-        tinfo_t new_tif;
-        new_tif.create_enum(ei);
-        return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr);
+bool EnumValuesInTypeIterator::next() {
+    if (!has_data_) return false;
+    ++idx_;
+    valid_ = (idx_ >= 0 && static_cast<size_t>(idx_) < ei_.size());
+    return valid_;
+}
+
+bool EnumValuesInTypeIterator::eof() const {
+    return idx_ >= 0 && !valid_;
+}
+
+void EnumValuesInTypeIterator::column(xsql::FunctionContext& ctx, int col) {
+    if (!valid_ || idx_ < 0 || static_cast<size_t>(idx_) >= ei_.size()) {
+        ctx.result_null();
+        return;
     }
-};
+    const edm_t& e = ei_[idx_];
+    switch (col) {
+        case 0: ctx.result_int(type_ordinal_); break;
+        case 1: ctx.result_text(type_name_.c_str()); break;
+        case 2: ctx.result_int(idx_); break;
+        case 3: ctx.result_text(e.name.c_str()); break;
+        case 4: ctx.result_int64(static_cast<int64_t>(e.value)); break;
+        case 5: ctx.result_int64(static_cast<int64_t>(e.value)); break;  // uvalue
+        case 6: ctx.result_text(e.cmt.c_str()); break;
+        default: ctx.result_null(); break;
+    }
+}
 
-inline bool build_enum_value_entry(uint32_t ordinal, int value_index, EnumValueEntry& entry) {
+int64_t EnumValuesInTypeIterator::rowid() const {
+    return static_cast<int64_t>(type_ordinal_) * 10000 + idx_;
+}
+
+// ============================================================================
+// EnumTypeRef
+// ============================================================================
+
+EnumTypeRef::EnumTypeRef(uint32_t ord) : valid(false), ordinal(ord) {
+    til_t* ti = get_idati();
+    if (!ti) return;
+    if (tif.get_numbered_type(ti, ord)) {
+        if (tif.is_enum()) {
+            valid = tif.get_enum_details(&ei);
+        }
+    }
+}
+
+bool EnumTypeRef::save() {
+    if (!valid) return false;
+    tinfo_t new_tif;
+    new_tif.create_enum(ei);
+    return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr);
+}
+
+// ============================================================================
+// build_enum_value_entry
+// ============================================================================
+
+bool build_enum_value_entry(uint32_t ordinal, int value_index, EnumValueEntry& entry) {
     til_t* ti = get_idati();
     if (!ti) return false;
     const char* type_name = get_numbered_type_name(ti, ordinal);
@@ -843,7 +755,11 @@ inline bool build_enum_value_entry(uint32_t ordinal, int value_index, EnumValueE
     return true;
 }
 
-inline CachedTableDef<EnumValueEntry> define_types_enum_values() {
+// ============================================================================
+// TYPES_ENUM_VALUES Table Definition
+// ============================================================================
+
+CachedTableDef<EnumValueEntry> define_types_enum_values() {
     return cached_table<EnumValueEntry>("types_enum_values")
         .no_shared_cache()
         .on_modify(ida_undo_hook)
@@ -967,31 +883,8 @@ inline CachedTableDef<EnumValueEntry> define_types_enum_values() {
 // TYPES_FUNC_ARGS Table - Function prototype arguments
 // ============================================================================
 
-// Type classification info (surface + resolved)
-struct TypeClassification {
-    // Surface-level classification (literal type as written)
-    bool is_ptr = false;
-    bool is_int = false;        // Exactly int type
-    bool is_integral = false;   // Int-like family (int, long, short, char, bool)
-    bool is_float = false;
-    bool is_void = false;
-    bool is_struct = false;
-    bool is_array = false;
-    int ptr_depth = 0;
-    std::string base_type;      // Type name with pointers stripped
-
-    // Resolved classification (after typedef resolution)
-    bool is_ptr_resolved = false;
-    bool is_int_resolved = false;
-    bool is_integral_resolved = false;
-    bool is_float_resolved = false;
-    bool is_void_resolved = false;
-    int ptr_depth_resolved = 0;
-    std::string base_type_resolved;
-};
-
 // Get pointer depth (int** -> 2, int* -> 1, int -> 0)
-inline int get_ptr_depth(tinfo_t tif) {
+int get_ptr_depth(tinfo_t tif) {
     int depth = 0;
     while (tif.is_ptr()) {
         depth++;
@@ -1001,7 +894,7 @@ inline int get_ptr_depth(tinfo_t tif) {
 }
 
 // Get base type name (strips pointers/arrays)
-inline std::string get_base_type_name(tinfo_t tif) {
+std::string get_base_type_name(tinfo_t tif) {
     // Strip pointers
     while (tif.is_ptr()) {
         tif = tif.get_pointed_object();
@@ -1016,10 +909,10 @@ inline std::string get_base_type_name(tinfo_t tif) {
 }
 
 // Classify a single tinfo_t (surface or resolved)
-inline void classify_tinfo(const tinfo_t& tif,
-                           bool& is_ptr, bool& is_int, bool& is_integral,
-                           bool& is_float, bool& is_void, bool& is_struct,
-                           bool& is_array, int& ptr_depth, std::string& base_type) {
+void classify_tinfo(const tinfo_t& tif,
+                    bool& is_ptr, bool& is_int, bool& is_integral,
+                    bool& is_float, bool& is_void, bool& is_struct,
+                    bool& is_array, int& ptr_depth, std::string& base_type) {
     is_ptr = tif.is_ptr();
     is_array = tif.is_array();
     is_struct = tif.is_struct() || tif.is_union();
@@ -1038,16 +931,16 @@ inline void classify_tinfo(const tinfo_t& tif,
 }
 
 // Check if type is a typedef (type reference) at surface level
-inline bool is_surface_typedef(const tinfo_t& tif) {
+bool is_surface_typedef(const tinfo_t& tif) {
     return tif.is_typeref();
 }
 
 // Classify surface-level type (WITHOUT typedef resolution)
 // If tif is a typedef, surface classification shows it as "other" not the underlying type
-inline void classify_surface(const tinfo_t& tif,
-                             bool& is_ptr, bool& is_int, bool& is_integral,
-                             bool& is_float, bool& is_void, bool& is_struct,
-                             bool& is_array, int& ptr_depth, std::string& base_type) {
+void classify_surface(const tinfo_t& tif,
+                      bool& is_ptr, bool& is_int, bool& is_integral,
+                      bool& is_float, bool& is_void, bool& is_struct,
+                      bool& is_array, int& ptr_depth, std::string& base_type) {
     // If it's a typedef, surface level is NOT a ptr/int/etc - it's a typedef
     if (is_surface_typedef(tif)) {
         is_ptr = false;
@@ -1075,7 +968,7 @@ inline void classify_surface(const tinfo_t& tif,
 }
 
 // Full type classification (surface + resolved)
-inline TypeClassification classify_arg_type(const tinfo_t& tif) {
+TypeClassification classify_arg_type(const tinfo_t& tif) {
     TypeClassification tc;
 
     // Surface classification (without typedef resolution)
@@ -1095,19 +988,11 @@ inline TypeClassification classify_arg_type(const tinfo_t& tif) {
     return tc;
 }
 
-struct FuncArgEntry {
-    uint32_t type_ordinal;
-    std::string type_name;
-    int arg_index;  // -1 for return type
-    std::string arg_name;
-    std::string arg_type;
-    std::string calling_conv;  // Only set on arg_index=-1 row
+// ============================================================================
+// Calling Convention
+// ============================================================================
 
-    // Type classification
-    TypeClassification tc;
-};
-
-inline const char* get_calling_convention_name(cm_t cc) {
+const char* get_calling_convention_name(cm_t cc) {
     // Extract calling convention from cm_t (using CM_CC_MASK)
     callcnv_t conv = cc & CM_CC_MASK;
     switch (conv) {
@@ -1127,7 +1012,11 @@ inline const char* get_calling_convention_name(cm_t cc) {
     }
 }
 
-inline void collect_func_args(std::vector<FuncArgEntry>& rows) {
+// ============================================================================
+// collect_func_args
+// ============================================================================
+
+void collect_func_args(std::vector<FuncArgEntry>& rows) {
     rows.clear();
 
     til_t* ti = get_idati();
@@ -1181,135 +1070,129 @@ inline void collect_func_args(std::vector<FuncArgEntry>& rows) {
     }
 }
 
-/**
- * Iterator for function args of a specific function type.
- * Used when query has: WHERE type_ordinal = X
- */
-class FuncArgsInTypeIterator : public xsql::RowIterator {
-    uint32_t type_ordinal_;
-    std::string type_name_;
-    func_type_data_t fi_;
-    int idx_ = -2;  // Start at -2, first next() moves to -1 (return type)
-    bool valid_ = false;
-    bool has_data_ = false;
+// ============================================================================
+// FuncArgsInTypeIterator
+// ============================================================================
 
-public:
-    explicit FuncArgsInTypeIterator(uint32_t ordinal) : type_ordinal_(ordinal) {
-        til_t* ti = get_idati();
-        if (!ti) return;
+FuncArgsInTypeIterator::FuncArgsInTypeIterator(uint32_t ordinal) : type_ordinal_(ordinal) {
+    til_t* ti = get_idati();
+    if (!ti) return;
 
-        const char* name = get_numbered_type_name(ti, type_ordinal_);
-        if (!name) return;
-        type_name_ = name;
+    const char* name = get_numbered_type_name(ti, type_ordinal_);
+    if (!name) return;
+    type_name_ = name;
 
-        tinfo_t tif;
-        if (tif.get_numbered_type(ti, type_ordinal_)) {
-            if (tif.is_func()) {
-                has_data_ = tif.get_func_details(&fi_);
-            }
+    tinfo_t tif;
+    if (tif.get_numbered_type(ti, type_ordinal_)) {
+        if (tif.is_func()) {
+            has_data_ = tif.get_func_details(&fi_);
         }
     }
+}
 
-    bool next() override {
-        if (!has_data_) return false;
-        ++idx_;
-        // idx=-1 is return type, idx=0..fi_.size()-1 are arguments
-        valid_ = (idx_ == -1) || (idx_ >= 0 && static_cast<size_t>(idx_) < fi_.size());
-        return valid_;
+bool FuncArgsInTypeIterator::next() {
+    if (!has_data_) return false;
+    ++idx_;
+    // idx=-1 is return type, idx=0..fi_.size()-1 are arguments
+    valid_ = (idx_ == -1) || (idx_ >= 0 && static_cast<size_t>(idx_) < fi_.size());
+    return valid_;
+}
+
+bool FuncArgsInTypeIterator::eof() const {
+    return idx_ >= -1 && !valid_;
+}
+
+void FuncArgsInTypeIterator::column(xsql::FunctionContext& ctx, int col) {
+    if (!valid_) {
+        ctx.result_null();
+        return;
     }
 
-    bool eof() const override {
-        return idx_ >= -1 && !valid_;
-    }
+    // Get the type for classification (computed on-the-fly for iterator)
+    auto get_current_type = [&]() -> tinfo_t {
+        if (idx_ == -1) return fi_.rettype;
+        if (static_cast<size_t>(idx_) < fi_.size()) return fi_[idx_].type;
+        return tinfo_t();
+    };
 
-    void column(xsql::FunctionContext& ctx, int col) override {
-        if (!valid_) {
-            ctx.result_null();
-            return;
-        }
-
-        // Get the type for classification (computed on-the-fly for iterator)
-        auto get_current_type = [&]() -> tinfo_t {
-            if (idx_ == -1) return fi_.rettype;
-            if (static_cast<size_t>(idx_) < fi_.size()) return fi_[idx_].type;
-            return tinfo_t();
-        };
-
-        switch (col) {
-            case 0: // type_ordinal
-                ctx.result_int(type_ordinal_);
-                break;
-            case 1: // type_name
-                ctx.result_text(type_name_.c_str());
-                break;
-            case 2: // arg_index
-                ctx.result_int(idx_);
-                break;
-            case 3: // arg_name
-                if (idx_ == -1) {
-                    ctx.result_text_static("(return)");
-                } else if (static_cast<size_t>(idx_) < fi_.size()) {
-                    ctx.result_text(fi_[idx_].name.c_str());
-                } else {
-                    ctx.result_null();
-                }
-                break;
-            case 4: // arg_type
-                if (idx_ == -1) {
-                    qstring ret_str;
-                    fi_.rettype.print(&ret_str);
-                    ctx.result_text(ret_str.c_str());
-                } else if (static_cast<size_t>(idx_) < fi_.size()) {
-                    qstring type_str;
-                    fi_[idx_].type.print(&type_str);
-                    ctx.result_text(type_str.c_str());
-                } else {
-                    ctx.result_null();
-                }
-                break;
-            case 5: // calling_conv
-                if (idx_ == -1) {
-                    ctx.result_text_static(get_calling_convention_name(fi_.get_cc()));
-                } else {
-                    ctx.result_text_static("");
-                }
-                break;
-            // Type classification columns (computed on-the-fly)
-            case 6: case 7: case 8: case 9: case 10: case 11: case 12: case 13: case 14:
-            case 15: case 16: case 17: case 18: case 19: case 20: case 21: {
-                TypeClassification tc = classify_arg_type(get_current_type());
-                switch (col) {
-                    case 6:  ctx.result_int(tc.is_ptr ? 1 : 0); break;
-                    case 7:  ctx.result_int(tc.is_int ? 1 : 0); break;
-                    case 8:  ctx.result_int(tc.is_integral ? 1 : 0); break;
-                    case 9:  ctx.result_int(tc.is_float ? 1 : 0); break;
-                    case 10: ctx.result_int(tc.is_void ? 1 : 0); break;
-                    case 11: ctx.result_int(tc.is_struct ? 1 : 0); break;
-                    case 12: ctx.result_int(tc.is_array ? 1 : 0); break;
-                    case 13: ctx.result_int(tc.ptr_depth); break;
-                    case 14: ctx.result_text(tc.base_type.c_str()); break;
-                    case 15: ctx.result_int(tc.is_ptr_resolved ? 1 : 0); break;
-                    case 16: ctx.result_int(tc.is_int_resolved ? 1 : 0); break;
-                    case 17: ctx.result_int(tc.is_integral_resolved ? 1 : 0); break;
-                    case 18: ctx.result_int(tc.is_float_resolved ? 1 : 0); break;
-                    case 19: ctx.result_int(tc.is_void_resolved ? 1 : 0); break;
-                    case 20: ctx.result_int(tc.ptr_depth_resolved); break;
-                    case 21: ctx.result_text(tc.base_type_resolved.c_str()); break;
-                }
-                break;
-            }
-            default:
+    switch (col) {
+        case 0: // type_ordinal
+            ctx.result_int(type_ordinal_);
+            break;
+        case 1: // type_name
+            ctx.result_text(type_name_.c_str());
+            break;
+        case 2: // arg_index
+            ctx.result_int(idx_);
+            break;
+        case 3: // arg_name
+            if (idx_ == -1) {
+                ctx.result_text_static("(return)");
+            } else if (static_cast<size_t>(idx_) < fi_.size()) {
+                ctx.result_text(fi_[idx_].name.c_str());
+            } else {
                 ctx.result_null();
-                break;
+            }
+            break;
+        case 4: // arg_type
+            if (idx_ == -1) {
+                qstring ret_str;
+                fi_.rettype.print(&ret_str);
+                ctx.result_text(ret_str.c_str());
+            } else if (static_cast<size_t>(idx_) < fi_.size()) {
+                qstring type_str;
+                fi_[idx_].type.print(&type_str);
+                ctx.result_text(type_str.c_str());
+            } else {
+                ctx.result_null();
+            }
+            break;
+        case 5: // calling_conv
+            if (idx_ == -1) {
+                ctx.result_text_static(get_calling_convention_name(fi_.get_cc()));
+            } else {
+                ctx.result_text_static("");
+            }
+            break;
+        // Type classification columns (computed on-the-fly)
+        case 6: case 7: case 8: case 9: case 10: case 11: case 12: case 13: case 14:
+        case 15: case 16: case 17: case 18: case 19: case 20: case 21: {
+            TypeClassification tc = classify_arg_type(get_current_type());
+            switch (col) {
+                case 6:  ctx.result_int(tc.is_ptr ? 1 : 0); break;
+                case 7:  ctx.result_int(tc.is_int ? 1 : 0); break;
+                case 8:  ctx.result_int(tc.is_integral ? 1 : 0); break;
+                case 9:  ctx.result_int(tc.is_float ? 1 : 0); break;
+                case 10: ctx.result_int(tc.is_void ? 1 : 0); break;
+                case 11: ctx.result_int(tc.is_struct ? 1 : 0); break;
+                case 12: ctx.result_int(tc.is_array ? 1 : 0); break;
+                case 13: ctx.result_int(tc.ptr_depth); break;
+                case 14: ctx.result_text(tc.base_type.c_str()); break;
+                case 15: ctx.result_int(tc.is_ptr_resolved ? 1 : 0); break;
+                case 16: ctx.result_int(tc.is_int_resolved ? 1 : 0); break;
+                case 17: ctx.result_int(tc.is_integral_resolved ? 1 : 0); break;
+                case 18: ctx.result_int(tc.is_float_resolved ? 1 : 0); break;
+                case 19: ctx.result_int(tc.is_void_resolved ? 1 : 0); break;
+                case 20: ctx.result_int(tc.ptr_depth_resolved); break;
+                case 21: ctx.result_text(tc.base_type_resolved.c_str()); break;
+            }
+            break;
         }
+        default:
+            ctx.result_null();
+            break;
     }
+}
 
-    int64_t rowid() const override {
-        return static_cast<int64_t>(type_ordinal_) * 10000 + (idx_ + 1);
-    }
-};
+int64_t FuncArgsInTypeIterator::rowid() const {
+    return static_cast<int64_t>(type_ordinal_) * 10000 + (idx_ + 1);
+}
 
-inline CachedTableDef<FuncArgEntry> define_types_func_args() {
+// ============================================================================
+// TYPES_FUNC_ARGS Table Definition
+// ============================================================================
+
+CachedTableDef<FuncArgEntry> define_types_func_args() {
     return cached_table<FuncArgEntry>("types_func_args")
         .no_shared_cache()
         .estimate_rows([]() -> size_t {
@@ -1395,48 +1278,38 @@ inline CachedTableDef<FuncArgEntry> define_types_func_args() {
 // Types Registry
 // ============================================================================
 
-struct TypesRegistry {
-    CachedTableDef<TypeEntry> types;
-    CachedTableDef<MemberEntry> types_members;
-    CachedTableDef<EnumValueEntry> types_enum_values;
-    CachedTableDef<FuncArgEntry> types_func_args;
+TypesRegistry::TypesRegistry()
+    : types(define_types())
+    , types_members(define_types_members())
+    , types_enum_values(define_types_enum_values())
+    , types_func_args(define_types_func_args())
+{}
 
-    TypesRegistry()
-        : types(define_types())
-        , types_members(define_types_members())
-        , types_enum_values(define_types_enum_values())
-        , types_func_args(define_types_func_args())
-    {}
+void TypesRegistry::register_all(xsql::Database& db) {
+    db.register_cached_table("ida_types", &types);
+    db.create_table("types", "ida_types");
 
-    void register_all(xsql::Database& db) {
-        db.register_cached_table("ida_types", &types);
-        db.create_table("types", "ida_types");
+    db.register_cached_table("ida_types_members", &types_members);
+    db.create_table("types_members", "ida_types_members");
 
-        db.register_cached_table("ida_types_members", &types_members);
-        db.create_table("types_members", "ida_types_members");
+    db.register_cached_table("ida_types_enum_values", &types_enum_values);
+    db.create_table("types_enum_values", "ida_types_enum_values");
 
-        db.register_cached_table("ida_types_enum_values", &types_enum_values);
-        db.create_table("types_enum_values", "ida_types_enum_values");
+    db.register_cached_table("ida_types_func_args", &types_func_args);
+    db.create_table("types_func_args", "ida_types_func_args");
 
-        db.register_cached_table("ida_types_func_args", &types_func_args);
-        db.create_table("types_func_args", "ida_types_func_args");
+    // Create views
+    create_views(db);
+}
 
-        // Create views
-        create_views(db);
-    }
-
-private:
-    void create_views(xsql::Database& db) {
-        // Filtering views
-        db.exec("CREATE VIEW IF NOT EXISTS types_v_structs AS SELECT * FROM types WHERE is_struct = 1");
-        db.exec("CREATE VIEW IF NOT EXISTS types_v_unions AS SELECT * FROM types WHERE is_union = 1");
-        db.exec("CREATE VIEW IF NOT EXISTS types_v_enums AS SELECT * FROM types WHERE is_enum = 1");
-        db.exec("CREATE VIEW IF NOT EXISTS types_v_typedefs AS SELECT * FROM types WHERE is_typedef = 1");
-        db.exec("CREATE VIEW IF NOT EXISTS types_v_funcs AS SELECT * FROM types WHERE is_func = 1");
-    }
-};
+void TypesRegistry::create_views(xsql::Database& db) {
+    // Filtering views
+    db.exec("CREATE VIEW IF NOT EXISTS types_v_structs AS SELECT * FROM types WHERE is_struct = 1");
+    db.exec("CREATE VIEW IF NOT EXISTS types_v_unions AS SELECT * FROM types WHERE is_union = 1");
+    db.exec("CREATE VIEW IF NOT EXISTS types_v_enums AS SELECT * FROM types WHERE is_enum = 1");
+    db.exec("CREATE VIEW IF NOT EXISTS types_v_typedefs AS SELECT * FROM types WHERE is_typedef = 1");
+    db.exec("CREATE VIEW IF NOT EXISTS types_v_funcs AS SELECT * FROM types WHERE is_func = 1");
+}
 
 } // namespace types
 } // namespace idasql
-
-

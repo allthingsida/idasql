@@ -1,35 +1,12 @@
-/**
- * entities_dbg.hpp - Debugger-related IDA entities as virtual tables
- *
- * Tables:
- *   breakpoints - Debugger breakpoints (software, hardware, symbolic, source)
- *
- * Breakpoints persist in the IDB, so they're queryable even without an active
- * debugger session. Supports full CRUD operations.
- */
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
 
-#pragma once
-
-#include <idasql/platform.hpp>
-
-#include <idasql/vtable.hpp>
-#include <xsql/database.hpp>
-
-#include <idasql/platform_undef.hpp>
-
-// IDA SDK headers
-#include <ida.hpp>
-#include <dbg.hpp>
-#include <auto.hpp>
+#include "entities_dbg.hpp"
 
 namespace idasql {
 namespace debugger {
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-inline const char* bpt_type_name(bpttype_t type) {
+const char* bpt_type_name(bpttype_t type) {
     switch (type) {
         case BPT_WRITE: return "hardware_write";
         case BPT_READ:  return "hardware_read";
@@ -40,7 +17,7 @@ inline const char* bpt_type_name(bpttype_t type) {
     }
 }
 
-inline const char* bpt_loc_type_name(int loc_type) {
+const char* bpt_loc_type_name(int loc_type) {
     switch (loc_type) {
         case BPLT_ABS: return "absolute";
         case BPLT_REL: return "relative";
@@ -50,14 +27,14 @@ inline const char* bpt_loc_type_name(int loc_type) {
     }
 }
 
-inline std::string safe_bpt_group(const bpt_t& bpt) {
+std::string safe_bpt_group(const bpt_t& bpt) {
     qstring grp;
     if (get_bpt_group(&grp, bpt.loc))
         return std::string(grp.c_str());
     return "";
 }
 
-inline std::string safe_bpt_loc_path(const bpt_t& bpt) {
+std::string safe_bpt_loc_path(const bpt_t& bpt) {
     const bpt_location_t& loc = bpt.loc;
     if (loc.type() == BPLT_REL || loc.type() == BPLT_SRC) {
         const char* p = loc.path();
@@ -66,7 +43,7 @@ inline std::string safe_bpt_loc_path(const bpt_t& bpt) {
     return "";
 }
 
-inline std::string safe_bpt_loc_symbol(const bpt_t& bpt) {
+std::string safe_bpt_loc_symbol(const bpt_t& bpt) {
     const bpt_location_t& loc = bpt.loc;
     if (loc.type() == BPLT_SYM) {
         const char* s = loc.symbol();
@@ -75,11 +52,7 @@ inline std::string safe_bpt_loc_symbol(const bpt_t& bpt) {
     return "";
 }
 
-// ============================================================================
-// BREAKPOINTS Table (full CRUD)
-// ============================================================================
-
-inline VTableDef define_breakpoints() {
+VTableDef define_breakpoints() {
     return table("breakpoints")
         .count([]() { return static_cast<size_t>(get_bpt_qty()); })
         // Column 0: address (R)
@@ -262,16 +235,7 @@ inline VTableDef define_breakpoints() {
             return del_bpt(bpt.loc);
         })
         // INSERT support
-        // argv column order: address(0), enabled(1), type(2), type_name(3),
-        //   size(4), flags(5), pass_count(6), condition(7), loc_type(8),
-        //   loc_type_name(9), module(10), symbol(11), offset(12),
-        //   source_file(13), source_line(14), is_hardware(15), is_active(16),
-        //   group(17), bptid(18)
         .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
-            // Determine location type from which columns are non-NULL
-            // argv[0] = address, argv[11] = symbol, argv[10] = module,
-            // argv[13] = source_file
-
             auto is_non_null = [&](int col) -> bool {
                 return col < argc && !argv[col].is_null();
             };
@@ -294,7 +258,6 @@ inline VTableDef define_breakpoints() {
             bool ok = false;
 
             if (is_non_null(11)) {
-                // Symbolic breakpoint: symbol column set
                 const char* sym = get_text(11);
                 if (!sym) return false;
                 int64_t off = get_int64(12, 0);
@@ -304,7 +267,6 @@ inline VTableDef define_breakpoints() {
                 bpt.size = get_int(4, 0);
                 ok = add_bpt(bpt);
             } else if (is_non_null(10)) {
-                // Relative breakpoint: module column set
                 const char* mod = get_text(10);
                 if (!mod) return false;
                 int64_t off = get_int64(12, 0);
@@ -314,7 +276,6 @@ inline VTableDef define_breakpoints() {
                 bpt.size = get_int(4, 0);
                 ok = add_bpt(bpt);
             } else if (is_non_null(13)) {
-                // Source breakpoint: source_file column set
                 const char* file = get_text(13);
                 if (!file) return false;
                 int line = get_int(14, 1);
@@ -324,36 +285,29 @@ inline VTableDef define_breakpoints() {
                 bpt.size = get_int(4, 0);
                 ok = add_bpt(bpt);
             } else if (is_non_null(0)) {
-                // Absolute breakpoint: address column set
                 ea_t ea = static_cast<ea_t>(get_int64(0));
                 int sz = get_int(4, 0);
                 bpttype_t tp = static_cast<bpttype_t>(get_int(2, BPT_SOFT));
                 ok = add_bpt(ea, sz, tp);
             } else {
-                return false;  // No location specified
+                return false;
             }
 
             if (!ok) return false;
 
             // Apply optional properties after creation
-            // We need to find the breakpoint we just created
-            // Re-read to get the bpt_t for the newly added breakpoint
             if (is_non_null(7)) {
-                // condition
                 const char* cond = get_text(7);
                 if (cond) {
-                    // Find the breakpoint and update condition
                     bpt_t bpt;
                     int n = get_bpt_qty();
                     for (int j = n - 1; j >= 0; --j) {
                         if (getn_bpt(j, &bpt)) {
-                            // Match by address for absolute, or just use last added
                             if (is_non_null(0) && bpt.ea == static_cast<ea_t>(get_int64(0))) {
                                 bpt.cndbody = cond;
                                 update_bpt(&bpt);
                                 break;
                             } else if (!is_non_null(0)) {
-                                // For non-absolute, use the last breakpoint
                                 bpt.cndbody = cond;
                                 update_bpt(&bpt);
                                 break;
@@ -364,7 +318,6 @@ inline VTableDef define_breakpoints() {
             }
 
             if (is_non_null(6)) {
-                // pass_count
                 bpt_t bpt;
                 int n = get_bpt_qty();
                 for (int j = n - 1; j >= 0; --j) {
@@ -383,7 +336,6 @@ inline VTableDef define_breakpoints() {
             }
 
             if (is_non_null(5)) {
-                // flags
                 bpt_t bpt;
                 int n = get_bpt_qty();
                 for (int j = n - 1; j >= 0; --j) {
@@ -402,7 +354,6 @@ inline VTableDef define_breakpoints() {
             }
 
             if (is_non_null(1)) {
-                // enabled - use enable_bpt API
                 bool enable = get_int(1) != 0;
                 bpt_t bpt;
                 int n = get_bpt_qty();
@@ -420,7 +371,6 @@ inline VTableDef define_breakpoints() {
             }
 
             if (is_non_null(17)) {
-                // group
                 const char* grp = get_text(17);
                 if (grp) {
                     bpt_t bpt;
@@ -445,22 +395,17 @@ inline VTableDef define_breakpoints() {
 }
 
 // ============================================================================
-// Debugger Registry
+// Registry
 // ============================================================================
 
-struct DebuggerRegistry {
-    VTableDef breakpoints;
+DebuggerRegistry::DebuggerRegistry()
+    : breakpoints(define_breakpoints())
+{}
 
-    DebuggerRegistry()
-        : breakpoints(define_breakpoints())
-    {}
-
-    void register_all(xsql::Database& db) {
-        db.register_table("ida_breakpoints", &breakpoints);
-        db.create_table("breakpoints", "ida_breakpoints");
-    }
-};
+void DebuggerRegistry::register_all(xsql::Database& db) {
+    db.register_table("ida_breakpoints", &breakpoints);
+    db.create_table("breakpoints", "ida_breakpoints");
+}
 
 } // namespace debugger
 } // namespace idasql
-

@@ -1,53 +1,16 @@
-/**
- * entities_ext.hpp - Additional IDA entities as virtual tables
- *
- * This file provides additional virtual tables beyond the core entities.
- * These tables cover: fixups, hidden ranges, problems, function chunks,
- * signatures, local types, and more.
- *
- * Tables:
- *   fixups         - Relocation/fixup records
- *   hidden_ranges  - Collapsed/hidden regions
- *   problems       - Analysis problems
- *   fchunks        - Function chunks (tails)
- *   signatures     - Applied FLIRT signatures
- *   local_types    - Local type library entries
- *   mappings       - Address mappings
- */
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
 
-#pragma once
-
-#include <idasql/platform.hpp>
-
-#include <idasql/vtable.hpp>
-#include <xsql/database.hpp>
-
-#include <idasql/platform_undef.hpp>
-
-// IDA SDK headers
-#include <ida.hpp>
-#include <fixup.hpp>
-#include <bytes.hpp>
-#include <problems.hpp>
-#include <funcs.hpp>
-#include <typeinf.hpp>
-#include <frame.hpp>
-#include <name.hpp>
-#include <lines.hpp>
+#include "entities_ext.hpp"
 
 namespace idasql {
 namespace extended {
 
 // ============================================================================
-// FIXUPS Table - Relocation records
+// Collection helpers
 // ============================================================================
 
-struct FixupEntry {
-    ea_t ea;
-    fixup_data_t data;
-};
-
-inline void collect_fixups(std::vector<FixupEntry>& rows) {
+void collect_fixups(std::vector<FixupEntry>& rows) {
     rows.clear();
 
     for (ea_t ea = get_first_fixup_ea(); ea != BADADDR; ea = get_next_fixup_ea(ea)) {
@@ -59,7 +22,83 @@ inline void collect_fixups(std::vector<FixupEntry>& rows) {
     }
 }
 
-inline CachedTableDef<FixupEntry> define_fixups() {
+void collect_problems(std::vector<ProblemEntry>& rows) {
+    rows.clear();
+
+    for (int t = PR_NOBASE; t < PR_END; ++t) {
+        problist_id_t ptype = static_cast<problist_id_t>(t);
+        const char* tname = get_problem_name(ptype, true);
+
+        for (ea_t ea = get_problem(ptype, 0); ea != BADADDR; ea = get_problem(ptype, ea + 1)) {
+            ProblemEntry entry;
+            entry.ea = ea;
+            entry.type = ptype;
+            entry.type_name = tname ? tname : "";
+
+            qstring desc;
+            if (get_problem_desc(&desc, ptype, ea) > 0) {
+                entry.description = desc.c_str();
+            }
+            rows.push_back(entry);
+        }
+    }
+}
+
+void collect_signatures(std::vector<SignatureEntry>& rows) {
+    rows.clear();
+
+    int qty = get_idasgn_qty();
+    for (int i = 0; i < qty; ++i) {
+        SignatureEntry entry;
+        entry.index = i;
+
+        qstring signame, optlibs;
+        entry.state = get_idasgn_desc(&signame, &optlibs, i);
+        entry.name = signame.c_str();
+        entry.optlibs = optlibs.c_str();
+        rows.push_back(entry);
+    }
+}
+
+void collect_local_types(std::vector<LocalTypeEntry>& rows) {
+    rows.clear();
+
+    til_t* ti = get_idati();
+    if (!ti) return;
+
+    uint32_t ord = 1;
+    while (true) {
+        const char* name = get_numbered_type_name(ti, ord);
+        if (!name) break;
+
+        LocalTypeEntry entry;
+        entry.ordinal = ord;
+        entry.name = name;
+
+        tinfo_t tif;
+        if (tif.get_numbered_type(ti, ord)) {
+            qstring ts;
+            tif.print(&ts);
+            entry.type_str = ts.c_str();
+            entry.is_struct = tif.is_struct() || tif.is_union();
+            entry.is_enum = tif.is_enum();
+            entry.is_typedef = tif.is_typedef();
+        } else {
+            entry.is_struct = false;
+            entry.is_enum = false;
+            entry.is_typedef = false;
+        }
+
+        rows.push_back(entry);
+        ++ord;
+    }
+}
+
+// ============================================================================
+// Table definitions
+// ============================================================================
+
+CachedTableDef<FixupEntry> define_fixups() {
     return cached_table<FixupEntry>("fixups")
         .no_shared_cache()
         .estimate_rows([]() -> size_t { return 512; })
@@ -81,11 +120,7 @@ inline CachedTableDef<FixupEntry> define_fixups() {
         .build();
 }
 
-// ============================================================================
-// HIDDEN_RANGES Table - Collapsed/hidden regions
-// ============================================================================
-
-inline VTableDef define_hidden_ranges() {
+VTableDef define_hidden_ranges() {
     return table("hidden_ranges")
         .count([]() {
             return static_cast<size_t>(get_hidden_range_qty());
@@ -125,41 +160,7 @@ inline VTableDef define_hidden_ranges() {
         .build();
 }
 
-// ============================================================================
-// PROBLEMS Table - Analysis problems
-// ============================================================================
-
-struct ProblemEntry {
-    ea_t ea;
-    problist_id_t type;
-    std::string description;
-    std::string type_name;
-};
-
-inline void collect_problems(std::vector<ProblemEntry>& rows) {
-    rows.clear();
-
-    // Iterate all problem types
-    for (int t = PR_NOBASE; t < PR_END; ++t) {
-        problist_id_t ptype = static_cast<problist_id_t>(t);
-        const char* tname = get_problem_name(ptype, true);
-
-        for (ea_t ea = get_problem(ptype, 0); ea != BADADDR; ea = get_problem(ptype, ea + 1)) {
-            ProblemEntry entry;
-            entry.ea = ea;
-            entry.type = ptype;
-            entry.type_name = tname ? tname : "";
-
-            qstring desc;
-            if (get_problem_desc(&desc, ptype, ea) > 0) {
-                entry.description = desc.c_str();
-            }
-            rows.push_back(entry);
-        }
-    }
-}
-
-inline CachedTableDef<ProblemEntry> define_problems() {
+CachedTableDef<ProblemEntry> define_problems() {
     return cached_table<ProblemEntry>("problems")
         .no_shared_cache()
         .estimate_rows([]() -> size_t { return 512; })
@@ -181,11 +182,7 @@ inline CachedTableDef<ProblemEntry> define_problems() {
         .build();
 }
 
-// ============================================================================
-// FCHUNKS Table - Function chunks (tails)
-// ============================================================================
-
-inline VTableDef define_fchunks() {
+VTableDef define_fchunks() {
     return table("fchunks")
         .count([]() {
             return get_fchunk_qty();
@@ -205,7 +202,6 @@ inline VTableDef define_fchunks() {
         .column_int64("owner", [](size_t i) -> int64_t {
             func_t* chunk = getn_fchunk(i);
             if (!chunk) return 0;
-            // For tail chunks, find the owner
             func_t* owner = get_func(chunk->start_ea);
             return owner ? owner->start_ea : 0;
         })
@@ -215,40 +211,12 @@ inline VTableDef define_fchunks() {
         })
         .column_int("is_tail", [](size_t i) -> int {
             func_t* chunk = getn_fchunk(i);
-            // FUNC_TAIL indicates this is a tail/chunk of another function
             return chunk ? ((chunk->flags & FUNC_TAIL) ? 1 : 0) : 0;
         })
         .build();
 }
 
-// ============================================================================
-// SIGNATURES Table - Applied FLIRT signatures
-// ============================================================================
-
-struct SignatureEntry {
-    int index;
-    std::string name;
-    std::string optlibs;
-    int32 state;
-};
-
-inline void collect_signatures(std::vector<SignatureEntry>& rows) {
-    rows.clear();
-
-    int qty = get_idasgn_qty();
-    for (int i = 0; i < qty; ++i) {
-        SignatureEntry entry;
-        entry.index = i;
-
-        qstring signame, optlibs;
-        entry.state = get_idasgn_desc(&signame, &optlibs, i);
-        entry.name = signame.c_str();
-        entry.optlibs = optlibs.c_str();
-        rows.push_back(entry);
-    }
-}
-
-inline CachedTableDef<SignatureEntry> define_signatures() {
+CachedTableDef<SignatureEntry> define_signatures() {
     return cached_table<SignatureEntry>("signatures")
         .no_shared_cache()
         .estimate_rows([]() -> size_t { return 128; })
@@ -270,55 +238,7 @@ inline CachedTableDef<SignatureEntry> define_signatures() {
         .build();
 }
 
-// ============================================================================
-// LOCAL_TYPES Table - Local type library entries
-// ============================================================================
-
-struct LocalTypeEntry {
-    uint32_t ordinal;
-    std::string name;
-    std::string type_str;
-    bool is_struct;
-    bool is_enum;
-    bool is_typedef;
-};
-
-inline void collect_local_types(std::vector<LocalTypeEntry>& rows) {
-    rows.clear();
-
-    til_t* ti = get_idati();
-    if (!ti) return;
-
-    // Iterate numbered types
-    uint32_t ord = 1;
-    while (true) {
-        const char* name = get_numbered_type_name(ti, ord);
-        if (!name) break;
-
-        LocalTypeEntry entry;
-        entry.ordinal = ord;
-        entry.name = name;
-
-        tinfo_t tif;
-        if (tif.get_numbered_type(ti, ord)) {
-            qstring ts;
-            tif.print(&ts);
-            entry.type_str = ts.c_str();
-            entry.is_struct = tif.is_struct() || tif.is_union();
-            entry.is_enum = tif.is_enum();
-            entry.is_typedef = tif.is_typedef();
-        } else {
-            entry.is_struct = false;
-            entry.is_enum = false;
-            entry.is_typedef = false;
-        }
-
-        rows.push_back(entry);
-        ++ord;
-    }
-}
-
-inline CachedTableDef<LocalTypeEntry> define_local_types() {
+CachedTableDef<LocalTypeEntry> define_local_types() {
     return cached_table<LocalTypeEntry>("local_types")
         .no_shared_cache()
         .estimate_rows([]() -> size_t { return 256; })
@@ -346,11 +266,7 @@ inline CachedTableDef<LocalTypeEntry> define_local_types() {
         .build();
 }
 
-// ============================================================================
-// MAPPINGS Table - Address mappings
-// ============================================================================
-
-inline VTableDef define_mappings() {
+VTableDef define_mappings() {
     return table("mappings")
         .count([]() {
             return get_mappings_qty();
@@ -383,51 +299,41 @@ inline VTableDef define_mappings() {
 }
 
 // ============================================================================
-// Extended Registry
+// Registry
 // ============================================================================
 
-struct ExtendedRegistry {
-    CachedTableDef<FixupEntry> fixups;
-    VTableDef hidden_ranges;
-    CachedTableDef<ProblemEntry> problems;
-    VTableDef fchunks;
-    CachedTableDef<SignatureEntry> signatures;
-    CachedTableDef<LocalTypeEntry> local_types;
-    VTableDef mappings;
+ExtendedRegistry::ExtendedRegistry()
+    : fixups(define_fixups())
+    , hidden_ranges(define_hidden_ranges())
+    , problems(define_problems())
+    , fchunks(define_fchunks())
+    , signatures(define_signatures())
+    , local_types(define_local_types())
+    , mappings(define_mappings())
+{}
 
-    ExtendedRegistry()
-        : fixups(define_fixups())
-        , hidden_ranges(define_hidden_ranges())
-        , problems(define_problems())
-        , fchunks(define_fchunks())
-        , signatures(define_signatures())
-        , local_types(define_local_types())
-        , mappings(define_mappings())
-    {}
+void ExtendedRegistry::register_all(xsql::Database& db) {
+    db.register_cached_table("ida_fixups", &fixups);
+    db.create_table("fixups", "ida_fixups");
 
-    void register_all(xsql::Database& db) {
-        db.register_cached_table("ida_fixups", &fixups);
-        db.create_table("fixups", "ida_fixups");
+    db.register_table("ida_hidden_ranges", &hidden_ranges);
+    db.create_table("hidden_ranges", "ida_hidden_ranges");
 
-        db.register_table("ida_hidden_ranges", &hidden_ranges);
-        db.create_table("hidden_ranges", "ida_hidden_ranges");
+    db.register_cached_table("ida_problems", &problems);
+    db.create_table("problems", "ida_problems");
 
-        db.register_cached_table("ida_problems", &problems);
-        db.create_table("problems", "ida_problems");
+    db.register_table("ida_fchunks", &fchunks);
+    db.create_table("fchunks", "ida_fchunks");
 
-        db.register_table("ida_fchunks", &fchunks);
-        db.create_table("fchunks", "ida_fchunks");
+    db.register_cached_table("ida_signatures", &signatures);
+    db.create_table("signatures", "ida_signatures");
 
-        db.register_cached_table("ida_signatures", &signatures);
-        db.create_table("signatures", "ida_signatures");
+    db.register_cached_table("ida_local_types", &local_types);
+    db.create_table("local_types", "ida_local_types");
 
-        db.register_cached_table("ida_local_types", &local_types);
-        db.create_table("local_types", "ida_local_types");
-
-        db.register_table("ida_mappings", &mappings);
-        db.create_table("mappings", "ida_mappings");
-    }
-};
+    db.register_table("ida_mappings", &mappings);
+    db.create_table("mappings", "ida_mappings");
+}
 
 } // namespace extended
 } // namespace idasql

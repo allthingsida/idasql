@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * platform_undef.hpp - Undo platform.hpp redirects before IDA headers
  *

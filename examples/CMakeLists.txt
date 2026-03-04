@@ -1,44 +1,35 @@
 # examples/CMakeLists.txt - IDASQL Example Programs
 #
-# Standalone build:
-#   cmake -B build
-#   cmake --build build --config Release
+cmake_minimum_required(VERSION 3.20)
+
+# Build from repository root:
+#   cmake -S . -B build
+#   cmake --build build --config Release --target example_basic
 #
 # Run:
 #   Windows: set PATH=%IDASDK%\src\bin;%PATH%
 #            build\Release\example_basic.exe database.i64
 #   Linux:   LD_LIBRARY_PATH=$IDASDK/src/bin ./build/example_basic database.i64
 
-# Standalone mode: set up project and dependencies
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    cmake_minimum_required(VERSION 3.20)
-    project(idasql_examples VERSION 1.0 LANGUAGES C CXX)
-    set(CMAKE_CXX_STANDARD 20)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-    # Include IDA SDK bootstrap
-    include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
-    find_package(idasdk REQUIRED)
+    project(idasql_examples LANGUAGES NONE)
+    message(FATAL_ERROR
+        "idasql examples are built from the repository root.\n"
+        "Use:\n"
+        "  cmake -S . -B build\n"
+        "  cmake --build build --config Release --target example_basic"
+    )
 endif()
 
-# ============================================================================
-# xsql dependency (provides SQLite)
-# ============================================================================
-
-if(TARGET xsql::xsql)
-    message(STATUS "idasql_examples: Using xsql::xsql from parent project")
-elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../external/libxsql/CMakeLists.txt")
-    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../external/libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
-    message(STATUS "idasql_examples: Added libxsql from external/libxsql")
-else()
-    message(FATAL_ERROR "libxsql not found. Initialize submodule: git submodule update --init external/libxsql")
+if(NOT TARGET idasql)
+    message(FATAL_ERROR "idasql_examples requires parent target 'idasql'.")
 endif()
 
-# libidasql interface library (headers only)
-add_library(idasql_lib INTERFACE)
-target_include_directories(idasql_lib INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/lib/include
-)
+if(NOT TARGET xsql::xsql)
+    message(FATAL_ERROR "idasql_examples requires parent target 'xsql::xsql'.")
+endif()
+
+set(IDASQL_EXAMPLE_LIB idasql)
 
 # Helper function to create examples
 function(add_idasql_example name)
@@ -46,7 +37,7 @@ function(add_idasql_example name)
         TYPE EXECUTABLE
         SOURCES ${name}.cpp
     )
-    target_link_libraries(${name} PRIVATE idasql_lib xsql::xsql)
+    target_link_libraries(${name} PRIVATE ${IDASQL_EXAMPLE_LIB} xsql::xsql)
     target_compile_definitions(${name} PRIVATE USE_IDA_SDK USE_HEXRAYS)
     if(MSVC)
         target_compile_options(${name} PRIVATE /bigobj)

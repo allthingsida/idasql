@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(idasql VERSION 0.0.7 LANGUAGES C CXX)
+project(idasql LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -69,76 +69,35 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/lib/include)
 
 # ============================================================================
-# AI Agent Support (libagents - optional)
+# MCP Support (optional)
 # ============================================================================
 
-option(IDASQL_WITH_AI_AGENT "Build with AI agent support (libagents)" ON)
+option(IDASQL_WITH_MCP "Build with MCP server support (fastmcpp)" OFF)
 
-if(IDASQL_WITH_AI_AGENT)
-    message(STATUS "idasql: Building with AI agent support via libagents")
+if(IDASQL_WITH_MCP)
+    message(STATUS "idasql: Building with MCP support via fastmcpp")
 
-    # Prompt header generation is required when AI agent support is enabled.
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    set(PROMPT_MD "${CMAKE_CURRENT_SOURCE_DIR}/prompts/idasql_agent.md")
-    set(IDASQL_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated" CACHE INTERNAL "")
-    set(PROMPT_HPP "${IDASQL_GENERATED_INCLUDE_DIR}/idasql_agent_prompt.hpp")
+    # Reuse an existing fastmcpp target when available in a parent build.
+    if(NOT TARGET fastmcpp_core)
+        # Keep the dependency surface minimal for idasql.
+        set(FASTMCPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(FASTMCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(FASTMCPP_ENABLE_POST_STREAMING OFF CACHE BOOL "" FORCE)
+        set(FASTMCPP_ENABLE_SAMPLING_HTTP_HANDLERS OFF CACHE BOOL "" FORCE)
+        set(FASTMCPP_FETCH_CURL OFF CACHE BOOL "" FORCE)
 
-    file(MAKE_DIRECTORY ${IDASQL_GENERATED_INCLUDE_DIR})
-
-    add_custom_command(
-        OUTPUT ${PROMPT_HPP}
-        COMMAND ${Python3_EXECUTABLE}
-            ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_prompt.py
-            ${PROMPT_MD} ${PROMPT_HPP}
-        DEPENDS ${PROMPT_MD}
-        COMMENT "Checking/regenerating idasql_agent_prompt.hpp"
-    )
-    add_custom_target(generate_prompt DEPENDS ${PROMPT_HPP})
-
-    # libagents build options
-    set(LIBAGENTS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(LIBAGENTS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(LIBAGENTS_BUILD_CLI OFF CACHE BOOL "" FORCE)
-    set(LIBAGENTS_BUILD_COPILOT ON CACHE BOOL "" FORCE)
-
-    # FetchContent from GitHub (with recursive submodules for fastmcpp, SDKs)
-    message(STATUS "idasql: Fetching libagents from GitHub...")
-    FetchContent_Declare(libagents
-        GIT_REPOSITORY https://github.com/0xeb/libagents.git
-        GIT_TAG        ae162192d49126da6328254aab73417d673379cc
-        GIT_SUBMODULES_RECURSE TRUE
-    )
-    FetchContent_MakeAvailable(libagents)
-
-    # ========================================================================
-    # Build speed: enable MSVC parallel compilation for dependency targets.
-    # IDA SDK's /MP only applies to ida_add_plugin/ida_add_idalib targets;
-    # FetchContent dependencies compile their files sequentially without this.
-    # ========================================================================
-    if(MSVC)
-        foreach(_dep_target fastmcpp_core copilot_sdk_cpp claude_sdk libagents)
-            if(TARGET ${_dep_target})
-                target_compile_options(${_dep_target} PRIVATE /MP)
-            endif()
-        endforeach()
+        message(STATUS "idasql: Fetching fastmcpp from GitHub...")
+        FetchContent_Declare(fastmcpp
+            GIT_REPOSITORY https://github.com/0xeb/fastmcpp.git
+            GIT_TAG        4837e8e0a27d0011b73643fe02b3553cd3935c34
+            GIT_SHALLOW    TRUE
+        )
+        FetchContent_MakeAvailable(fastmcpp)
     endif()
 
-    # Build speed: merge translation units to reduce header re-parsing.
-    # Note: fastmcpp_core is excluded — its server files use duplicate
-    # anonymous-namespace symbols that conflict under unity builds.
-    foreach(_dep_target copilot_sdk_cpp claude_sdk libagents)
-        if(TARGET ${_dep_target})
-            set_target_properties(${_dep_target} PROPERTIES UNITY_BUILD ON)
-        endif()
-    endforeach()
-
-    # Exclude unused targets from default build (e.g. claude-sdk debug tool)
-    foreach(_unused_target debug)
-        if(TARGET ${_unused_target})
-            set_target_properties(${_unused_target} PROPERTIES EXCLUDE_FROM_ALL TRUE)
-        endif()
-    endforeach()
-
+    if(MSVC AND TARGET fastmcpp_core)
+        target_compile_options(fastmcpp_core PRIVATE /MP)
+    endif()
 endif()
 
 # Add subdirectories

@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * vtable.hpp - SQLite Virtual Table framework for IDA
  *

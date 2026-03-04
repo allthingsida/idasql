@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * example_functions.cpp - Function analysis with IDASQL
  *

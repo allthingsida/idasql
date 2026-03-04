@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 #include <cstddef>
@@ -11,6 +14,7 @@ struct RuntimeSettingsSnapshot {
     int queue_admission_timeout_ms = 120000;
     size_t max_queue = 64;
     bool hints_enabled = true;
+    bool enable_idapython = false;
     size_t timeout_stack_depth = 0;
 };
 
@@ -28,6 +32,7 @@ public:
         snap.queue_admission_timeout_ms = queue_admission_timeout_ms_;
         snap.max_queue = max_queue_;
         snap.hints_enabled = hints_enabled_;
+        snap.enable_idapython = enable_idapython_;
         snap.timeout_stack_depth = timeout_stack_.size();
         return snap;
     }
@@ -50,6 +55,11 @@ public:
     bool hints_enabled() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return hints_enabled_;
+    }
+
+    bool enable_idapython() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return enable_idapython_;
     }
 
     bool set_query_timeout_ms(int value) {
@@ -83,6 +93,11 @@ public:
     void set_hints_enabled(bool enabled) {
         std::lock_guard<std::mutex> lock(mutex_);
         hints_enabled_ = enabled;
+    }
+
+    void set_enable_idapython(bool enabled) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        enable_idapython_ = enabled;
     }
 
     bool timeout_push(int timeout_ms, int* effective_timeout_ms = nullptr) {
@@ -126,6 +141,7 @@ private:
     int queue_admission_timeout_ms_ = 120000;
     size_t max_queue_ = 64;
     bool hints_enabled_ = true;
+    bool enable_idapython_ = false;
     std::vector<int> timeout_stack_;
 };
 
@@ -134,4 +150,3 @@ inline RuntimeSettings& runtime_settings() {
 }
 
 }  // namespace idasql
-

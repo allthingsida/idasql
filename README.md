@@ -1,55 +1,33 @@
 # IDASQL
 
-Talk to your IDA database.
+Query IDA Pro databases with SQL.
 
 ```
-you:   what's the most called function?
-agent: The most called function is `__security_check_cookie` with 1,247 callers.
-       This is typical for MSVC-compiled binaries - it's the stack canary check.
-
-you:   find functions that reference "password" strings
-agent: Found 3 functions referencing password-related strings:
-       - validate_credentials (0x401240) - references "password incorrect"
-       - parse_config (0x402890) - references "password_hash"
-       - debug_dump (0x405120) - references "password: %s"
-
-you:   decompile validate_credentials
-agent: [displays pseudocode]
+you:       /idasql analyze this binary; tell me the most called function
+assistant: __security_check_cookie has the highest fan-in (1,247 callers).
+           It is likely the compiler stack-cookie check used by MSVC.
 ```
 
-Ask complex questions that would take hours to script:
+Use any workflow you prefer:
+- Run SQL directly in `idasql`
+- Use `.http`/`--http` for stateless automation
+- Use `.mcp`/`--mcp` when built with `-DIDASQL_WITH_MCP=ON`
+- Pair with your favorite coding CLI and the `/idasql` skill
 
-```
-you:   find functions that make at most 3 calls, where those callees
-       don't go deeper than 5 levels in the call graph
+IDASQL exposes IDA Pro databases as SQL tables.
 
-agent: Looking for shallow functions with bounded call depth...
-
-       Found 47 functions matching your criteria:
-       - init_config (0x401000) - 2 calls, max depth 3
-       - validate_checksum (0x401200) - 3 calls, max depth 4
-       - parse_header (0x401400) - 1 call, max depth 2
-       ...
-
-       These are good candidates for isolated analysis - simple entry
-       points that don't spiral into deep call chains.
-```
-
-IDASQL exposes IDA Pro databases as SQL tables with a built-in AI agent. Ask questions in plain English. The agent writes SQL, runs queries, and explains results.
-
-Works as a **standalone CLI** (query `.i64` files directly) or as an **IDA plugin** (query the open database). No scripting. No IDAPython. Just ask.
+Works as a **standalone CLI** (query `.i64` files directly) or as an **IDA plugin** (query the open database). No scripting. No IDAPython. Just SQL.
 
 **No indexing required.** IDA already has everything indexed. Queries run instantly against the live database.
 
 ## Features
 
-- **AI Agent** - Natural language queries with Claude or GitHub Copilot
 - **SQL Interface** - Full SQL access to functions, strings, imports, xrefs, instructions, types
 - **Unified Entity Search** - `grep` table + `grep()` function search functions, labels, segments, types, members, and enums
 - **Standalone CLI** - Query `.i64` files without opening IDA GUI
-- **IDA Plugin** - SQL/AI interface inside IDA's command line
-- **Remote Server** - Query IDA from external tools, scripts, or coding agents
-- **Zero Setup** - Uses your existing Claude Code or Copilot authentication
+- **IDA Plugin** - SQL interface inside IDA's command line
+- **Remote Server** - Query IDA from external tools via HTTP or MCP
+- **Optional MCP** - Build-time flag (`-DIDASQL_WITH_MCP=ON`), off by default
 
 ## Screenshots
 
@@ -77,39 +55,28 @@ idasql> SELECT name FROM funcs WHERE size > 1000;
 idasql> .tables          -- list available tables
 idasql> .schema funcs    -- show table schema
 idasql> .http start      -- start HTTP server from REPL
-idasql> .mcp start       -- start MCP server from REPL
+idasql> .mcp start       -- start MCP server from REPL (if built with MCP)
 idasql> .quit            -- exit
 ```
 
 ![CLI Interactive](assets/idasql_cli_interactive_1.jpg)
 
-### CLI - AI Agent
-
-Talk to the database in plain English. The agent translates to SQL, runs queries, and explains results.
+### Skill Workflow (External CLI)
 
 ```bash
-idasql -s database.i64 -i --agent
+idasql -s database.i64 --http 8081
+# or, if built with -DIDASQL_WITH_MCP=ON:
+idasql -s database.i64 --mcp
 ```
 
-Ask questions naturally:
+In your favorite coding CLI, use the `/idasql` skill:
 ```
-idasql> how many functions are there?
-idasql> which function is called the most?
-idasql> find strings that look like URLs
-idasql> what imports are related to file operations?
-idasql> show me the largest functions
+/idasql analyze this binary; tell me the most called functions.
+/idasql find functions that reference "password" strings and rank by xrefs.
+/idasql show callers of CreateFileW and summarize error handling.
 ```
 
-![CLI Agent](assets/idasql_cli_agent_2.jpg)
-
-The agent can generate visualizations like call graphs:
-
-```
-idasql> draw a call graph for the main function
-idasql> visualize the call hierarchy of CreateFileW
-```
-
-![CLI Agent Call Graph](assets/idasql_cli_agent_3.jpg)
+![CLI Skill Workflow](assets/idasql_cli_handoff_1.jpg)
 
 ### IDA Plugin
 
@@ -117,29 +84,19 @@ Select `idasql` from the CLI dropdown at the bottom of IDA:
 
 ![Plugin CLI Select](assets/idasql_plugin_cli_select.jpg)
 
-Type SQL or natural language questions directly. The agent has full access to IDA's capabilities:
+Type SQL directly, or expose the open database through `.http` / `.mcp` for external tooling:
 
 ```
-idasql> what's the busiest function?
-idasql> find functions that reference "error"
-idasql> which structures have the most members?
+idasql> SELECT name, size FROM funcs ORDER BY size DESC LIMIT 10;
+idasql> .http start
+idasql> .mcp start
 ```
 
-![Plugin Agent](assets/idasql_plugin_agent_1.jpg)
-
-The agent can invoke the decompiler, analyze types, and trace cross-references:
-
-```
-idasql> decompile the free_base function
-idasql> what does the _CONTEXT structure look like?
-idasql> who calls VirtualAlloc and what do they do with it?
-```
-
-![Plugin Decompile](assets/idasql_plugin_agent_2.jpg)
+![Plugin Workflow](assets/idasql_plugin_handoff_1.jpg)
 
 ### HTTP Server
 
-The plugin can run an HTTP server for scripting, tooling, and agent workflows:
+The plugin can run an HTTP server for scripting and tooling workflows:
 
 ```bash
 idasql -s database.i64 --http 8081 --token <token>
@@ -157,12 +114,6 @@ idasql -s database.i64 -q "SELECT name, address FROM funcs LIMIT 10"
 # Interactive mode
 idasql -s database.i64 -i
 
-# AI agent mode
-idasql -s database.i64 -i --agent
-
-# One-shot natural language query
-idasql -s database.i64 --prompt "find the largest function"
-
 # Run SQL script
 idasql -s database.i64 -f queries.sql
 
@@ -178,11 +129,19 @@ idasql -s database.i64 --export dump.sql
 1. Build and install the plugin
 2. Open a database in IDA
 3. Select `idasql` from the command interpreter dropdown
-4. Type SQL or natural language (in agent mode)
+4. Type SQL directly
 
 ```sql
 SELECT name, printf('0x%X', address) as addr FROM funcs WHERE size > 1000;
 ```
+
+Plugin-only UI context query:
+
+```sql
+SELECT get_ui_context_json();
+```
+
+`get_ui_context_json()` is available in GUI plugin runtime only (not idalib/CLI mode).
 
 ## Available Tables
 
@@ -201,6 +160,7 @@ SELECT name, printf('0x%X', address) as addr FROM funcs WHERE size > 1000;
 | `breakpoints` | Breakpoints - address, type, enabled, condition (full CRUD) |
 | `grep` | Unified entity search table (`pattern`, `name`, `kind`, `address`, `ordinal`, `parent_name`, `full_name`) |
 | `grep(pattern, limit, offset)` | Unified entity search function that returns JSON |
+| `get_ui_context_json()` | Plugin-only UI context JSON (GUI runtime only) |
 
 ### Local Variable Mutation
 
@@ -212,7 +172,6 @@ Hex-Rays-backed local variable surfaces:
 - `UPDATE ctree_lvars SET name/type ... WHERE func_addr = ... AND idx = ...` as SQL update path
 
 Use `idx`-based writes when possible. Some internal/decompiler temps can be hidden or non-nameable.
-For full workflow and edge-case guidance, use `idasql/prompts/idasql_agent.md`.
 
 ```sql
 SELECT list_lvars(0x401000);
@@ -453,61 +412,19 @@ INSERT INTO types_members (type_ordinal, member_name, member_type) VALUES (42, '
 INSERT INTO types_enum_values (type_ordinal, value_name, value) VALUES (15, 'FLAG_ACTIVE', 1);
 ```
 
-## AI Agent
+## Skill-Assisted Workflows
 
-The agent translates natural language to SQL, executes queries, and explains results. It has access to all tables and can perform multi-step analysis.
+Use IDASQL as the data plane and drive analysis from your preferred coding CLI with the `/idasql` skill.
 
-```
-idasql> what functions have the most cross-references?
-idasql> find strings that look like file paths
-idasql> show me the call hierarchy of main
-idasql> which imports are related to networking?
-```
-
-See an [example session](examples/agent_session_strings.md) analyzing string references in a binary.
-
-### Prerequisites for AI Features
-
-The AI agent requires one of these CLI tools installed and authenticated:
-
-| Provider | CLI Tool | Install | Login |
-|----------|----------|---------|-------|
-| Claude (default) | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `npm install -g @anthropic-ai/claude-code` | Run `claude`, then `/login` |
-| GitHub Copilot | [Copilot CLI](https://github.com/features/copilot/cli/) | `npm install -g @github/copilot` | Run `copilot`, then `/login` |
-
-**Important:** You must be logged in before using AI features. No API keys needed for basic usage.
-
-### Provider Configuration
+Example prompts:
 
 ```
-.agent provider claude    # Claude (default)
-.agent provider copilot   # GitHub Copilot
+/idasql analyze this binary; tell me the high-risk entry points and why.
+/idasql find all callers of VirtualAlloc and summarize allocation patterns.
+/idasql list functions touching registry APIs, then map related strings.
 ```
 
-### Bring Your Own Key (BYOK)
-
-For direct API access or local inference, enable BYOK mode:
-
-```
-.agent byok enable
-.agent byok type anthropic    # or: openai, azure
-.agent byok key sk-ant-...
-.agent byok model claude-sonnet-4-20250514
-.agent byok endpoint https://api.anthropic.com  # optional
-```
-
-With `copilot` provider and BYOK, you can point to local inference servers (Ollama, LM Studio, vLLM) using OpenAI-compatible endpoints:
-
-```
-.agent provider copilot
-.agent byok enable
-.agent byok type openai
-.agent byok endpoint http://localhost:11434/v1
-.agent byok model llama3
-.agent byok key unused
-```
-
-Settings persist in `~/.idasql/agent_settings.json`.
+The assistant can run focused SQL queries through IDASQL and then summarize findings in plain language.
 
 ## Building
 
@@ -527,7 +444,7 @@ cmake --build build/cli --config Release
 ### Plugin
 
 ```bash
-cmake -S src/plugin -B build/plugin -DIDASQL_WITH_AI_AGENT=ON
+cmake -S src/plugin -B build/plugin -DIDASQL_WITH_MCP=OFF
 cmake --build build/plugin --config Release
 ```
 
@@ -590,6 +507,8 @@ The server uses a random port (8100-8199) to avoid conflicts with `--http`.
 
 For MCP-compatible clients (Claude Desktop, etc.):
 
+`--mcp` and `.mcp` are available only when built with `-DIDASQL_WITH_MCP=ON` (default is `OFF`).
+
 ```bash
 # Standalone mode
 idasql -s database.i64 --mcp
@@ -610,75 +529,32 @@ Configure your MCP client:
 }
 ```
 
-Tools: `idasql_query` (direct SQL), `idasql_agent` (natural language)
+Tools: `idasql_query` (direct SQL)
 
-## Integration with Coding Agents
+## Integration with Your Favorite CLI
 
-The CLI is designed for integration with coding agents (Claude Code, Cursor, Aider, Cline, etc.). Agents can query IDA databases directly without writing IDAPython or understanding IDA's API.
+Use IDASQL with any coding CLI that supports a `/idasql` skill.
 
 ### Setup
 
-1. Open your target binary in IDA Pro (plugin loads automatically)
-2. Start HTTP mode in CLI or REPL (`idasql -s <db> --http 8081` or `.http start`)
-3. Use `/query` to execute SQL from scripts or coding agents
+1. Open your target in IDA Pro, or point CLI mode at an `.i64` file.
+2. Start HTTP mode (`idasql -s <db> --http 8081`) or MCP mode (`idasql -s <db> --mcp`) if compiled with MCP.
+3. In your coding CLI, run `/idasql` prompts against that backend.
 
-### Instructing an Agent
-
-When working with a coding agent on reverse engineering tasks, provide these instructions:
+### Example Prompts
 
 ```
-IDASQL HTTP server is running on http://127.0.0.1:8081 with token <token>.
-
-To query the IDA database, use HTTP POST:
-
-  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SQL QUERY"
-
-Available tables: funcs, segments, names, imports, entries, strings, xrefs, instructions, blocks, types
-
-Example queries:
-  # List functions
-  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SELECT name, printf('0x%X', address) as addr FROM funcs LIMIT 20"
-
-  # Find strings containing a keyword
-  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SELECT * FROM strings WHERE content LIKE '%error%'"
-
-  # Find callers of a function
-  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SELECT printf('0x%X', from_ea) as caller FROM xrefs WHERE to_ea = 0x401000"
-
-  # Search for any identifier
-  curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer <token>" -d "SELECT name, kind, address FROM grep WHERE pattern = 'CreateFile%' LIMIT 10"
+/idasql analyze this binary; tell me the top 10 largest functions and likely responsibilities.
+/idasql find all callers of CreateFileW and summarize error handling behavior.
+/idasql identify suspicious hardcoded URLs and the functions that reference them.
+/idasql map imports related to crypto and show nearest string evidence.
 ```
 
-### Agent Workflow Example
-
-```
-User: "Find all functions that call CreateFileW and check if they handle errors"
-
-Agent thinks: I'll query IDASQL to find the callers
-
-Agent runs:
-$ curl -X POST http://127.0.0.1:8081/query -H "Authorization: Bearer abc123" -d "
-  SELECT DISTINCT func_at(x.from_ea) as caller, printf('0x%X', x.from_ea) as call_site
-  FROM xrefs x
-  JOIN imports i ON x.to_ea = i.address
-  WHERE i.name = 'CreateFileW'
-"
-
-Agent receives:
-| caller              | call_site  |
-|---------------------|------------|
-| ReadConfigFile      | 0x401234   |
-| SaveDocument        | 0x401890   |
-| ...                 | ...        |
-
-Agent then queries for error handling patterns in those functions...
-```
-
-The agent never needs to write IDAPython. SQL queries are self-contained and portable.
+The `/idasql` skill can execute SQL, iterate, and summarize results without requiring IDAPython scripting.
 
 ## Claude Code Plugin
 
-IDASQL is available as a Claude Code plugin, allowing Claude to query IDA databases directly within your coding workflow.
+IDASQL is available as a Claude Code plugin with 13 topic-focused skills for reverse engineering workflows.
 
 ### Prerequisites
 
@@ -689,27 +565,35 @@ IDASQL is available as a Claude Code plugin, allowing Claude to query IDA databa
 ### Installation
 
 ```bash
-# Add the marketplace (one-time)
-/plugin marketplace add 0xeb/anthropic-xsql-tools-plugin
-
-# Install idasql plugin
-/plugin install idasql@0xeb-tools
+claude /install-plugin https://github.com/allthingsida/idasql-skills
 ```
+
+### Skills
+
+| Skill | Description |
+|-------|-------------|
+| `connect` | Connection, CLI, HTTP, UI context, routing index |
+| `disassembly` | Functions, segments, instructions, blocks |
+| `data` | Strings, bytes, string cross-references |
+| `xrefs` | Cross-references, imports, entity search |
+| `decompiler` | Full decompiler reference (ctree, lvars, union selection) |
+| `annotations` | Edit and annotate decompilation and disassembly |
+| `types` | Type system mechanics (structs, unions, enums, parse_decls) |
+| `debugger` | Breakpoints and byte patching |
+| `storage` | Persistent key-value storage (netnode) |
+| `idapython` | Python execution via SQL |
+| `functions` | SQL functions reference |
+| `analysis` | Analysis workflows, security audits, advanced SQL |
+| `resource` | Recursive source recovery methodology |
 
 ### Usage
 
-Once installed, the skill is automatically available:
+Once installed, skills are automatically available:
 
 ```
-"Using idasql, count functions in myfile.i64"
-"Using idasql, decompile main in test.i64"
-"Using idasql, find strings containing 'password'"
-```
-
-### Updating
-
-```bash
-/plugin update idasql
+/idasql analyze this binary; tell me what it does first.
+/idasql count functions in myfile.i64 and list the largest 20.
+/idasql find strings containing 'password' and map referencing functions.
 ```
 
 ### Troubleshooting
@@ -726,7 +610,7 @@ git config --global url."https://github.com/".insteadOf "git@github.com:"
 
 - **[libxsql](https://github.com/0xeb/libxsql)** - Header-only C++17 library for exposing C++ data structures as SQLite virtual tables. Provides the fluent builder API for defining tables, constraint pushdown, and HTTP thinclient support.
 
-- **[libagents](https://github.com/0xeb/libagents)** - C++ library for building AI agents with tool use. Powers the natural language interface with support for Claude (Anthropic) and GitHub Copilot providers.
+- **[fastmcpp](https://github.com/0xeb/fastmcpp)** - Optional MCP server implementation used when building with `-DIDASQL_WITH_MCP=ON`.
 
 ## Author
 

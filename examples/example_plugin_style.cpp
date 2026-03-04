@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * example_plugin_style.cpp - IDASQL usage when IDA is already running
  *

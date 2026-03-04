@@ -1,71 +1,48 @@
-/**
- * disassembly.hpp - Disassembly-level SQL tables
- *
- * Provides instruction-level analysis via SQLite virtual tables.
- * Parallels the decompiler.hpp ctree tables but at the disassembly level.
- *
- * Tables:
- *   disasm_calls    - All call instructions with callee info
- *   disasm_loops    - Detected loops via back-edge analysis
- *
- * Views:
- *   disasm_v_leaf_funcs     - Functions with no outgoing calls
- *   disasm_v_call_chains    - Recursive call chain paths up to depth 10
- *   disasm_v_calls_in_loops - Calls that occur inside detected loops
- *   disasm_v_funcs_with_loops - Functions that contain loops
- *
- * All tables support constraint pushdown on func_addr for efficient queries.
- */
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
 
-#pragma once
-
-#include <idasql/platform.hpp>
-
-#include <idasql/vtable.hpp>
-#include <xsql/database.hpp>
-
-#include <idasql/platform_undef.hpp>
-
-// IDA SDK headers
-#include <ida.hpp>
-#include <funcs.hpp>
-#include <ua.hpp>      // decode_insn, insn_t, is_call_insn
-#include <idp.hpp>     // is_call_insn
-#include <xref.hpp>    // get_first_fcref_from
-#include <name.hpp>    // get_name
-#include <gdl.hpp>     // qflow_chart_t for CFG analysis
-
-#include <vector>
-#include <string>
+#include "disassembly.hpp"
 
 namespace idasql {
 namespace disassembly {
 
-// ============================================================================
-// Helper functions
-// ============================================================================
-
-inline std::string safe_name(ea_t ea) {
+std::string safe_name(ea_t ea) {
     qstring name;
     get_name(&name, ea);
     return std::string(name.c_str());
 }
 
-// ============================================================================
-// DISASM_CALLS Table
-// All call instructions across all functions
-// ============================================================================
+void collect_loops_for_func(std::vector<LoopInfo>& loops, func_t* pfn) {
+    if (!pfn) return;
 
-struct DisasmCallInfo {
-    ea_t func_addr;     // Function containing this call
-    ea_t ea;            // Address of call instruction
-    ea_t callee_addr;   // Target of call (BADADDR if unknown)
-    std::string callee_name;
-};
+    qflow_chart_t fc;
+    fc.create("", pfn, pfn->start_ea, pfn->end_ea, FC_NOEXT);
+
+    for (int i = 0; i < fc.size(); i++) {
+        const qbasic_block_t& block = fc.blocks[i];
+
+        for (int j = 0; j < fc.nsucc(i); j++) {
+            int succ_idx = fc.succ(i, j);
+            if (succ_idx < 0 || succ_idx >= fc.size()) continue;
+
+            const qbasic_block_t& succ = fc.blocks[succ_idx];
+
+            if (succ.start_ea <= block.start_ea) {
+                LoopInfo li;
+                li.func_addr = pfn->start_ea;
+                li.loop_id = succ_idx;
+                li.header_ea = succ.start_ea;
+                li.header_end_ea = succ.end_ea;
+                li.back_edge_block_ea = block.start_ea;
+                li.back_edge_block_end = block.end_ea;
+                loops.push_back(li);
+            }
+        }
+    }
+}
 
 // ============================================================================
-// DisasmCallsInFuncIterator - Constraint pushdown for func_addr = X
-// Iterates calls in a single function without building the full cache
+// DisasmCallsInFuncIterator
 // ============================================================================
 
 class DisasmCallsInFuncIterator : public xsql::RowIterator {
@@ -74,8 +51,6 @@ class DisasmCallsInFuncIterator : public xsql::RowIterator {
     func_item_iterator_t fii_;
     bool started_ = false;
     bool valid_ = false;
-
-    // Current call info
     ea_t current_ea_ = BADADDR;
     ea_t callee_addr_ = BADADDR;
     std::string callee_name_;
@@ -110,12 +85,10 @@ public:
 
         if (!started_) {
             started_ = true;
-            // Initialize iterator and find first code item
             if (!fii_.set(pfn_)) {
                 valid_ = false;
                 return false;
             }
-            // Check if first item is a call
             ea_t ea = fii_.current();
             insn_t insn;
             if (decode_insn(&insn, ea) > 0 && is_call_insn(insn)) {
@@ -129,7 +102,6 @@ public:
                 valid_ = true;
                 return true;
             }
-            // First item wasn't a call, find next
             valid_ = find_next_call();
             return valid_;
         }
@@ -144,22 +116,16 @@ public:
 
     void column(xsql::FunctionContext& ctx, int col) override {
         switch (col) {
-            case 0: // func_addr
-                ctx.result_int64(static_cast<int64_t>(func_addr_));
-                break;
-            case 1: // ea
-                ctx.result_int64(static_cast<int64_t>(current_ea_));
-                break;
-            case 2: // callee_addr
+            case 0: ctx.result_int64(static_cast<int64_t>(func_addr_)); break;
+            case 1: ctx.result_int64(static_cast<int64_t>(current_ea_)); break;
+            case 2:
                 if (callee_addr_ != BADADDR) {
                     ctx.result_int64(static_cast<int64_t>(callee_addr_));
                 } else {
                     ctx.result_int64(0);
                 }
                 break;
-            case 3: // callee_name
-                ctx.result_text(callee_name_.c_str());
-                break;
+            case 3: ctx.result_text(callee_name_.c_str()); break;
         }
     }
 
@@ -167,6 +133,10 @@ public:
         return static_cast<int64_t>(current_ea_);
     }
 };
+
+// ============================================================================
+// DisasmCallsGenerator
+// ============================================================================
 
 class DisasmCallsGenerator : public xsql::Generator<DisasmCallInfo> {
     size_t func_idx_ = 0;
@@ -231,79 +201,13 @@ public:
     }
 
     const DisasmCallInfo& current() const override { return current_; }
-
     int64_t rowid() const override { return static_cast<int64_t>(current_.ea); }
 };
 
-inline GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
-    return generator_table<DisasmCallInfo>("disasm_calls")
-        .estimate_rows([]() -> size_t {
-            // Heuristic: a few calls per function
-            return get_func_qty() * 5;
-        })
-        .generator([]() -> std::unique_ptr<xsql::Generator<DisasmCallInfo>> {
-            return std::make_unique<DisasmCallsGenerator>();
-        })
-        .column_int64("func_addr", [](const DisasmCallInfo& r) -> int64_t { return r.func_addr; })
-        .column_int64("ea", [](const DisasmCallInfo& r) -> int64_t { return r.ea; })
-        .column_int64("callee_addr", [](const DisasmCallInfo& r) -> int64_t {
-            return r.callee_addr != BADADDR ? static_cast<int64_t>(r.callee_addr) : 0;
-        })
-        .column_text("callee_name", [](const DisasmCallInfo& r) -> std::string { return r.callee_name; })
-        // Constraint pushdown: func_addr = X bypasses full scan
-        .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
-            return std::make_unique<DisasmCallsInFuncIterator>(static_cast<ea_t>(func_addr));
-        }, 10.0)  // Low cost - only iterates one function
-        .build();
-}
-
 // ============================================================================
-// DISASM_LOOPS Table
-// Detected loops via back-edge analysis using qflow_chart_t
+// LoopsInFuncIterator
 // ============================================================================
 
-struct LoopInfo {
-    ea_t func_addr;
-    int loop_id;           // Unique ID (header block index)
-    ea_t header_ea;        // Loop header start address
-    ea_t header_end_ea;    // Loop header end address
-    ea_t back_edge_block_ea;  // Block containing the back-edge jump
-    ea_t back_edge_block_end; // End of back-edge block
-};
-
-inline void collect_loops_for_func(std::vector<LoopInfo>& loops, func_t* pfn) {
-    if (!pfn) return;
-
-    qflow_chart_t fc;
-    fc.create("", pfn, pfn->start_ea, pfn->end_ea, FC_NOEXT);
-
-    for (int i = 0; i < fc.size(); i++) {
-        const qbasic_block_t& block = fc.blocks[i];
-
-        // Check each successor for back-edges
-        for (int j = 0; j < fc.nsucc(i); j++) {
-            int succ_idx = fc.succ(i, j);
-            if (succ_idx < 0 || succ_idx >= fc.size()) continue;
-
-            const qbasic_block_t& succ = fc.blocks[succ_idx];
-
-            // Back-edge: successor starts at or before current block
-            // This indicates a loop where succ is the header
-            if (succ.start_ea <= block.start_ea) {
-                LoopInfo li;
-                li.func_addr = pfn->start_ea;
-                li.loop_id = succ_idx;  // Use header block index as loop ID
-                li.header_ea = succ.start_ea;
-                li.header_end_ea = succ.end_ea;
-                li.back_edge_block_ea = block.start_ea;
-                li.back_edge_block_end = block.end_ea;
-                loops.push_back(li);
-            }
-        }
-    }
-}
-
-// Iterator for loops in a single function (constraint pushdown)
 class LoopsInFuncIterator : public xsql::RowIterator {
     std::vector<LoopInfo> loops_;
     size_t idx_ = 0;
@@ -346,6 +250,10 @@ public:
 
     int64_t rowid() const override { return static_cast<int64_t>(idx_); }
 };
+
+// ============================================================================
+// DisasmLoopsGenerator
+// ============================================================================
 
 class DisasmLoopsGenerator : public xsql::Generator<LoopInfo> {
     size_t func_idx_ = 0;
@@ -391,14 +299,36 @@ public:
     }
 
     const LoopInfo& current() const override { return loops_[idx_]; }
-
     int64_t rowid() const override { return rowid_; }
 };
 
-inline GeneratorTableDef<LoopInfo> define_disasm_loops() {
+// ============================================================================
+// Table definitions
+// ============================================================================
+
+GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
+    return generator_table<DisasmCallInfo>("disasm_calls")
+        .estimate_rows([]() -> size_t {
+            return get_func_qty() * 5;
+        })
+        .generator([]() -> std::unique_ptr<xsql::Generator<DisasmCallInfo>> {
+            return std::make_unique<DisasmCallsGenerator>();
+        })
+        .column_int64("func_addr", [](const DisasmCallInfo& r) -> int64_t { return r.func_addr; })
+        .column_int64("ea", [](const DisasmCallInfo& r) -> int64_t { return r.ea; })
+        .column_int64("callee_addr", [](const DisasmCallInfo& r) -> int64_t {
+            return r.callee_addr != BADADDR ? static_cast<int64_t>(r.callee_addr) : 0;
+        })
+        .column_text("callee_name", [](const DisasmCallInfo& r) -> std::string { return r.callee_name; })
+        .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<DisasmCallsInFuncIterator>(static_cast<ea_t>(func_addr));
+        }, 10.0)
+        .build();
+}
+
+GeneratorTableDef<LoopInfo> define_disasm_loops() {
     return generator_table<LoopInfo>("disasm_loops")
         .estimate_rows([]() -> size_t {
-            // Heuristic: very few loops per function
             return get_func_qty() * 2;
         })
         .generator([]() -> std::unique_ptr<xsql::Generator<LoopInfo>> {
@@ -416,14 +346,7 @@ inline GeneratorTableDef<LoopInfo> define_disasm_loops() {
         .build();
 }
 
-// ============================================================================
-// View Registration
-// ============================================================================
-
-inline bool register_disasm_views(xsql::Database& db) {
-
-    // disasm_v_leaf_funcs - Functions with no outgoing calls (terminal/leaf functions)
-    // Uses disasm_calls to detect calls at the disassembly level
+bool register_disasm_views(xsql::Database& db) {
     const char* v_leaf_funcs = R"(
         CREATE VIEW IF NOT EXISTS disasm_v_leaf_funcs AS
         SELECT f.address, f.name
@@ -434,19 +357,15 @@ inline bool register_disasm_views(xsql::Database& db) {
     )";
     db.exec(v_leaf_funcs);
 
-    // disasm_v_call_chains - All call chain paths (root_func -> current_func at depth N)
-    // Enables queries like "find functions with call chains reaching depth 6"
     const char* v_call_chains = R"(
         CREATE VIEW IF NOT EXISTS disasm_v_call_chains AS
         WITH RECURSIVE call_chain(root_func, current_func, depth) AS (
-            -- Base: direct calls from each function
             SELECT DISTINCT func_addr, callee_addr, 1
             FROM disasm_calls
             WHERE callee_addr IS NOT NULL AND callee_addr != 0
 
             UNION ALL
 
-            -- Recursive: follow callees deeper
             SELECT cc.root_func, c.callee_addr, cc.depth + 1
             FROM call_chain cc
             JOIN disasm_calls c ON c.func_addr = cc.current_func
@@ -462,9 +381,6 @@ inline bool register_disasm_views(xsql::Database& db) {
     )";
     db.exec(v_call_chains);
 
-    // disasm_v_calls_in_loops - Calls that occur inside detected loops
-    // A call is considered "in a loop" if its address is between the loop header
-    // and the end of the back-edge block
     const char* v_calls_in_loops = R"(
         CREATE VIEW IF NOT EXISTS disasm_v_calls_in_loops AS
         SELECT
@@ -482,7 +398,6 @@ inline bool register_disasm_views(xsql::Database& db) {
     )";
     db.exec(v_calls_in_loops);
 
-    // disasm_v_funcs_with_loops - Functions that contain loops
     const char* v_funcs_with_loops = R"(
         CREATE VIEW IF NOT EXISTS disasm_v_funcs_with_loops AS
         SELECT
@@ -499,30 +414,23 @@ inline bool register_disasm_views(xsql::Database& db) {
 }
 
 // ============================================================================
-// Registry for all disassembly tables
+// Registry
 // ============================================================================
 
-struct DisassemblyRegistry {
-    GeneratorTableDef<DisasmCallInfo> disasm_calls;
-    GeneratorTableDef<LoopInfo> disasm_loops;
+DisassemblyRegistry::DisassemblyRegistry()
+    : disasm_calls(define_disasm_calls())
+    , disasm_loops(define_disasm_loops())
+{}
 
-    DisassemblyRegistry()
-        : disasm_calls(define_disasm_calls())
-        , disasm_loops(define_disasm_loops())
-    {}
+void DisassemblyRegistry::register_all(xsql::Database& db) {
+    db.register_generator_table("ida_disasm_calls", &disasm_calls);
+    db.create_table("disasm_calls", "ida_disasm_calls");
 
-    void register_all(xsql::Database& db) {
-        db.register_generator_table("ida_disasm_calls", &disasm_calls);
-        db.create_table("disasm_calls", "ida_disasm_calls");
+    db.register_generator_table("ida_disasm_loops", &disasm_loops);
+    db.create_table("disasm_loops", "ida_disasm_loops");
 
-        db.register_generator_table("ida_disasm_loops", &disasm_loops);
-        db.create_table("disasm_loops", "ida_disasm_loops");
-
-        // Register views on top
-        register_disasm_views(db);
-    }
-};
+    register_disasm_views(db);
+}
 
 } // namespace disassembly
 } // namespace idasql
-

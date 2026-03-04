@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * example_custom_vtable.cpp - Creating custom virtual tables
  *
@@ -17,7 +20,9 @@
 #include <idasql/database.hpp>
 #include <idasql/vtable.hpp>
 
-// IDA SDK
+// IDA SDK (ida.hpp must come first for base types)
+#include <ida.hpp>
+#include <idp.hpp>
 #include <funcs.hpp>
 #include <name.hpp>
 

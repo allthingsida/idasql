@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 #pragma once
 
 /**
@@ -65,21 +68,27 @@ public:
     /** Get the server URL */
     std::string url() const;
 
+    /** Get bind address configured at startup */
+    const std::string& bind_addr() const { return bind_addr_; }
+
     /** Set interrupt check function (called during wait loop) */
     void set_interrupt_check(std::function<bool()> check);
 
 private:
     std::unique_ptr<xsql::thinclient::http_query_server> impl_;
+    std::string bind_addr_{"127.0.0.1"};
 };
 
 /**
  * Format HTTP server info for display
  */
 std::string format_http_info(int port, const std::string& stop_hint = "Press Ctrl+C to stop and return to REPL.");
+std::string format_http_info(int port, const std::string& bind_addr, const std::string& stop_hint);
 
 /**
  * Format HTTP server status
  */
 std::string format_http_status(int port, bool running);
+std::string format_http_status(int port, bool running, const std::string& bind_addr);
 
 } // namespace idasql

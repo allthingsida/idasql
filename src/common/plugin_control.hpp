@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * plugin_control.hpp - Plugin control codes used by IDASQL
  */

@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 #include "mcp_server.hpp"
 #include <idasql/runtime_settings.hpp>
 
@@ -6,11 +9,13 @@
 #include <fastmcpp/tools/manager.hpp>
 #include <fastmcpp/tools/tool.hpp>
 #include <nlohmann/json.hpp>
+#include <xsql/thinclient/clipboard.hpp>
 
 #include <algorithm>
 #include <chrono>
 #include <random>
 #include <sstream>
+#include <unordered_map>
 
 namespace idasql {
 
@@ -59,13 +64,17 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
             while (!cmd->completed && running_.load()) {
                 if (cmd->started) {
-                    cmd->done_cv.wait_for(lock, std::chrono::milliseconds(100),
-                                          [&]() { return cmd->completed || !running_.load(); });
+                    cmd->done_cv.wait_for(
+                        lock,
+                        std::chrono::milliseconds(100),
+                        [&]() { return cmd->completed || !running_.load(); });
                     continue;
                 }
 
-                if (cmd->done_cv.wait_until(lock, deadline,
-                                            [&]() { return cmd->completed || cmd->started || !running_.load(); })) {
+                if (cmd->done_cv.wait_until(
+                        lock,
+                        deadline,
+                        [&]() { return cmd->completed || cmd->started || !running_.load(); })) {
                     continue;
                 }
 
@@ -93,21 +102,21 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
         return {false, "Error: MCP request timed out in queue (raise PRAGMA idasql.queue_admission_timeout_ms)"};
     }
 
-    return {true, cmd->result};
+    // Convention: query callbacks return "Error: ..." on failure
+    bool ok = cmd->result.substr(0, 7) != "Error: ";
+    return {ok, cmd->result};
 }
 
-int IDAMCPServer::start(int port, QueryCallback query_cb, AskCallback ask_cb,
+int IDAMCPServer::start(int port, QueryCallback query_cb,
                         const std::string& bind_addr, bool use_queue) {
     if (running_.load()) {
         return port_;
     }
 
     query_cb_ = query_cb;
-    ask_cb_ = ask_cb;
     bind_addr_ = bind_addr;
     use_queue_.store(use_queue);
 
-    // If port is 0, pick a random port in the 9000-9999 range
     if (port == 0) {
         std::random_device rd;
         std::mt19937 gen(rd());
@@ -117,7 +126,6 @@ int IDAMCPServer::start(int port, QueryCallback query_cb, AskCallback ask_cb,
 
     impl_ = std::make_unique<Impl>();
 
-    // Register idasql_query tool - direct SQL execution
     Json query_input_schema = {
         {"type", "object"},
         {"properties", {
@@ -129,18 +137,13 @@ int IDAMCPServer::start(int port, QueryCallback query_cb, AskCallback ask_cb,
         {"required", Json::array({"query"})}
     };
 
-    Json query_output_schema = {
-        {"type", "object"},
-        {"properties", {
-            {"result", {{"type", "string"}}},
-            {"success", {{"type", "boolean"}}}
-        }}
-    };
-
+    // No outputSchema — the tool returns text content, not structuredContent.
+    // Declaring an outputSchema without returning structuredContent violates
+    // the MCP spec and causes the official Python SDK to reject responses.
     fastmcpp::tools::Tool sql_query_tool{
         "idasql_query",
         query_input_schema,
-        query_output_schema,
+        Json(),
         [this](const Json& args) -> Json {
             std::string query = args.value("query", "");
             if (query.empty()) {
@@ -156,12 +159,10 @@ int IDAMCPServer::start(int port, QueryCallback query_cb, AskCallback ask_cb,
             bool success = true;
 
             if (use_queue_.load()) {
-                // Queue mode (CLI): queue command for main thread execution
                 auto qr = queue_and_wait(MCPPendingCommand::Type::Query, query);
                 result = qr.payload;
                 success = qr.success;
             } else {
-                // Direct mode (plugin): callback uses execute_sync internally
                 if (!query_cb_) {
                     return Json{
                         {"content", Json::array({
@@ -171,9 +172,12 @@ int IDAMCPServer::start(int port, QueryCallback query_cb, AskCallback ask_cb,
                     };
                 }
                 result = query_cb_(query);
+                // Convention: query callbacks return "Error: ..." on failure
+                if (result.substr(0, 7) == "Error: ") {
+                    success = false;
+                }
             }
 
-            // MCP tools/call expects content array format
             return Json{
                 {"content", Json::array({
                     Json{{"type", "text"}, {"text", result}}
@@ -185,74 +189,9 @@ int IDAMCPServer::start(int port, QueryCallback query_cb, AskCallback ask_cb,
     sql_query_tool.set_description("Execute a SQL query against the IDA database and return results");
     impl_->tool_manager.register_tool(sql_query_tool);
 
-    // Register idasql_agent tool - natural language query (if ask_cb provided)
-    if (ask_cb_) {
-        Json ask_input_schema = {
-            {"type", "object"},
-            {"properties", {
-                {"question", {
-                    {"type", "string"},
-                    {"description", "Natural language question about the binary (e.g., 'What functions call malloc?')"}
-                }}
-            }},
-            {"required", Json::array({"question"})}
-        };
-
-        Json ask_output_schema = {
-            {"type", "object"},
-            {"properties", {
-                {"response", {{"type", "string"}}},
-                {"success", {{"type", "boolean"}}}
-            }}
-        };
-
-        fastmcpp::tools::Tool agent_ask_tool{
-            "idasql_agent",
-            ask_input_schema,
-            ask_output_schema,
-            [this](const Json& args) -> Json {
-                std::string question = args.value("question", "");
-                if (question.empty()) {
-                    return Json{
-                        {"content", Json::array({
-                            Json{{"type", "text"}, {"text", "Error: missing question"}}
-                        })},
-                        {"isError", true}
-                    };
-                }
-
-                std::string result;
-                bool success = true;
-
-                if (use_queue_.load()) {
-                    // Queue mode (CLI): queue command for main thread execution
-                    auto qr = queue_and_wait(MCPPendingCommand::Type::Ask, question);
-                    result = qr.payload;
-                    success = qr.success;
-                } else {
-                    // Direct mode (plugin): callback handles thread safety
-                    result = ask_cb_(question);
-                }
-
-                return Json{
-                    {"content", Json::array({
-                        Json{{"type", "text"}, {"text", result}}
-                    })},
-                    {"isError", !success}
-                };
-            }
-        };
-        agent_ask_tool.set_description("Ask a natural language question about the binary - AI translates to SQL and returns results");
-        impl_->tool_manager.register_tool(agent_ask_tool);
-    }
-
-    // Create MCP handler
     std::unordered_map<std::string, std::string> descriptions = {
         {"idasql_query", "Execute a SQL query against the IDA database and return results"}
     };
-    if (ask_cb_) {
-        descriptions["idasql_agent"] = "Ask a natural language question about the binary - AI translates to SQL and returns results";
-    }
 
     auto handler = fastmcpp::mcp::make_mcp_handler(
         "idasql",
@@ -261,7 +200,6 @@ int IDAMCPServer::start(int port, QueryCallback query_cb, AskCallback ask_cb,
         descriptions
     );
 
-    // Create and start SSE server
     impl_->server = std::make_unique<fastmcpp::server::SseServerWrapper>(
         handler,
         bind_addr_,
@@ -277,7 +215,6 @@ int IDAMCPServer::start(int port, QueryCallback query_cb, AskCallback ask_cb,
 
     port_ = impl_->server->port();
     running_.store(true);
-
     return port_;
 }
 
@@ -293,11 +230,12 @@ void IDAMCPServer::run_until_stopped() {
         }
 
         std::shared_ptr<MCPPendingCommand> cmd;
-
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
-            if (queue_cv_.wait_for(lock, std::chrono::milliseconds(100),
-                                   [this]() { return !pending_commands_.empty() || !running_.load(); })) {
+            if (queue_cv_.wait_for(
+                    lock,
+                    std::chrono::milliseconds(100),
+                    [this]() { return !pending_commands_.empty() || !running_.load(); })) {
                 if (!pending_commands_.empty()) {
                     cmd = pending_commands_.front();
                     pending_commands_.pop_front();
@@ -305,45 +243,45 @@ void IDAMCPServer::run_until_stopped() {
             }
         }
 
-        if (cmd) {
-            bool should_execute = false;
-            {
-                std::lock_guard<std::mutex> lock(cmd->done_mutex);
-                if (!cmd->completed && !cmd->canceled) {
-                    cmd->started = true;
-                    should_execute = true;
-                } else if (!cmd->completed && cmd->canceled) {
-                    cmd->completed = true;
-                }
-            }
-
-            if (!should_execute) {
-                cmd->done_cv.notify_one();
-                continue;
-            }
-
-            std::string result;
-            try {
-                if (cmd->type == MCPPendingCommand::Type::Query && query_cb_) {
-                    result = query_cb_(cmd->input);
-                } else if (cmd->type == MCPPendingCommand::Type::Ask && ask_cb_) {
-                    result = ask_cb_(cmd->input);
-                } else {
-                    result = "Error: No handler for command type";
-                }
-            } catch (const std::exception& e) {
-                result = std::string("Error: ") + e.what();
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(cmd->done_mutex);
-                if (!cmd->completed) {
-                    cmd->result = std::move(result);
-                    cmd->completed = true;
-                }
-            }
-            cmd->done_cv.notify_one();
+        if (!cmd) {
+            continue;
         }
+
+        bool should_execute = false;
+        {
+            std::lock_guard<std::mutex> lock(cmd->done_mutex);
+            if (!cmd->completed && !cmd->canceled) {
+                cmd->started = true;
+                should_execute = true;
+            } else if (!cmd->completed && cmd->canceled) {
+                cmd->completed = true;
+            }
+        }
+
+        if (!should_execute) {
+            cmd->done_cv.notify_one();
+            continue;
+        }
+
+        std::string result;
+        try {
+            if (cmd->type == MCPPendingCommand::Type::Query && query_cb_) {
+                result = query_cb_(cmd->input);
+            } else {
+                result = "Error: No handler for command type";
+            }
+        } catch (const std::exception& e) {
+            result = std::string("Error: ") + e.what();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(cmd->done_mutex);
+            if (!cmd->completed) {
+                cmd->result = std::move(result);
+                cmd->completed = true;
+            }
+        }
+        cmd->done_cv.notify_one();
     }
 }
 
@@ -386,39 +324,29 @@ void IDAMCPServer::complete_pending_commands(const std::string& result) {
 
 std::string IDAMCPServer::url() const {
     std::ostringstream ss;
-    ss << "http://" << bind_addr_ << ":" << port_;
+    ss << "http://" << xsql::thinclient::format_url_host(bind_addr_) << ":" << port_;
     return ss.str();
 }
 
-std::string format_mcp_info(int port, bool has_agent) {
-    std::ostringstream ss;
-    ss << "MCP server started on port " << port << "\n";
-    ss << "SSE endpoint: http://127.0.0.1:" << port << "/sse\n\n";
+std::string format_mcp_info(int port) {
+    return format_mcp_info(port, "127.0.0.1");
+}
 
-    ss << "Available tools:\n";
-    ss << "  idasql_query  - Execute SQL query directly\n";
-    if (has_agent) {
-        ss << "  idasql_agent  - Ask natural language question (AI-powered)\n";
-    }
-    ss << "\n";
-
-    ss << "Add to Claude Desktop config:\n";
-    ss << "{\n";
-    ss << "  \"mcpServers\": {\n";
-    ss << "    \"idasql\": {\n";
-    ss << "      \"url\": \"http://127.0.0.1:" << port << "/sse\"\n";
-    ss << "    }\n";
-    ss << "  }\n";
-    ss << "}\n";
-
-    return ss.str();
+std::string format_mcp_info(int port, const std::string& bind_addr) {
+    const std::string rendered_host = xsql::thinclient::format_url_host(bind_addr);
+    return "IDASQL MCP server: http://" + rendered_host + ":" + std::to_string(port) + "/sse\n";
 }
 
 std::string format_mcp_status(int port, bool running) {
+    return format_mcp_status(port, running, "127.0.0.1");
+}
+
+std::string format_mcp_status(int port, bool running, const std::string& bind_addr) {
     std::ostringstream ss;
+    const std::string rendered_host = xsql::thinclient::format_url_host(bind_addr);
     if (running) {
         ss << "MCP server running on port " << port << "\n";
-        ss << "SSE endpoint: http://127.0.0.1:" << port << "/sse\n";
+        ss << "SSE endpoint: http://" << rendered_host << ":" << port << "/sse\n";
     } else {
         ss << "MCP server not running\n";
         ss << "Use '.mcp start' to start\n";

@@ -8,6 +8,7 @@ ida_add_idalib(idasql_cli
         main.cpp
 )
 target_link_libraries(idasql_cli PRIVATE xsql::xsql)
+target_link_libraries(idasql_cli PRIVATE idasql)
 target_include_directories(idasql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include)
 target_compile_definitions(idasql_cli PRIVATE USE_IDA_SDK)
 
@@ -38,12 +39,12 @@ if(MSVC)
 elseif(APPLE)
     set_target_properties(idasql_cli PROPERTIES
         BUILD_WITH_INSTALL_RPATH TRUE
-        INSTALL_RPATH "@executable_path;$ENV{IDASDK}/bin"
+        INSTALL_RPATH "@executable_path;$ENV{IDASDK}/src/bin"
     )
 elseif(UNIX)
     set_target_properties(idasql_cli PROPERTIES
         BUILD_WITH_INSTALL_RPATH TRUE
-        INSTALL_RPATH "$ORIGIN;$ENV{IDASDK}/bin"
+        INSTALL_RPATH "$ORIGIN;$ENV{IDASDK}/src/bin"
     )
 endif()
 
@@ -53,30 +54,24 @@ if(USE_HEXRAYS)
     target_compile_definitions(idasql_cli PRIVATE USE_HEXRAYS)
 endif()
 
-# AI Agent support (from parent project)
-if(IDASQL_WITH_AI_AGENT)
+# MCP support (from parent project)
+if(IDASQL_WITH_MCP)
     target_sources(idasql_cli PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../common/ai_agent.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../common/mcp_server.cpp
     )
     target_include_directories(idasql_cli PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../external/libagents/external/fastmcpp/include
-        ${IDASQL_GENERATED_INCLUDE_DIR}
     )
-    target_link_libraries(idasql_cli PRIVATE libagents fastmcpp_core)
-    target_compile_definitions(idasql_cli PRIVATE IDASQL_HAS_AI_AGENT)
+    target_link_libraries(idasql_cli PRIVATE fastmcpp_core)
+    target_compile_definitions(idasql_cli PRIVATE IDASQL_HAS_MCP)
 
-    if(TARGET generate_prompt)
-        add_dependencies(idasql_cli generate_prompt)
-    endif()
-
-    message(STATUS "idasql_cli: AI agent support enabled (with MCP server)")
+    message(STATUS "idasql_cli: MCP support enabled")
 endif()
 
 # HTTP server support
 target_sources(idasql_cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/http_server.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/welcome_query.cpp
 )
 target_compile_definitions(idasql_cli PRIVATE XSQL_HAS_THINCLIENT)
 

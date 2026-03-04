@@ -1,31 +1,38 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 #include "http_server.hpp"
 #include <idasql/runtime_settings.hpp>
+#include "welcome_query.hpp"
 
 #include <sstream>
 
 namespace idasql {
 
-// Help text served at /help endpoint
-static const char* HTTP_HELP_TEXT = R"(IDASQL HTTP REST API
-====================
-
-SQL interface for IDA Pro databases via HTTP.
-
-Endpoints:
-  GET  /         - Welcome message
-  GET  /help     - This documentation
-  POST /query    - Execute SQL (body = raw SQL, response = JSON)
-  GET  /status   - Server health check
-  POST /shutdown - Stop server
-
-Response Format:
-  Success: {"success": true, "columns": [...], "rows": [[...]], "row_count": N}
-  Error:   {"success": false, "error": "message"}
-
-Example:
-  curl http://localhost:<port>/help
-  curl -X POST http://localhost:<port>/query -d "SELECT name FROM funcs LIMIT 5"
-)";
+static std::string build_http_help_text() {
+    std::ostringstream out;
+    out << "IDASQL HTTP REST API\n"
+        << "====================\n\n"
+        << "SQL interface for IDA Pro databases via HTTP.\n\n"
+        << "Endpoints:\n"
+        << "  GET  /         - Welcome message\n"
+        << "  GET  /help     - This documentation\n"
+        << "  POST /query    - Execute SQL (body = raw SQL, response = JSON)\n"
+        << "  GET  /status   - Server health check\n"
+        << "  POST /shutdown - Stop server\n\n"
+        << "Discover Schema:\n"
+        << "  SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY type, name;\n"
+        << "  PRAGMA table_info(funcs);\n\n"
+        << "Starter Query:\n"
+        << "  SELECT * FROM welcome;\n\n"
+        << "Response Format:\n"
+        << "  Success: {\"success\": true, \"columns\": [...], \"rows\": [[...]], \"row_count\": N}\n"
+        << "  Error:   {\"success\": false, \"error\": \"message\"}\n\n"
+        << "Example:\n"
+        << "  curl http://localhost:<port>/help\n"
+        << "  " << format_query_curl_example("http://localhost:<port>") << "\n";
+    return out.str();
+}
 
 int IDAHTTPServer::start(int port, HTTPQueryCallback query_cb,
                          const std::string& bind_addr, bool use_queue) {
@@ -33,11 +40,13 @@ int IDAHTTPServer::start(int port, HTTPQueryCallback query_cb,
         return impl_->port();
     }
 
+    bind_addr_ = bind_addr.empty() ? "127.0.0.1" : bind_addr;
+
     xsql::thinclient::http_query_server_config config;
     config.tool_name = "idasql";
-    config.help_text = HTTP_HELP_TEXT;
+    config.help_text = build_http_help_text();
     config.port = port;
-    config.bind_address = bind_addr;
+    config.bind_address = bind_addr_;
     config.query_fn = std::move(query_cb);
     config.use_queue = use_queue;
     config.queue_admission_timeout_ms_fn = []() {
@@ -89,11 +98,24 @@ void IDAHTTPServer::set_interrupt_check(std::function<bool()> check) {
 }
 
 std::string format_http_info(int port, const std::string& stop_hint) {
-    return xsql::thinclient::format_http_info("idasql", port, stop_hint);
+    return format_http_info(port, "127.0.0.1", stop_hint);
+}
+
+std::string format_http_info(int port, const std::string& bind_addr, const std::string& stop_hint) {
+    const std::string rendered_host = xsql::thinclient::format_url_host(bind_addr);
+    const std::string base_url = "http://" + rendered_host + ":" + std::to_string(port);
+    std::ostringstream ss;
+    ss << "IDASQL HTTP server: " << base_url << "\n";
+    ss << stop_hint << "\n";
+    return ss.str();
 }
 
 std::string format_http_status(int port, bool running) {
-    return xsql::thinclient::format_http_status(port, running);
+    return format_http_status(port, running, "127.0.0.1");
+}
+
+std::string format_http_status(int port, bool running, const std::string& bind_addr) {
+    return xsql::thinclient::format_http_status(port, running, bind_addr);
 }
 
 } // namespace idasql

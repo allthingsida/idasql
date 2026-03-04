@@ -1,111 +1,7 @@
-/**
- * functions.hpp - Custom SQL functions for IDA operations
- *
- * Disassembly:
- *   - disasm_at(address)           - Canonical listing line at address head (code or data)
- *   - disasm_at(address, context)  - Canonical listing line with +/- context heads
- *   - disasm(address)              - Single disassembly line
- *   - disasm(address, count)       - Next N instructions from address
- *   - disasm_range(start, end)     - All instructions in [start, end)
- *   - disasm_func(address)         - Full function disassembly
- *   - bytes(address, count)        - Bytes as hex string
- *   - bytes_raw(address, count)    - Bytes as blob
- *   - mnemonic(address)            - Instruction mnemonic only
- *   - operand(address, n)          - Operand text (n=0-7)
- *
- * Binary Search:
- *   - search_bytes(pattern)        - Find all byte pattern matches (JSON array)
- *   - search_bytes(pattern, start, end) - Search within range
- *   - search_first(pattern)        - First match address (or NULL)
- *   - search_first(pattern, start, end) - First match in range
- *
- * Names & Navigation:
- *   - name_at(address)             - Name at address
- *   - func_at(address)             - Function name containing address
- *   - func_start(address)          - Start of containing function
- *   - func_end(address)            - End of containing function
- *   - segment_at(address)          - Segment name containing address
- *
- * Comments & Naming:
- *   - comment_at(address)          - Get comment at address
- *   - set_comment(address, text)   - Set comment at address
- *   - set_name(address, name)      - Set name at address
- *   - type_at(address)             - Get type declaration at address
- *   - set_type(address, decl)      - Apply C declaration/type at address
- *   - parse_decls(text)            - Import C declarations into local types
- *
- * Cross-References:
- *   - xrefs_to(address)            - Xrefs to address (JSON array)
- *   - xrefs_from(address)          - Xrefs from address (JSON array)
- *
- * Decompiler:
- *   - decompile(address)           - Decompiled pseudocode for function
- *   - decompile(address, refresh)  - Decompiled pseudocode with refresh option
- *   - list_lvars(address)          - Local variables as JSON
- *   - rename_lvar(func, idx, new)  - Rename local by index
- *   - rename_lvar_by_name(func, old, new) - Rename local by name
- *   - set_lvar_comment(func, idx, comment) - Set local variable comment by index
- *   - set_union_selection(func, ea, path) - Set/clear user union selection by ea
- *   - set_union_selection_item(func, item, path) - Set/clear selection by ctree item id
- *   - set_union_selection_ea_arg(func, ea, arg_idx, path[, callee]) - Set/clear by call arg coordinate
- *   - call_arg_item(func, ea, arg_idx[, callee]) - Resolve call arg coordinate to ctree item id
- *   - ctree_item_at(func, ea[, op_name[, nth]]) - Resolve generic expression coordinate to ctree item id
- *   - set_union_selection_ea_expr(func, ea, path[, op_name[, nth]]) - Set/clear by expression coordinate
- *   - get_union_selection(func, ea) - Get union path JSON by ea
- *   - get_union_selection_item(func, item) - Get union path JSON by ctree item id
- *   - get_union_selection_ea_arg(func, ea, arg_idx[, callee]) - Get union path JSON by call arg coordinate
- *   - get_union_selection_ea_expr(func, ea[, op_name[, nth]]) - Get union path JSON by expression coordinate
- *   - set_numform(func, ea, opnum, spec) - Set/clear decompiler numform by ea/opnum
- *   - set_numform_item(func, item, opnum, spec) - Set/clear decompiler numform by ctree item
- *   - set_numform_ea_arg(func, ea, arg_idx, opnum, spec[, callee]) - Set/clear numform by call arg coordinate
- *   - set_numform_ea_expr(func, ea, opnum, spec[, op_name[, nth]]) - Set/clear numform by expression coordinate
- *   - get_numform(func, ea, opnum) - Get decompiler numform JSON by ea/opnum
- *   - get_numform_item(func, item, opnum) - Get decompiler numform JSON by ctree item
- *   - get_numform_ea_arg(func, ea, arg_idx, opnum[, callee]) - Get numform JSON by call arg coordinate
- *   - get_numform_ea_expr(func, ea, opnum[, op_name[, nth]]) - Get numform JSON by expression coordinate
- *
- * Byte Patching:
- *   - patch_byte(addr, val)        - Patch single byte
- *   - patch_word(addr, val)        - Patch word (2 bytes)
- *   - patch_dword(addr, val)       - Patch dword (4 bytes)
- *   - patch_qword(addr, val)       - Patch qword (8 bytes)
- *   - revert_byte(addr)            - Revert patched byte
- *   - get_original_byte(addr)      - Get pre-patch byte value
- *
- * Function Index (O(1)):
- *   - func_qty()                   - Total function count
- *   - func_at_index(n)             - Function address at index n
- *
- * Instruction Decoding:
- *   - itype(address)               - Instruction type code
- *   - decode_insn(address)         - Full instruction info (JSON)
- *   - operand_type(address, n)     - Operand type (0-5)
- *   - operand_value(address, n)    - Operand value/address
- *
- * Entity Search:
- *   - grep(pattern)                - Search entities (JSON, default limit=50)
- *   - grep(pattern, limit)         - Search entities with custom limit
- *   - grep(pattern, limit, offset) - Search entities with pagination
- *
- * String List:
- *   - rebuild_strings()            - Rebuild string cache
- *   - string_count()               - Get cached string count
- *
- * File Generation:
- *   - gen_asm_file(ea1, ea2, path) - Generate assembly file
- *   - gen_lst_file(ea1, ea2, path) - Generate listing file
- *   - gen_map_file(path)           - Generate MAP file
- *   - gen_idc_file(ea1, ea2, path) - Generate IDC script
- *   - gen_html_file(ea1, ea2, path)- Generate HTML listing
- *   - gen_cfg_dot(address)         - CFG as DOT string
- *   - gen_cfg_dot_file(addr, path) - CFG DOT to file
- *   - gen_schema_dot()             - Schema diagram as DOT
- *
- * Database:
- *   - save_database()              - Persist changes to .i64 file
- */
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
 
-#pragma once
+#include "functions.hpp"
 
 #include <idasql/platform.hpp>
 
@@ -120,34 +16,26 @@
 #include <unordered_set>
 #include <cctype>
 #include <cstring>
+#include <cerrno>
+#include <cstdlib>
+#include <limits>
 
-#include <idasql/platform_undef.hpp>
-
-// IDA SDK headers (order matters)
-#include <ida.hpp>
-#include <idp.hpp>
-#include <kernwin.hpp>  // Must come early
-#include <ua.hpp>       // insn_t, decode_insn for instruction decoding
-#include <bytes.hpp>
-#include <name.hpp>
-#include <funcs.hpp>
-#include <segment.hpp>
-#include <lines.hpp>
-#include <xref.hpp>
-#include <loader.hpp>   // gen_file
-#include <fpro.h>       // qfile_t for file operations
-#include <gdl.hpp>      // FlowChart for CFG generation
-#include <strlist.hpp>  // String list functions
-#include <nalt.hpp>     // String type constants
-#include <typeinf.hpp>  // parse_decls/apply_cdecl/print_type
-
-// Hex-Rays decompiler - always included, runtime detection
-#include <hexrays.hpp>
-#include <idasql/decompiler.hpp>  // For hexrays_available()
-#include <idasql/entities.hpp>    // Operand apply spec parser/helpers
+#include "ida_headers.hpp"
+#include <diskio.hpp>
+#include "decompiler.hpp"
+#include "entities.hpp"
+#include "idapython_exec.hpp"
+#include <idasql/runtime_settings.hpp>
 
 namespace idasql {
 namespace functions {
+
+static bool resolve_address_arg(
+        xsql::FunctionContext& ctx,
+        xsql::FunctionArg* argv,
+        int arg_index,
+        const char* arg_name,
+        ea_t& out_ea);
 
 // ============================================================================
 // Disassembly Functions
@@ -192,7 +80,10 @@ static void sql_disasm(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* 
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     int count = (argc >= 2) ? argv[1].as_int() : 1;
     if (count < 1) count = 1;
     if (count > 1000) count = 1000;  // Safety limit
@@ -219,7 +110,10 @@ static void sql_disasm_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     int context = (argc >= 2) ? argv[1].as_int() : 0;
     if (context < 0) context = 0;
     if (context > 64) context = 64;  // Safety cap
@@ -294,8 +188,14 @@ static void sql_disasm_range(xsql::FunctionContext& ctx, int argc, xsql::Functio
         ctx.result_error("disasm_range requires 2 arguments (start, end)");
         return;
     }
-    ea_t start = static_cast<ea_t>(argv[0].as_int64());
-    ea_t end   = static_cast<ea_t>(argv[1].as_int64());
+    ea_t start = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "start", start)) {
+        return;
+    }
+    ea_t end = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "end", end)) {
+        return;
+    }
     auto str = disasm_range_impl(start, end);
     str.empty() ? ctx.result_null() : ctx.result_text(str);
 }
@@ -306,7 +206,10 @@ static void sql_disasm_func(xsql::FunctionContext& ctx, int argc, xsql::Function
         ctx.result_error("disasm_func requires 1 argument (address)");
         return;
     }
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     func_t* func = get_func(ea);
     if (!func) {
         ctx.result_null();
@@ -327,7 +230,10 @@ static void sql_bytes_hex(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     size_t count = static_cast<size_t>(argv[1].as_int());
     if (count > 4096) count = 4096;  // Safety limit
 
@@ -350,7 +256,10 @@ static void sql_bytes_raw(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     size_t count = static_cast<size_t>(argv[1].as_int());
     if (count > 4096) count = 4096;  // Safety limit
 
@@ -362,16 +271,179 @@ static void sql_bytes_raw(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
     ctx.result_blob(data.data(), static_cast<size_t>(data.size()));
 }
 
+// load_file_bytes(path, file_offset, address, size [, patchable])
+// Load bytes from a file into the IDB at the target address range.
+static void sql_load_file_bytes(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc < 4 || argc > 5) {
+        ctx.result_error("load_file_bytes requires 4-5 arguments (path, file_offset, address, size, [patchable])");
+        return;
+    }
+
+    const char* path = argv[0].as_c_str();
+    if (path == nullptr || path[0] == '\0') {
+        ctx.result_error("path must be a non-empty file path");
+        return;
+    }
+
+    const int64_t file_offset_raw = argv[1].as_int64();
+    if (file_offset_raw < 0) {
+        ctx.result_error("file_offset must be >= 0");
+        return;
+    }
+
+    ea_t start_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 2, "address", start_ea)) {
+        return;
+    }
+
+    const int64_t size_raw = argv[3].as_int64();
+    if (size_raw <= 0) {
+        ctx.result_error("size must be > 0");
+        return;
+    }
+
+    const uint64_t size_u64 = static_cast<uint64_t>(size_raw);
+    const uint64_t max_ea = static_cast<uint64_t>((std::numeric_limits<ea_t>::max)());
+    if (start_ea == BADADDR || static_cast<uint64_t>(start_ea) > max_ea || size_u64 > max_ea) {
+        ctx.result_error("invalid target address range");
+        return;
+    }
+    if (size_u64 > (max_ea - static_cast<uint64_t>(start_ea))) {
+        ctx.result_error("target address range overflows ea_t");
+        return;
+    }
+
+    const ea_t end_ea = static_cast<ea_t>(static_cast<uint64_t>(start_ea) + size_u64);
+    int patchable = FILEREG_PATCHABLE;
+    if (argc >= 5 && !argv[4].is_null()) {
+        patchable = argv[4].as_int() ? FILEREG_PATCHABLE : FILEREG_NOTPATCHABLE;
+    }
+
+    linput_t* li = open_linput(path, false);
+    if (li == nullptr) {
+        ctx.result_error(std::string("failed to open file: ") + path);
+        return;
+    }
+
+    auto_wait();
+    const int ok = file2base(
+        li,
+        static_cast<qoff64_t>(file_offset_raw),
+        start_ea,
+        end_ea,
+        patchable);
+    close_linput(li);
+    auto_wait();
+
+    ctx.result_int(ok ? 1 : 0);
+}
+
 // patch_byte(ea, value) - Patch a single byte (preserves original)
 static void sql_patch_byte(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
         ctx.result_error("patch_byte requires 2 arguments (address, value)");
         return;
     }
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     uint64 val = static_cast<uint64>(argv[1].as_int64());
     bool ok = patch_byte(ea, val);
     ctx.result_int(ok ? 1 : 0);
+}
+
+static uint64_t item_size_or_one(ea_t ea) {
+    const asize_t sz = get_item_size(ea);
+    if (sz == 0 || sz == BADADDR) return 1;
+    return static_cast<uint64_t>(sz);
+}
+
+// Try to create one instruction at EA and return decoded size on success.
+static int create_instruction_at(ea_t ea) {
+    if (ea == BADADDR || ea == 0) return 0;
+
+    int len = create_insn(ea);
+    if (len > 0) return len;
+
+    const uint64_t sz = item_size_or_one(ea);
+    del_items(ea, DELIT_SIMPLE, static_cast<asize_t>(sz));
+    return create_insn(ea);
+}
+
+static int make_code_range_impl(ea_t start, ea_t end) {
+    int created = 0;
+    ea_t cursor = start;
+    while (cursor < end && cursor != BADADDR) {
+        uint64_t step = 1;
+
+        if (is_code(get_flags(cursor))) {
+            step = item_size_or_one(cursor);
+        } else {
+            const int len = create_instruction_at(cursor);
+            if (len > 0) {
+                ++created;
+                step = static_cast<uint64_t>(len);
+            }
+        }
+
+        const ea_t next = cursor + static_cast<ea_t>(step);
+        if (next <= cursor) break;
+        cursor = next;
+    }
+    return created;
+}
+
+// make_code(address) - Create instruction at one address (idempotent).
+static void sql_make_code(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc < 1) {
+        ctx.result_error("make_code requires 1 argument (address)");
+        return;
+    }
+
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
+    if (ea == BADADDR || ea == 0) {
+        ctx.result_error("Invalid address");
+        return;
+    }
+
+    if (is_code(get_flags(ea))) {
+        auto_wait();
+        ctx.result_int(1);
+        return;
+    }
+
+    const int len = create_instruction_at(ea);
+    auto_wait();
+    ctx.result_int(len > 0 ? 1 : 0);
+}
+
+// make_code_range(start, end) - Create instructions in [start, end).
+static void sql_make_code_range(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc < 2) {
+        ctx.result_error("make_code_range requires 2 arguments (start, end)");
+        return;
+    }
+
+    ea_t start = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "start", start)) {
+        return;
+    }
+    ea_t end = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "end", end)) {
+        return;
+    }
+    if (start == BADADDR || end == BADADDR || start >= end) {
+        ctx.result_error("make_code_range requires start < end");
+        return;
+    }
+
+    const int created = make_code_range_impl(start, end);
+    auto_wait();
+    ctx.result_int(created);
 }
 
 // patch_word(ea, value) - Patch a word (2 bytes, preserves original)
@@ -380,7 +452,10 @@ static void sql_patch_word(xsql::FunctionContext& ctx, int argc, xsql::FunctionA
         ctx.result_error("patch_word requires 2 arguments (address, value)");
         return;
     }
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     uint64 val = static_cast<uint64>(argv[1].as_int64());
     bool ok = patch_word(ea, val);
     ctx.result_int(ok ? 1 : 0);
@@ -392,7 +467,10 @@ static void sql_patch_dword(xsql::FunctionContext& ctx, int argc, xsql::Function
         ctx.result_error("patch_dword requires 2 arguments (address, value)");
         return;
     }
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     uint64 val = static_cast<uint64>(argv[1].as_int64());
     bool ok = patch_dword(ea, val);
     ctx.result_int(ok ? 1 : 0);
@@ -404,7 +482,10 @@ static void sql_patch_qword(xsql::FunctionContext& ctx, int argc, xsql::Function
         ctx.result_error("patch_qword requires 2 arguments (address, value)");
         return;
     }
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     uint64 val = static_cast<uint64>(argv[1].as_int64());
     bool ok = patch_qword(ea, val);
     ctx.result_int(ok ? 1 : 0);
@@ -416,7 +497,10 @@ static void sql_revert_byte(xsql::FunctionContext& ctx, int argc, xsql::Function
         ctx.result_error("revert_byte requires 1 argument (address)");
         return;
     }
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     bool ok = revert_byte(ea);
     ctx.result_int(ok ? 1 : 0);
 }
@@ -427,7 +511,10 @@ static void sql_get_original_byte(xsql::FunctionContext& ctx, int argc, xsql::Fu
         ctx.result_error("get_original_byte requires 1 argument (address)");
         return;
     }
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     ctx.result_int(static_cast<int>(get_original_byte(ea)));
 }
 
@@ -442,7 +529,10 @@ static void sql_name_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg*
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     qstring name;
     if (get_name(&name, ea) > 0 && !name.empty()) {
         ctx.result_text(name.c_str());
@@ -458,7 +548,10 @@ static void sql_func_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg*
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     func_t* func = get_func(ea);
     if (func) {
         qstring name;
@@ -477,7 +570,10 @@ static void sql_func_start(xsql::FunctionContext& ctx, int argc, xsql::FunctionA
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     func_t* func = get_func(ea);
     if (func) {
         ctx.result_int64(func->start_ea);
@@ -493,7 +589,10 @@ static void sql_func_end(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     func_t* func = get_func(ea);
     if (func) {
         ctx.result_int64(func->end_ea);
@@ -545,7 +644,10 @@ static void sql_set_name(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     const char* name = argv[1].as_c_str();
 
     bool success = set_name(ea, name, SN_CHECK) != 0;
@@ -560,7 +662,10 @@ static void sql_type_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg*
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     qstring out;
     if (print_type(&out, ea, PRTYPE_1LINE | PRTYPE_SEMI)) {
         ctx.result_text(out.c_str());
@@ -577,7 +682,10 @@ static void sql_set_type(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     const char* decl = argv[1].as_c_str();
     if (decl == nullptr || *decl == '\0') {
         // Empty declaration clears user-provided type.
@@ -608,7 +716,7 @@ static void sql_parse_decls(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    // Allow redeclarations; keep parser strict enough for agent feedback.
+    // Allow redeclarations while keeping parser behavior deterministic.
     const int errors = parse_decls(nullptr, decls, nullptr, HTI_DCL | HTI_HIGH | HTI_SEMICOLON);
     ctx.result_int(errors == 0 ? 1 : 0);
 }
@@ -624,7 +732,10 @@ static void sql_segment_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionA
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     segment_t* seg = getseg(ea);
     if (seg) {
         qstring name;
@@ -647,7 +758,10 @@ static void sql_comment_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionA
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     qstring cmt;
     if (get_cmt(&cmt, ea, false) > 0) {
         ctx.result_text(cmt.c_str());
@@ -667,7 +781,10 @@ static void sql_set_comment(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     const char* cmt = argv[1].as_c_str();
     bool repeatable = (argc >= 3) ? argv[2].as_int() != 0 : false;
 
@@ -686,7 +803,10 @@ static void sql_xrefs_to(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
 
     xsql::json arr = xsql::json::array();
     xrefblk_t xb;
@@ -705,7 +825,10 @@ static void sql_xrefs_from(xsql::FunctionContext& ctx, int argc, xsql::FunctionA
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
 
     xsql::json arr = xsql::json::array();
     xrefblk_t xb;
@@ -854,7 +977,10 @@ static void sql_decompile(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
 
     func_t* func = get_func(ea);
     if (!func) {
@@ -888,7 +1014,10 @@ static void sql_decompile_2(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     int refresh = argv[1].as_int();
 
     func_t* func = get_func(ea);
@@ -924,7 +1053,10 @@ static void sql_next_head(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     ea_t next = next_head(ea, BADADDR);
     if (next != BADADDR) {
         ctx.result_int64(next);
@@ -940,7 +1072,10 @@ static void sql_prev_head(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     ea_t prev = prev_head(ea, 0);
     if (prev != BADADDR) {
         ctx.result_int64(prev);
@@ -974,7 +1109,10 @@ static void sql_item_type(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     flags64_t f = get_flags(ea);
 
     const char* type = "unknown";
@@ -994,7 +1132,10 @@ static void sql_item_size(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     asize_t size = get_item_size(ea);
     ctx.result_int64(size);
 }
@@ -1006,7 +1147,10 @@ static void sql_is_code(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg*
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     ctx.result_int(is_code(get_flags(ea)) ? 1 : 0);
 }
 
@@ -1017,7 +1161,10 @@ static void sql_is_data(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg*
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     ctx.result_int(is_data(get_flags(ea)) ? 1 : 0);
 }
 
@@ -1028,7 +1175,10 @@ static void sql_mnemonic(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     if (!is_code(get_flags(ea))) {
         ctx.result_null();
         return;
@@ -1046,7 +1196,10 @@ static void sql_operand(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg*
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     int n = argv[1].as_int();
 
     if (!is_code(get_flags(ea)) || n < 0 || n > 5) {
@@ -1071,7 +1224,10 @@ static void sql_flags_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     ctx.result_int64(get_flags(ea));
 }
 
@@ -1101,7 +1257,10 @@ static void sql_itype(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* a
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
 
     if (!is_code(get_flags(ea))) {
         ctx.result_null();
@@ -1123,7 +1282,10 @@ static void sql_decode_insn(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
 
     if (!is_code(get_flags(ea))) {
         ctx.result_null();
@@ -1184,7 +1346,10 @@ static void sql_operand_type(xsql::FunctionContext& ctx, int argc, xsql::Functio
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     int n = argv[1].as_int();
 
     if (!is_code(get_flags(ea)) || n < 0 || n >= UA_MAXOP) {
@@ -1213,7 +1378,10 @@ static void sql_operand_value(xsql::FunctionContext& ctx, int argc, xsql::Functi
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     int n = argv[1].as_int();
 
     if (!is_code(get_flags(ea)) || n < 0 || n >= UA_MAXOP) {
@@ -1265,98 +1433,22 @@ static int gen_file_helper(ofile_type_t ofile_type, const char* filepath, ea_t e
     return result;
 }
 
-// gen_asm_file(ea1, ea2, path) - Generate assembly file
-static void sql_gen_asm_file(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 3) {
-        ctx.result_error("gen_asm_file requires 3 arguments (ea1, ea2, path)");
-        return;
-    }
-
-    ea_t ea1 = static_cast<ea_t>(argv[0].as_int64());
-    ea_t ea2 = static_cast<ea_t>(argv[1].as_int64());
-    const char* path = argv[2].as_c_str();
-    if (!path) {
-        ctx.result_error("Invalid path");
-        return;
-    }
-
-    int result = gen_file_helper(OFILE_ASM, path, ea1, ea2, 0);
-    ctx.result_int(result);
-}
-
-// gen_lst_file(ea1, ea2, path) - Generate listing file with addresses
-static void sql_gen_lst_file(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 3) {
-        ctx.result_error("gen_lst_file requires 3 arguments (ea1, ea2, path)");
-        return;
-    }
-
-    ea_t ea1 = static_cast<ea_t>(argv[0].as_int64());
-    ea_t ea2 = static_cast<ea_t>(argv[1].as_int64());
-    const char* path = argv[2].as_c_str();
-    if (!path) {
-        ctx.result_error("Invalid path");
-        return;
-    }
-
-    int result = gen_file_helper(OFILE_LST, path, ea1, ea2, 0);
-    ctx.result_int(result);
-}
-
-// gen_map_file(path) - Generate MAP file
-static void sql_gen_map_file(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 1) {
-        ctx.result_error("gen_map_file requires 1 argument (path)");
+// gen_listing(path) - Generate full-database listing file
+static void sql_gen_listing(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc != 1) {
+        ctx.result_error("gen_listing requires 1 argument (path)");
         return;
     }
 
     const char* path = argv[0].as_c_str();
-    if (!path) {
+    if (path == nullptr || path[0] == '\0') {
         ctx.result_error("Invalid path");
         return;
     }
 
-    // MAP files ignore ea1/ea2, use GENFLG_MAPSEG | GENFLG_MAPNAME
-    int flags = GENFLG_MAPSEG | GENFLG_MAPNAME | GENFLG_MAPDMNG;
-    int result = gen_file_helper(OFILE_MAP, path, 0, BADADDR, flags);
-    ctx.result_int(result);
-}
-
-// gen_idc_file(ea1, ea2, path) - Generate IDC script
-static void sql_gen_idc_file(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 3) {
-        ctx.result_error("gen_idc_file requires 3 arguments (ea1, ea2, path)");
-        return;
-    }
-
-    ea_t ea1 = static_cast<ea_t>(argv[0].as_int64());
-    ea_t ea2 = static_cast<ea_t>(argv[1].as_int64());
-    const char* path = argv[2].as_c_str();
-    if (!path) {
-        ctx.result_error("Invalid path");
-        return;
-    }
-
-    int result = gen_file_helper(OFILE_IDC, path, ea1, ea2, 0);
-    ctx.result_int(result);
-}
-
-// gen_html_file(ea1, ea2, path) - Generate HTML listing
-static void sql_gen_html_file(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 3) {
-        ctx.result_error("gen_html_file requires 3 arguments (ea1, ea2, path)");
-        return;
-    }
-
-    ea_t ea1 = static_cast<ea_t>(argv[0].as_int64());
-    ea_t ea2 = static_cast<ea_t>(argv[1].as_int64());
-    const char* path = argv[2].as_c_str();
-    if (!path) {
-        ctx.result_error("Invalid path");
-        return;
-    }
-
-    int result = gen_file_helper(OFILE_LST, path, ea1, ea2, GENFLG_GENHTML);
+    const ea_t ea1 = inf_get_min_ea();
+    const ea_t ea2 = inf_get_max_ea();
+    const int result = gen_file_helper(OFILE_LST, path, ea1, ea2, 0);
     ctx.result_int(result);
 }
 
@@ -1367,7 +1459,10 @@ static void sql_gen_cfg_dot(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     func_t* func = get_func(ea);
     if (!func) {
         ctx.result_error("No function at address");
@@ -1420,7 +1515,10 @@ static void sql_gen_cfg_dot_file(xsql::FunctionContext& ctx, int argc, xsql::Fun
         return;
     }
 
-    ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+    ea_t ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+        return;
+    }
     const char* path = argv[1].as_c_str();
     if (!path) {
         ctx.result_error("Invalid path");
@@ -1582,6 +1680,21 @@ inline xsql::json lvar_rename_result_json(const decompiler::LvarRenameResult& r)
     return j;
 }
 
+inline xsql::json label_rename_result_json(const decompiler::LabelRenameResult& r) {
+    xsql::json j = {
+        {"success", r.success},
+        {"applied", r.applied},
+        {"func_addr", r.func_addr},
+        {"label_num", r.label_num},
+        {"requested_name", r.requested_name},
+        {"before_name", r.before_name},
+        {"after_name", r.after_name},
+        {"reason", r.reason.empty() ? xsql::json(nullptr) : xsql::json(r.reason)}
+    };
+    j["warnings"] = r.warnings;
+    return j;
+}
+
 // rename_lvar(func_addr, lvar_idx, new_name) - Rename a local variable
 // Uses locator-based rename_lvar_at() for precise identification by index.
 // Returns JSON with result details.
@@ -1591,7 +1704,10 @@ static void sql_rename_lvar(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
     int lvar_idx = argv[1].as_int();
     const char* new_name = argv[2].as_c_str();
 
@@ -1613,7 +1729,10 @@ static void sql_rename_lvar_by_name(xsql::FunctionContext& ctx, int argc, xsql::
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
     const char* old_name = argv[1].as_c_str();
     const char* new_name = argv[2].as_c_str();
 
@@ -1627,6 +1746,30 @@ static void sql_rename_lvar_by_name(xsql::FunctionContext& ctx, int argc, xsql::
     ctx.result_text(out);
 }
 
+// rename_label(func_addr, label_num, new_name) - Rename a decompiler label.
+// Returns JSON with success/applied details, explicit reasons, and warnings.
+static void sql_rename_label(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc < 3) {
+        ctx.result_error("rename_label requires 3 arguments (func_addr, label_num, new_name)");
+        return;
+    }
+
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    int label_num = argv[1].as_int();
+    const char* new_name = argv[2].as_c_str();
+    if (!new_name) {
+        ctx.result_error("Invalid label name");
+        return;
+    }
+
+    decompiler::LabelRenameResult result = decompiler::rename_label_ex(func_addr, label_num, new_name);
+    std::string out = label_rename_result_json(result).dump();
+    ctx.result_text(out);
+}
+
 // set_lvar_comment(func_addr, lvar_idx, comment) - Set local variable comment by index.
 // Returns 1 on success, 0 on failure.
 static void sql_set_lvar_comment(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
@@ -1635,7 +1778,10 @@ static void sql_set_lvar_comment(xsql::FunctionContext& ctx, int argc, xsql::Fun
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
     int lvar_idx = argv[1].as_int();
     const char* comment = argv[2].is_null() ? "" : argv[2].as_c_str();
 
@@ -1653,6 +1799,90 @@ static std::string trim_copy(const std::string& text) {
         --end;
     }
     return text.substr(begin, end - begin);
+}
+
+static bool parse_numeric_ea_text(const std::string& text, ea_t& out_ea) {
+    const std::string token = trim_copy(text);
+    if (token.empty()) {
+        return false;
+    }
+
+    errno = 0;
+    char* end_ptr = nullptr;
+    const unsigned long long value = strtoull(token.c_str(), &end_ptr, 0);
+    if (errno == ERANGE || end_ptr == token.c_str() || end_ptr == nullptr || *end_ptr != '\0') {
+        return false;
+    }
+    const unsigned long long max_ea = static_cast<unsigned long long>((std::numeric_limits<ea_t>::max)());
+    if (value > max_ea) {
+        return false;
+    }
+
+    out_ea = static_cast<ea_t>(value);
+    return true;
+}
+
+static bool resolve_address_arg(
+        xsql::FunctionContext& ctx,
+        xsql::FunctionArg* argv,
+        int arg_index,
+        const char* arg_name,
+        ea_t& out_ea) {
+    out_ea = BADADDR;
+
+    if (arg_index < 0) {
+        ctx.result_error("Internal error: invalid address argument index");
+        return false;
+    }
+
+    xsql::FunctionArg& arg = argv[arg_index];
+    const int sqlite_type = arg.type();
+
+    if (sqlite_type == SQLITE_INTEGER) {
+        out_ea = static_cast<ea_t>(arg.as_int64());
+        return true;
+    }
+
+    if (sqlite_type == SQLITE_FLOAT) {
+        const char* name = (arg_name && *arg_name) ? arg_name : "address";
+        ctx.result_error(std::string(name) + " must be an integer, numeric string, or symbol name");
+        return false;
+    }
+
+    if (sqlite_type == SQLITE_TEXT) {
+        const std::string raw = arg.as_text();
+        const std::string text = trim_copy(raw);
+        if (text.empty()) {
+            const char* name = (arg_name && *arg_name) ? arg_name : "address";
+            ctx.result_error(std::string(name) + " must not be empty");
+            return false;
+        }
+
+        ea_t parsed = BADADDR;
+        if (parse_numeric_ea_text(text, parsed)) {
+            out_ea = parsed;
+            return true;
+        }
+
+        const ea_t resolved = get_name_ea(BADADDR, text.c_str());
+        if (resolved != BADADDR) {
+            out_ea = resolved;
+            return true;
+        }
+
+        ctx.result_error("Could not resolve name to address: " + text);
+        return false;
+    }
+
+    if (sqlite_type == SQLITE_NULL) {
+        const char* name = (arg_name && *arg_name) ? arg_name : "address";
+        ctx.result_error(std::string(name) + " must not be NULL");
+        return false;
+    }
+
+    const char* name = (arg_name && *arg_name) ? arg_name : "address";
+    ctx.result_error(std::string(name) + " must be an integer, numeric string, or symbol name");
+    return false;
 }
 
 static bool parse_int_token(const std::string& token, int& out_value) {
@@ -2033,9 +2263,12 @@ static bool synthesize_numform_from_operand_representation(ea_t target_ea, int o
     }
 
     out_fmt = number_format_t(opnum);
-    const flags64_t flags = get_flags(target_ea);
-    out_fmt.flags = flags;
-    out_fmt.flags32 = static_cast<flags_t>(flags);
+    if (kind == "enum") {
+        out_fmt.flags = enum_flag();
+    } else {
+        out_fmt.flags = stroff_flag();
+    }
+    out_fmt.flags32 = static_cast<flags_t>(out_fmt.flags);
     out_fmt.props = static_cast<char>(NF_FIXED | NF_VALID);
     out_fmt.serial = 0;
     out_fmt.type_name = entities::operand_repr_type_name_text(target_ea, opnum).c_str();
@@ -2099,10 +2332,7 @@ static bool set_user_numform_at_ea(ea_t requested_func_addr, ea_t target_ea, int
         user_numforms_free(numforms);
     }
     decompiler::invalidate_decompiler_cache(func_addr);
-    // Representation apply already succeeded above; treat numform persistence as best-effort.
-    // Some databases may not persist user_numforms for specific operands, but callers should
-    // still observe the live representation change via decompile()/instructions.
-    return true;
+    return metadata_ok;
 }
 
 static bool get_user_numform_at_ea(ea_t requested_func_addr, ea_t target_ea, int opnum, number_format_t& out_fmt) {
@@ -2172,8 +2402,14 @@ static void sql_set_union_selection(xsql::FunctionContext& ctx, int argc, xsql::
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const char* path_spec = argv[2].is_null() ? "" : argv[2].as_c_str();
 
     intvec_t path;
@@ -2194,7 +2430,10 @@ static void sql_set_union_selection_item(xsql::FunctionContext& ctx, int argc, x
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
     int item_id = argv[1].as_int();
     const char* path_spec = argv[2].is_null() ? "" : argv[2].as_c_str();
 
@@ -2216,8 +2455,14 @@ static void sql_get_union_selection(xsql::FunctionContext& ctx, int argc, xsql::
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
 
     intvec_t path;
     bool found = decompiler::get_union_selection_at_ea(func_addr, target_ea, path);
@@ -2236,7 +2481,10 @@ static void sql_get_union_selection_item(xsql::FunctionContext& ctx, int argc, x
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
     int item_id = argv[1].as_int();
     ea_t target_ea = BADADDR;
     if (!decompiler::get_ctree_item_ea(func_addr, item_id, target_ea)) {
@@ -2261,8 +2509,14 @@ static void sql_set_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc,
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const int arg_idx = argv[2].as_int();
     const char* path_spec = argv[3].is_null() ? "" : argv[3].as_c_str();
     const char* callee = (argc >= 5 && !argv[4].is_null()) ? argv[4].as_c_str() : "";
@@ -2291,8 +2545,14 @@ static void sql_get_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc,
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const int arg_idx = argv[2].as_int();
     const char* callee = (argc >= 4 && !argv[3].is_null()) ? argv[3].as_c_str() : "";
 
@@ -2324,8 +2584,14 @@ static void sql_call_arg_item(xsql::FunctionContext& ctx, int argc, xsql::Functi
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const int arg_idx = argv[2].as_int();
     const char* callee = (argc >= 4 && !argv[3].is_null()) ? argv[3].as_c_str() : "";
 
@@ -2345,8 +2611,14 @@ static void sql_ctree_item_at(xsql::FunctionContext& ctx, int argc, xsql::Functi
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const char* op_name = (argc >= 3 && !argv[2].is_null()) ? argv[2].as_c_str() : "";
     const bool nth_explicit = (argc >= 4);
     const int nth = nth_explicit ? argv[3].as_int() : 0;
@@ -2368,8 +2640,14 @@ static void sql_set_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const char* path_spec = argv[2].is_null() ? "" : argv[2].as_c_str();
     const char* op_name = (argc >= 4 && !argv[3].is_null()) ? argv[3].as_c_str() : "";
     const bool nth_explicit = (argc >= 5);
@@ -2400,8 +2678,14 @@ static void sql_get_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const char* op_name = (argc >= 3 && !argv[2].is_null()) ? argv[2].as_c_str() : "";
     const bool nth_explicit = (argc >= 4);
     const int nth = nth_explicit ? argv[3].as_int() : 0;
@@ -2439,8 +2723,14 @@ static void sql_set_numform(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     int opnum = argv[2].as_int();
     const char* spec = argv[3].is_null() ? "" : argv[3].as_c_str();
 
@@ -2461,7 +2751,10 @@ static void sql_set_numform_item(xsql::FunctionContext& ctx, int argc, xsql::Fun
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
     int item_id = argv[1].as_int();
     int opnum = argv[2].as_int();
     const char* spec = argv[3].is_null() ? "" : argv[3].as_c_str();
@@ -2489,8 +2782,14 @@ static void sql_set_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::F
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const int arg_idx = argv[2].as_int();
     const int opnum = argv[3].as_int();
     const char* spec = argv[4].is_null() ? "" : argv[4].as_c_str();
@@ -2525,8 +2824,14 @@ static void sql_set_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const int opnum = argv[2].as_int();
     const char* spec = argv[3].is_null() ? "" : argv[3].as_c_str();
     const char* op_name = (argc >= 5 && !argv[4].is_null()) ? argv[4].as_c_str() : "";
@@ -2563,8 +2868,14 @@ static void sql_get_numform(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     int opnum = argv[2].as_int();
 
     number_format_t nf(opnum);
@@ -2583,7 +2894,10 @@ static void sql_get_numform_item(xsql::FunctionContext& ctx, int argc, xsql::Fun
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
     int item_id = argv[1].as_int();
     int opnum = argv[2].as_int();
 
@@ -2609,8 +2923,14 @@ static void sql_get_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::F
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const int arg_idx = argv[2].as_int();
     const int opnum = argv[3].as_int();
     const char* callee = (argc >= 5 && !argv[4].is_null()) ? argv[4].as_c_str() : "";
@@ -2642,8 +2962,14 @@ static void sql_get_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::
         return;
     }
 
-    const ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
-    const ea_t target_ea = static_cast<ea_t>(argv[1].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
+    ea_t target_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+        return;
+    }
     const int opnum = argv[2].as_int();
     const char* op_name = (argc >= 4 && !argv[3].is_null()) ? argv[3].as_c_str() : "";
     const bool nth_explicit = (argc >= 5);
@@ -2677,7 +3003,10 @@ static void sql_list_lvars(xsql::FunctionContext& ctx, int argc, xsql::FunctionA
         return;
     }
 
-    ea_t func_addr = static_cast<ea_t>(argv[0].as_int64());
+    ea_t func_addr = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "func_addr", func_addr)) {
+        return;
+    }
 
     // Check cached Hex-Rays availability
     if (!decompiler::hexrays_available()) {
@@ -2806,6 +3135,80 @@ static void sql_grep(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* ar
 }
 
 // ============================================================================
+// IDAPython Execution Functions
+// ============================================================================
+
+static bool ensure_idapython_enabled(xsql::FunctionContext& ctx) {
+    if (runtime_settings().enable_idapython()) {
+        return true;
+    }
+    ctx.result_error("idapython is disabled (enable via PRAGMA idasql.enable_idapython = 1)");
+    return false;
+}
+
+static void sql_idapython_snippet(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc < 1 || argc > 2) {
+        ctx.result_error("idapython_snippet requires 1-2 arguments (code, [sandbox])");
+        return;
+    }
+    if (!ensure_idapython_enabled(ctx)) {
+        return;
+    }
+
+    const char* code = argv[0].as_c_str();
+    if (code == nullptr || code[0] == '\0') {
+        ctx.result_error("idapython_snippet requires non-empty code");
+        return;
+    }
+
+    std::string sandbox;
+    if (argc >= 2 && !argv[1].is_null()) {
+        const char* raw_sandbox = argv[1].as_c_str();
+        if (raw_sandbox != nullptr) {
+            sandbox = raw_sandbox;
+        }
+    }
+
+    idapython::ExecutionResult result = idapython::execute_snippet(code, sandbox);
+    if (!result.success) {
+        ctx.result_error(result.error.empty() ? "idapython_snippet failed" : result.error);
+        return;
+    }
+    ctx.result_text(result.output);
+}
+
+static void sql_idapython_file(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc < 1 || argc > 2) {
+        ctx.result_error("idapython_file requires 1-2 arguments (path, [sandbox])");
+        return;
+    }
+    if (!ensure_idapython_enabled(ctx)) {
+        return;
+    }
+
+    const char* path = argv[0].as_c_str();
+    if (path == nullptr || path[0] == '\0') {
+        ctx.result_error("idapython_file requires non-empty path");
+        return;
+    }
+
+    std::string sandbox;
+    if (argc >= 2 && !argv[1].is_null()) {
+        const char* raw_sandbox = argv[1].as_c_str();
+        if (raw_sandbox != nullptr) {
+            sandbox = raw_sandbox;
+        }
+    }
+
+    idapython::ExecutionResult result = idapython::execute_file(path, sandbox);
+    if (!result.success) {
+        ctx.result_error(result.error.empty() ? "idapython_file failed" : result.error);
+        return;
+    }
+    ctx.result_text(result.output);
+}
+
+// ============================================================================
 // String List Functions
 // ============================================================================
 
@@ -2886,7 +3289,7 @@ static void sql_save_database(xsql::FunctionContext& ctx, int /*argc*/, xsql::Fu
 // Registration
 // ============================================================================
 
-inline bool register_sql_functions(xsql::Database& db) {
+void register_sql_functions(xsql::Database& db) {
     // Disassembly
     db.register_function("disasm_at", 1, xsql::ScalarFn(sql_disasm_at));
     db.register_function("disasm_at", 2, xsql::ScalarFn(sql_disasm_at));
@@ -2894,10 +3297,14 @@ inline bool register_sql_functions(xsql::Database& db) {
     db.register_function("disasm", 2, xsql::ScalarFn(sql_disasm));
     db.register_function("disasm_range", 2, xsql::ScalarFn(sql_disasm_range));
     db.register_function("disasm_func", 1, xsql::ScalarFn(sql_disasm_func));
+    db.register_function("make_code", 1, xsql::ScalarFn(sql_make_code));
+    db.register_function("make_code_range", 2, xsql::ScalarFn(sql_make_code_range));
 
     // Bytes
     db.register_function("bytes", 2, xsql::ScalarFn(sql_bytes_hex));
     db.register_function("bytes_raw", 2, xsql::ScalarFn(sql_bytes_raw));
+    db.register_function("load_file_bytes", 4, xsql::ScalarFn(sql_load_file_bytes));
+    db.register_function("load_file_bytes", 5, xsql::ScalarFn(sql_load_file_bytes));
 
     // Byte patching
     db.register_function("patch_byte", 2, xsql::ScalarFn(sql_patch_byte));
@@ -2940,6 +3347,7 @@ inline bool register_sql_functions(xsql::Database& db) {
         db.register_function("list_lvars", 1, xsql::ScalarFn(sql_list_lvars));
         db.register_function("rename_lvar", 3, xsql::ScalarFn(sql_rename_lvar));
         db.register_function("rename_lvar_by_name", 3, xsql::ScalarFn(sql_rename_lvar_by_name));
+        db.register_function("rename_label", 3, xsql::ScalarFn(sql_rename_label));
         db.register_function("set_lvar_comment", 3, xsql::ScalarFn(sql_set_lvar_comment));
         db.register_function("set_union_selection", 3, xsql::ScalarFn(sql_set_union_selection));
         db.register_function("set_union_selection_item", 3, xsql::ScalarFn(sql_set_union_selection_item));
@@ -2997,11 +3405,7 @@ inline bool register_sql_functions(xsql::Database& db) {
     db.register_function("operand_value", 2, xsql::ScalarFn(sql_operand_value));
 
     // File generation
-    db.register_function("gen_asm_file", 3, xsql::ScalarFn(sql_gen_asm_file));
-    db.register_function("gen_lst_file", 3, xsql::ScalarFn(sql_gen_lst_file));
-    db.register_function("gen_map_file", 1, xsql::ScalarFn(sql_gen_map_file));
-    db.register_function("gen_idc_file", 3, xsql::ScalarFn(sql_gen_idc_file));
-    db.register_function("gen_html_file", 3, xsql::ScalarFn(sql_gen_html_file));
+    db.register_function("gen_listing", 1, xsql::ScalarFn(sql_gen_listing));
 
     // Graph generation
     db.register_function("gen_cfg_dot", 1, xsql::ScalarFn(sql_gen_cfg_dot));
@@ -3013,6 +3417,12 @@ inline bool register_sql_functions(xsql::Database& db) {
     db.register_function("grep", 2, xsql::ScalarFn(sql_grep));
     db.register_function("grep", 3, xsql::ScalarFn(sql_grep));
 
+    // Python execution
+    db.register_function("idapython_snippet", 1, xsql::ScalarFn(sql_idapython_snippet));
+    db.register_function("idapython_snippet", 2, xsql::ScalarFn(sql_idapython_snippet));
+    db.register_function("idapython_file", 1, xsql::ScalarFn(sql_idapython_file));
+    db.register_function("idapython_file", 2, xsql::ScalarFn(sql_idapython_file));
+
     // String list functions
     db.register_function("rebuild_strings", 0, xsql::ScalarFn(sql_rebuild_strings));
     db.register_function("rebuild_strings", 1, xsql::ScalarFn(sql_rebuild_strings));
@@ -3021,8 +3431,6 @@ inline bool register_sql_functions(xsql::Database& db) {
 
     // Database persistence
     db.register_function("save_database", 0, xsql::ScalarFn(sql_save_database));
-
-    return true;
 }
 
 } // namespace functions

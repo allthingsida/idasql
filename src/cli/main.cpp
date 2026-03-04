@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 #include <idasql/platform.hpp>
 
 #include <iostream>
@@ -26,32 +29,30 @@
 
 #include <xsql/thinclient/server.hpp>
 #include "../common/http_server.hpp"
+#include "../common/idasql_commands.hpp"
+#include "../common/json_utils.hpp"
+#include "../common/welcome_query.hpp"
 
 #include "../common/idasql_version.hpp"
 
-// AI Agent integration (optional, enabled via IDASQL_WITH_AI_AGENT)
-#ifdef IDASQL_HAS_AI_AGENT
-#include "../common/ai_agent.hpp"
-#include "../common/idasql_commands.hpp"
+// MCP integration (optional, enabled via IDASQL_WITH_MCP)
+#ifdef IDASQL_HAS_MCP
 #include "../common/mcp_server.hpp"
+#endif
 
 // Global signal handler state
 namespace {
     std::atomic<bool> g_quit_requested{false};
-    idasql::AIAgent* g_agent = nullptr;
+#ifdef IDASQL_HAS_MCP
     std::unique_ptr<idasql::IDAMCPServer> g_mcp_server;
-    std::unique_ptr<idasql::AIAgent> g_mcp_agent;
+#endif
     std::unique_ptr<idasql::IDAHTTPServer> g_repl_http_server;
 }
 
 extern "C" void signal_handler(int sig) {
     (void)sig;
     g_quit_requested.store(true);
-    if (g_agent) {
-        g_agent->request_quit();
-    }
 }
-#endif
 
 // ============================================================================
 // Table Printing (shared between remote and local modes)
@@ -118,17 +119,6 @@ struct TablePrinter {
     }
 };
 
-// ============================================================================ 
-// Validation Helpers
-// ============================================================================ 
-
-static bool is_safe_table_name(const std::string& name) {
-    if (name.empty() || name.size() > 128) return false;
-    return std::all_of(name.begin(), name.end(), [](unsigned char c) {
-        return std::isalnum(c) || c == '_';
-    });
-}
-
 // ============================================================================
 // Local Mode - Uses IDA SDK (delay-loaded on Windows)
 // ============================================================================
@@ -147,6 +137,17 @@ static bool is_safe_table_name(const std::string& name) {
 #include <idasql/database.hpp>
 #include <xsql/json.hpp>
 #endif
+#include <idasql/idapython.hpp>
+#include <loader.hpp>  // save_database()
+
+struct idapython_runtime_guard_t {
+    bool acquired = false;
+    ~idapython_runtime_guard_t() {
+        if (acquired) {
+            idasql::idapython::runtime_release();
+        }
+    }
+};
 
 static void add_query_result_rows(TablePrinter& printer, const idasql::QueryResult& result) {
     for (const auto& row : result.rows) {
@@ -174,135 +175,20 @@ static void print_query_warnings(std::ostream& os, const idasql::QueryResult& re
 // REPL - Interactive Mode (Local)
 // ============================================================================
 
-static void show_help() {
-    std::cout << R"(
-Commands:
-  .tables             List all tables
-  .schema [table]     Show table schema
-  .info               Show database info
-  .clear              Clear session (reset conversation)
-  .quit / .exit       Exit interactive mode
-  .help               Show this help
-
-SQL queries end with semicolon (;)
-Multi-line queries are supported.
-)" << std::endl;
-}
-
-static void show_tables(idasql::Database& db) {
-    auto result = db.query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;");
-    if (!result.success) {
-        std::cerr << "Error: " << db.error() << "\n";
-        return;
-    }
-
-    std::cout << "Tables:\n";
-    for (const auto& row : result.rows) {
-        std::cout << "  " << (row.size() > 0 ? row[0] : "") << "\n";
-    }
-}
-
-static void show_schema(idasql::Database& db, const std::string& table) {
-    if (!is_safe_table_name(table)) {
-        std::cerr << "Invalid table name\n";
-        return;
-    }
-
-    std::string sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name='" + table + "';";
-    auto result = db.query(sql);
-    if (!result.success) {
-        std::cerr << "Error: " << db.error() << "\n";
-        return;
-    }
-    if (!result.rows.empty() && result.rows[0].size() > 0) {
-        std::cout << result.rows[0][0] << "\n";
-    } else {
-        std::cout << "Not found\n";
-    }
-}
-
-// Helper to execute SQL and format results as string (for AI agent)
-static std::string execute_sql_to_string(idasql::Database& db, const std::string& sql) {
-    auto result = db.query(sql);
-    if (!result.success) {
-        return "Error: " + std::string(db.error());
-    }
-
-    std::stringstream ss;
-    TablePrinter printer;
-    add_query_result_rows(printer, result);
-
-    // Capture to string instead of stdout
-    std::streambuf* old_cout = std::cout.rdbuf(ss.rdbuf());
-    printer.print();
-    print_query_warnings(std::cout, result);
-    std::cout.rdbuf(old_cout);
-    return ss.str();
-}
-
 // Forward declaration (defined in HTTP section below)
 static std::string query_result_to_json(idasql::Database& db, const std::string& sql);
 
-#ifdef IDASQL_HAS_AI_AGENT
-static void run_repl(idasql::Database& db, bool agent_mode, bool verbose,
-                     const std::string& provider_override = "") {
-#else
 static void run_repl(idasql::Database& db) {
-    [[maybe_unused]] bool agent_mode = false;
-#endif
     std::string line;
     std::string query;
-
-#ifdef IDASQL_HAS_AI_AGENT
-    std::unique_ptr<idasql::AIAgent> agent;
-    if (agent_mode) {
-        auto executor = [&db](const std::string& sql) -> std::string {
-            return execute_sql_to_string(db, sql);
-        };
-
-        // Load settings (includes BYOK, provider, timeout)
-        idasql::AgentSettings settings = idasql::LoadAgentSettings();
-
-        // Apply provider override from CLI if specified
-        if (!provider_override.empty()) {
-            try {
-                settings.default_provider = idasql::ParseProviderType(provider_override);
-            } catch (...) {
-                // Already validated in argument parsing
-            }
-        }
-
-        agent = std::make_unique<idasql::AIAgent>(executor, settings, verbose);
-
-        // Register signal handler for clean Ctrl-C handling
-        g_agent = agent.get();
-        std::signal(SIGINT, signal_handler);
-#ifdef _WIN32
-        // Windows also needs SIGBREAK for Ctrl-Break
-        std::signal(SIGBREAK, signal_handler);
-#endif
-
-        agent->start();  // Initialize agent
-
-        std::cout << "IDASQL AI Agent Mode\n"
-                  << "Ask questions in natural language or use SQL directly.\n"
-                  << "Type .help for commands, .clear to reset, .quit to exit\n\n";
-    } else {
-#endif
-        std::cout << "IDASQL Interactive Mode\n"
-                  << "Type .help for commands, .clear to reset, .quit to exit\n\n";
-#ifdef IDASQL_HAS_AI_AGENT
-    }
-#endif
+    std::cout << "IDASQL Interactive Mode\n"
+              << "Type .help for commands, .quit to exit\n\n";
 
     while (true) {
-#ifdef IDASQL_HAS_AI_AGENT
-        // Check for quit request from signal handler
         if (g_quit_requested.load()) {
             std::cout << "\nInterrupted.\n";
             break;
         }
-#endif
 
         // Prompt
         std::cout << (query.empty() ? "idasql> " : "   ...> ");
@@ -313,8 +199,6 @@ static void run_repl(idasql::Database& db) {
 
         // Handle dot commands
         if (query.empty() && !line.empty() && line[0] == '.') {
-#ifdef IDASQL_HAS_AI_AGENT
-            // Use unified command handler for agent mode
             idasql::CommandCallbacks callbacks;
             callbacks.get_tables = [&db]() -> std::string {
                 std::stringstream ss;
@@ -326,7 +210,7 @@ static void run_repl(idasql::Database& db) {
             };
             callbacks.get_schema = [&db](const std::string& table) -> std::string {
                 auto result = db.query("SELECT sql FROM sqlite_master WHERE name='" + table + "'");
-                if (!result.empty() && result.rows[0].size() > 0) {
+                if (result.success && !result.rows.empty() && result.rows[0].size() > 0) {
                     return std::string(result.rows[0][0]);
                 }
                 return "Table not found: " + table;
@@ -334,26 +218,22 @@ static void run_repl(idasql::Database& db) {
             callbacks.get_info = [&db]() -> std::string {
                 return db.info();
             };
-            callbacks.clear_session = [&agent]() -> std::string {
-                if (agent) {
-                    agent->reset_session();
-                    return "Session cleared (conversation history reset)";
-                }
-                return "Session cleared";
-            };
 
+#ifdef IDASQL_HAS_MCP
             // MCP server callbacks
             callbacks.mcp_status = []() -> std::string {
                 if (g_mcp_server && g_mcp_server->is_running()) {
-                    return idasql::format_mcp_status(g_mcp_server->port(), true);
+                    return idasql::format_mcp_status(
+                        g_mcp_server->port(), true, g_mcp_server->bind_addr());
                 } else {
                     return "MCP server not running\nUse '.mcp start' to start\n";
                 }
             };
 
-            callbacks.mcp_start = [&db, &agent](int req_port, const std::string& bind_addr) -> std::string {
+            callbacks.mcp_start = [&db](int req_port, const std::string& bind_addr) -> std::string {
                 if (g_mcp_server && g_mcp_server->is_running()) {
-                    return idasql::format_mcp_status(g_mcp_server->port(), true);
+                    return idasql::format_mcp_status(
+                        g_mcp_server->port(), true, g_mcp_server->bind_addr());
                 }
 
                 // Create MCP server if needed
@@ -370,24 +250,14 @@ static void run_repl(idasql::Database& db) {
                     return "Error: " + result.error;
                 };
 
-                // Create MCP agent for natural language queries
-                g_mcp_agent = std::make_unique<idasql::AIAgent>(sql_cb);
-                g_mcp_agent->start();
-
-                idasql::AskCallback ask_cb = [](const std::string& question) -> std::string {
-                    if (!g_mcp_agent) return "Error: AI agent not available";
-                    return g_mcp_agent->query(question);
-                };
-
                 // Start with use_queue=true for CLI mode (main thread execution)
-                int port = g_mcp_server->start(req_port, sql_cb, ask_cb, bind_addr, true);
+                int port = g_mcp_server->start(req_port, sql_cb, bind_addr, true);
                 if (port <= 0) {
-                    g_mcp_agent.reset();
                     return "Error: Failed to start MCP server\n";
                 }
 
                 // Print info
-                std::cout << idasql::format_mcp_info(port, true);
+                std::cout << idasql::format_mcp_info(port, g_mcp_server->bind_addr());
                 std::cout << "Press Ctrl+C to stop MCP server and return to REPL...\n\n";
                 std::cout.flush();
 
@@ -412,7 +282,6 @@ static void run_repl(idasql::Database& db) {
 #ifdef _WIN32
                 std::signal(SIGBREAK, old_break_handler);
 #endif
-                g_mcp_agent.reset();
                 g_quit_requested.store(false);  // Reset for continued REPL use
 
                 return "MCP server stopped. Returning to REPL.\n";
@@ -421,23 +290,25 @@ static void run_repl(idasql::Database& db) {
             callbacks.mcp_stop = []() -> std::string {
                 if (g_mcp_server && g_mcp_server->is_running()) {
                     g_mcp_server->stop();
-                    g_mcp_agent.reset();
                     return "MCP server stopped\n";
                 }
                 return "MCP server not running\n";
             };
+#endif
 
             // HTTP server callbacks
             callbacks.http_status = []() -> std::string {
                 if (g_repl_http_server && g_repl_http_server->is_running()) {
-                    return idasql::format_http_status(g_repl_http_server->port(), true);
+                    return idasql::format_http_status(
+                        g_repl_http_server->port(), true, g_repl_http_server->bind_addr());
                 }
                 return "HTTP server not running\nUse '.http start' to start\n";
             };
 
             callbacks.http_start = [&db](int req_port, const std::string& bind_addr) -> std::string {
                 if (g_repl_http_server && g_repl_http_server->is_running()) {
-                    return idasql::format_http_status(g_repl_http_server->port(), true);
+                    return idasql::format_http_status(
+                        g_repl_http_server->port(), true, g_repl_http_server->bind_addr());
                 }
 
                 // Create HTTP server if needed
@@ -457,7 +328,8 @@ static void run_repl(idasql::Database& db) {
                 }
 
                 // Print info
-                std::cout << idasql::format_http_info(port);
+                std::cout << idasql::format_http_info(
+                    port, g_repl_http_server->bind_addr(), "Press Ctrl+C to stop and return to REPL.");
                 std::cout.flush();
 
                 // Install signal handler so Ctrl+C sets g_quit_requested
@@ -510,47 +382,7 @@ static void run_repl(idasql::Database& db) {
                     // Fall through to standard handling
                     break;
             }
-#else
-            // Non-agent mode: basic command handling
-            if (line == ".quit" || line == ".exit") break;
-            if (line == ".tables") { show_tables(db); continue; }
-            if (line == ".info") { std::cout << db.info(); continue; }
-            if (line == ".help") { show_help(); continue; }
-            if (line == ".clear") {
-                std::cout << "Session cleared\n";
-                continue;
-            }
-            if (line.substr(0, 7) == ".schema") {
-                std::string table = line.length() > 8 ? line.substr(8) : "";
-                while (!table.empty() && table[0] == ' ') table = table.substr(1);
-                if (table.empty()) {
-                    std::cerr << "Usage: .schema <table_name>\n";
-                } else {
-                    show_schema(db, table);
-                }
-                continue;
-            }
-            std::cerr << "Unknown command: " << line << "\n";
-            continue;
-#endif
         }
-
-#ifdef IDASQL_HAS_AI_AGENT
-        // In agent mode, use query for main-thread safety
-        if (agent_mode && agent) {
-            std::string result = agent->query(line);
-            if (!result.empty()) {
-                std::cout << result << "\n";
-            }
-
-            // Check if we were interrupted
-            if (agent->quit_requested()) {
-                std::cout << "Interrupted.\n";
-                break;
-            }
-            continue;
-        }
-#endif
 
         // Standard SQL mode: accumulate query
         query += line + " ";
@@ -572,15 +404,8 @@ static void run_repl(idasql::Database& db) {
         }
     }
 
-#ifdef IDASQL_HAS_AI_AGENT
 exit_repl:
-    if (agent) {
-        agent->stop();
-        g_agent = nullptr;
-    }
-    // Restore default signal handler
-    std::signal(SIGINT, SIG_DFL);
-#endif
+    return;
 }
 
 // ============================================================================
@@ -760,81 +585,37 @@ static std::string http_queue_and_wait(const std::string& sql) {
 
 static std::string query_result_to_json(idasql::Database& db, const std::string& sql) {
     auto result = db.query(sql);
-    xsql::json j = {{"success", result.success}};
-
-    if (result.success) {
-        j["columns"] = result.columns;
-
-        xsql::json rows = xsql::json::array();
-        for (const auto& row : result.rows) {
-            rows.push_back(row.values);  // Row::values is std::vector<std::string>
-        }
-        j["rows"] = rows;
-        j["row_count"] = result.rows.size();
-        if (!result.warnings.empty()) {
-            j["warnings"] = result.warnings;
-        }
-        if (result.timed_out) {
-            j["timed_out"] = true;
-        }
-        if (result.partial) {
-            j["partial"] = true;
-        }
-        if (result.elapsed_ms > 0) {
-            j["elapsed_ms"] = result.elapsed_ms;
-        }
-    } else {
-        j["error"] = result.error;
-    }
-
-    return j.dump();
+    return idasql::query_result_to_json_safe(result);
 }
 
-static const char* IDASQL_HELP_TEXT = R"(IDASQL HTTP REST API
-====================
-
-SQL interface for IDA Pro databases via HTTP.
-
-Endpoints:
-  GET  /         - Welcome message
-  GET  /help     - This documentation (for LLM discovery)
-  POST /query    - Execute SQL (body = raw SQL, response = JSON)
-  GET  /status   - Server health
-  POST /shutdown - Stop server
-
-Tables:
-  funcs           - Functions with address, size, flags
-  segments        - Segment/section information
-  imports         - Imported functions
-  exports         - Exported functions
-  names           - Named locations
-  strings         - String references
-  comments        - User comments
-  xrefs           - Cross references
-  structs         - Structure definitions
-  struct_members  - Structure members
-  enums           - Enumeration definitions
-  enum_members    - Enumeration values
-  localvars       - Local variables (requires Hex-Rays)
-  pseudocode      - Decompiled pseudocode (requires Hex-Rays)
-
-Example Queries:
-  SELECT name, start_ea, size FROM funcs ORDER BY size DESC LIMIT 10;
-  SELECT * FROM imports WHERE name LIKE '%malloc%';
-  SELECT s.name, COUNT(*) FROM structs s JOIN struct_members m ON s.id = m.struct_id GROUP BY s.id;
-
-Response Format:
-  Success: {"success": true, "columns": [...], "rows": [[...]], "row_count": N}
-  Error:   {"success": false, "error": "message"}
-
-Authentication (if enabled):
-  Header: Authorization: Bearer <token>
-  Or:     X-XSQL-Token: <token>
-
-Example:
-  curl http://localhost:8081/help
-  curl -X POST http://localhost:8081/query -d "SELECT name FROM funcs LIMIT 5"
-)";
+static std::string build_cli_http_help_text() {
+    std::ostringstream out;
+    out << "IDASQL HTTP REST API\n"
+        << "====================\n\n"
+        << "SQL interface for IDA Pro databases via HTTP.\n\n"
+        << "Endpoints:\n"
+        << "  GET  /         - Welcome message\n"
+        << "  GET  /help     - This documentation (for LLM discovery)\n"
+        << "  POST /query    - Execute SQL (body = raw SQL, response = JSON)\n"
+        << "  GET  /status   - Server health\n"
+        << "  POST /shutdown - Stop server\n\n"
+        << "Discover Schema:\n"
+        << "  SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY type, name;\n"
+        << "  PRAGMA table_info(funcs);\n\n"
+        << "Starter Queries:\n"
+        << "  SELECT * FROM welcome;\n"
+        << "  SELECT name, start_ea, size FROM funcs ORDER BY size DESC LIMIT 10;\n\n"
+        << "Response Format:\n"
+        << "  Success: {\"success\": true, \"columns\": [...], \"rows\": [[...]], \"row_count\": N}\n"
+        << "  Error:   {\"success\": false, \"error\": \"message\"}\n\n"
+        << "Authentication (if enabled):\n"
+        << "  Header: Authorization: Bearer <token>\n"
+        << "  Or:     X-XSQL-Token: <token>\n\n"
+        << "Example:\n"
+        << "  curl http://localhost:8081/help\n"
+        << "  " << idasql::format_query_curl_example("http://localhost:8081") << "\n";
+    return out.str();
+}
 
 static int run_http_mode(idasql::Database& db, int port, const std::string& bind_addr, const std::string& auth_token) {
     xsql::thinclient::server_config cfg;
@@ -853,17 +634,18 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
 
     cfg.setup_routes = [&auth_token, port](httplib::Server& svr) {
         svr.Get("/", [port](const httplib::Request&, httplib::Response& res) {
+            const std::string base_url = "http://localhost:" + std::to_string(port);
             std::string welcome = "IDASQL HTTP Server\n\nEndpoints:\n"
                 "  GET  /help     - API documentation\n"
                 "  POST /query    - Execute SQL query\n"
                 "  GET  /status   - Health check\n"
                 "  POST /shutdown - Stop server\n\n"
-                "Example: curl -X POST http://localhost:" + std::to_string(port) + "/query -d \"SELECT name FROM funcs LIMIT 5\"\n";
+                "Example: " + idasql::format_query_curl_example(base_url) + "\n";
             res.set_content(welcome, "text/plain");
         });
 
         svr.Get("/help", [](const httplib::Request&, httplib::Response& res) {
-            res.set_content(IDASQL_HELP_TEXT, "text/plain");
+            res.set_content(build_cli_http_help_text(), "text/plain");
         });
 
         // POST /query - Queue command for main thread execution
@@ -960,10 +742,8 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     http_server.run_async();
     int actual_port = http_server.port();
 
-    std::cout << "IDASQL HTTP server listening on http://" << cfg.bind_address << ":" << actual_port << "\n";
+    std::cout << "IDASQL HTTP server: http://" << cfg.bind_address << ":" << actual_port << "\n";
     std::cout << "Database: " << db.info() << "\n";
-    std::cout << "Endpoints: /help, /query, /status, /shutdown\n";
-    std::cout << "Example: curl http://localhost:" << actual_port << "/help\n";
     std::cout << "Press Ctrl+C to stop.\n\n";
     std::cout.flush();
 
@@ -1065,19 +845,9 @@ static void print_usage() {
               << "  --export-tables=X    Tables to export: * (all, default) or table1,table2,...\n"
               << "  --http [port]        Start HTTP REST server (default: 8080, local mode only)\n"
               << "  --bind <addr>        Bind address for HTTP/MCP server (default: 127.0.0.1)\n"
-#ifdef IDASQL_HAS_AI_AGENT
+#ifdef IDASQL_HAS_MCP
               << "  --mcp [port]         Start MCP server (default: random port, use in -i mode)\n"
               << "                       Or use .mcp start in interactive mode\n"
-#endif
-#ifdef IDASQL_HAS_AI_AGENT
-              << "  --prompt <text>      Natural language query (uses AI agent)\n"
-              << "  --agent              Enable AI agent mode in interactive REPL\n"
-              << "  --provider <name>    Override AI provider (claude, copilot)\n"
-              << "  --config [path] [val] View/set agent configuration\n"
-              << "  -v, --verbose        Show agent debug logs\n"
-              << "\n"
-              << "Agent settings stored in: ~/.idasql/agent_settings.json\n"
-              << "Configure via: .agent provider, .agent byok, .agent timeout\n"
 #endif
               << "  -h, --help           Show this help\n"
               << "  --version            Show version\n\n"
@@ -1087,12 +857,11 @@ static void print_usage() {
               << "  idasql -s test.i64 -i\n"
               << "  idasql -s test.i64 --export dump.sql\n"
               << "  idasql -s test.i64 --http 8080\n"
-#ifdef IDASQL_HAS_AI_AGENT
-              << "  idasql -s test.i64 --prompt \"Find the largest functions\"\n"
-              << "  idasql -s test.i64 -i --agent\n"
-              << "  idasql -s test.i64 --provider copilot --prompt \"How many functions?\"\n"
-#endif
+#ifdef IDASQL_HAS_MCP
               << "  idasql -s test.i64 --mcp 9000\n";
+#else
+              ;
+#endif
 }
 
 int main(int argc, char* argv[]) {
@@ -1126,12 +895,6 @@ int main(int argc, char* argv[]) {
     int http_port = 8080;
     bool mcp_mode = false;
     int mcp_port = 0;                 // 0 = random port
-#ifdef IDASQL_HAS_AI_AGENT
-    std::string nl_prompt;            // --prompt for natural language
-    bool agent_mode = false;          // --agent for interactive mode
-    bool verbose_mode = false;        // -v for verbose agent output
-    std::string provider_override;    // --provider overrides stored setting
-#endif
 
     // Parse arguments
     for (int i = 1; i < argc; i++) {
@@ -1151,40 +914,22 @@ int main(int argc, char* argv[]) {
             export_file = argv[++i];
         } else if (strncmp(argv[i], "--export-tables=", 16) == 0) {
             export_tables = argv[i] + 16;
-#ifdef IDASQL_HAS_AI_AGENT
-        } else if (strcmp(argv[i], "--prompt") == 0 && i + 1 < argc) {
-            nl_prompt = argv[++i];
-        } else if (strcmp(argv[i], "--agent") == 0) {
-            agent_mode = true;
-        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
-            verbose_mode = true;
-        } else if (strcmp(argv[i], "--provider") == 0 && i + 1 < argc) {
-            provider_override = argv[++i];
-            // Validate provider name
-            if (provider_override != "copilot" && provider_override != "Copilot" &&
-                provider_override != "claude" && provider_override != "Claude") {
-                std::cerr << "Unknown provider: " << provider_override << "\n";
-                std::cerr << "Available providers: claude, copilot\n";
-                return 1;
-            }
-        } else if (strcmp(argv[i], "--config") == 0) {
-            // Handle --config [path] [value] and exit immediately
-            std::string config_path = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : "";
-            std::string config_value = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : "";
-            auto [ok, output, code] = idasql::handle_config_command(config_path, config_value);
-            std::cout << output;
-            return code;
-#endif
         } else if (strcmp(argv[i], "--http") == 0) {
             http_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 http_port = std::stoi(argv[++i]);
             }
+#ifdef IDASQL_HAS_MCP
         } else if (strcmp(argv[i], "--mcp") == 0) {
             mcp_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {
                 mcp_port = std::stoi(argv[++i]);
             }
+#else
+        } else if (strcmp(argv[i], "--mcp") == 0) {
+            std::cerr << "Error: MCP mode not available. Rebuild with -DIDASQL_WITH_MCP=ON\n";
+            return 1;
+#endif
         } else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) {
             bind_addr = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -1205,15 +950,12 @@ int main(int argc, char* argv[]) {
     }
 
     bool has_action = !query.empty() || !sql_file.empty() || interactive || !export_file.empty() || http_mode || mcp_mode;
-#ifdef IDASQL_HAS_AI_AGENT
-    has_action = has_action || !nl_prompt.empty();
-#endif
     if (!has_action) {
-        std::cerr << "Error: Specify -q, -f, -i, --export, --http, --mcp"
-#ifdef IDASQL_HAS_AI_AGENT
-                  << ", or --prompt"
+        std::cerr << "Error: Specify -q, -f, -i, --export, --http";
+#ifdef IDASQL_HAS_MCP
+        std::cerr << ", or --mcp";
 #endif
-                  << "\n\n";
+        std::cerr << "\n\n";
         print_usage();
         return 1;
     }
@@ -1229,6 +971,14 @@ int main(int argc, char* argv[]) {
     }
     std::cerr << "Database opened successfully." << std::endl;
 
+    idapython_runtime_guard_t idapython_runtime;
+    std::string idapython_runtime_error;
+    idapython_runtime.acquired = idasql::idapython::runtime_acquire(&idapython_runtime_error);
+    if (!idapython_runtime.acquired) {
+        std::cerr << "Warning: IDAPython capture runtime init failed: "
+                  << idapython_runtime_error << std::endl;
+    }
+
     // HTTP server mode
     if (http_mode) {
         int http_result = run_http_mode(db, http_port, bind_addr, auth_token);
@@ -1237,7 +987,7 @@ int main(int argc, char* argv[]) {
     }
 
     // MCP server mode (standalone, not interactive REPL)
-#ifdef IDASQL_HAS_AI_AGENT
+#ifdef IDASQL_HAS_MCP
     if (mcp_mode) {
         // SQL executor - will be called on main thread via wait()
         idasql::QueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
@@ -1248,18 +998,9 @@ int main(int argc, char* argv[]) {
             return "Error: " + result.error;
         };
 
-        // Create MCP agent for natural language queries
-        auto mcp_agent = std::make_unique<idasql::AIAgent>(sql_cb);
-        mcp_agent->start();
-
-        idasql::AskCallback ask_cb = [&mcp_agent](const std::string& question) -> std::string {
-            if (!mcp_agent) return "Error: AI agent not available";
-            return mcp_agent->query(question);
-        };
-
         // Create and start MCP server with use_queue=true
         idasql::IDAMCPServer mcp_server;
-        int port = mcp_server.start(mcp_port, sql_cb, ask_cb,
+        int port = mcp_server.start(mcp_port, sql_cb,
                                     bind_addr.empty() ? "127.0.0.1" : bind_addr, true);
         if (port <= 0) {
             std::cerr << "Error: Failed to start MCP server\n";
@@ -1267,7 +1008,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << idasql::format_mcp_info(port, true);
+        std::cout << idasql::format_mcp_info(port, mcp_server.bind_addr());
         std::cout << "Press Ctrl+C to stop...\n\n";
         std::cout.flush();
 
@@ -1287,14 +1028,13 @@ int main(int argc, char* argv[]) {
         mcp_server.run_until_stopped();
 
         std::signal(SIGINT, SIG_DFL);
-        mcp_agent->stop();
         std::cout << "\nMCP server stopped.\n";
         db.close();
         return 0;
     }
 #else
     if (mcp_mode) {
-        std::cerr << "Error: MCP mode not available. Rebuild with -DIDASQL_WITH_AI_AGENT=ON\n";
+        std::cerr << "Error: MCP mode not available. Rebuild with -DIDASQL_WITH_MCP=ON\n";
         db.close();
         return 1;
     }
@@ -1308,40 +1048,6 @@ int main(int argc, char* argv[]) {
         if (!export_to_sql(db, export_file.c_str(), export_tables)) {
             result = 1;
         }
-#ifdef IDASQL_HAS_AI_AGENT
-    } else if (!nl_prompt.empty()) {
-        // Natural language query mode (one-shot)
-        auto executor = [&db](const std::string& sql) -> std::string {
-            return execute_sql_to_string(db, sql);
-        };
-
-        // Load settings (includes BYOK, provider, timeout)
-        idasql::AgentSettings settings = idasql::LoadAgentSettings();
-
-        // Apply provider override from CLI if specified
-        if (!provider_override.empty()) {
-            try {
-                settings.default_provider = idasql::ParseProviderType(provider_override);
-            } catch (...) {
-                // Already validated in argument parsing
-            }
-        }
-
-        idasql::AIAgent agent(executor, settings, verbose_mode);
-
-        // Register signal handler
-        g_agent = &agent;
-        std::signal(SIGINT, signal_handler);
-
-        agent.start();
-        std::string response = agent.query(nl_prompt);
-        agent.stop();
-
-        g_agent = nullptr;
-        std::signal(SIGINT, SIG_DFL);
-
-        std::cout << response << "\n";
-#endif
     } else if (!query.empty()) {
         // Single query mode
         auto query_result = db.query(query);
@@ -1361,11 +1067,7 @@ int main(int argc, char* argv[]) {
         }
     } else if (interactive) {
         // Interactive REPL
-#ifdef IDASQL_HAS_AI_AGENT
-        run_repl(db, agent_mode, verbose_mode, provider_override);
-#else
         run_repl(db);
-#endif
     }
 
     // Save database if -w/--write was specified

@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * idasql_plugin - IDA plugin providing SQL interface to IDA databases
  *
@@ -34,23 +37,22 @@
 #include <idasql/platform_undef.hpp>
 
 #ifdef _WIN32
-// Include shlobj.h BEFORE IDA headers: agent_settings.hpp pulls in <shlobj.h>
-// which defines CM_MASK/CM_STATE enums in shobjidl_core.h. IDA's typeinf.hpp
-// also defines CM_MASK (const uchar). Including Windows headers first lets
-// IDA's definition shadow the Windows enum without conflict.
-#include <shlobj.h>
 #include <xsql/json.hpp>
 #include <ida.hpp>
 #include <idp.hpp>
 #include <loader.hpp>
 #include <kernwin.hpp>
 #include <idasql/database.hpp>
+#include <idasql/idapython.hpp>
+#include <idasql/ui_context_provider.hpp>
 #else
 #include <ida.hpp>
 #include <idp.hpp>
 #include <loader.hpp>
 #include <kernwin.hpp>
 #include <idasql/database.hpp>
+#include <idasql/idapython.hpp>
+#include <idasql/ui_context_provider.hpp>
 #include <xsql/json.hpp>
 #endif
 
@@ -59,18 +61,19 @@
 
 // Plugin control codes
 #include "../common/plugin_control.hpp"
+#include "ui_context_function.hpp"
 
 // Version info
 #include "../common/idasql_version.hpp"
 
-// MCP server (when AI agent is enabled)
-#ifdef IDASQL_HAS_AI_AGENT
+// MCP server (optional)
+#ifdef IDASQL_HAS_MCP
 #include "../common/mcp_server.hpp"
-#include "../common/ai_agent.hpp"
 #endif
 
 // HTTP server for .http REPL command
 #include "../common/http_server.hpp"
+#include "../common/json_utils.hpp"
 
 //=============================================================================
 // IDA execute_sync wrapper
@@ -118,10 +121,10 @@ struct idasql_plugmod_t : public plugmod_t
     std::mutex query_meta_mutex_;
     std::string active_query_;
     std::chrono::steady_clock::time_point active_query_started_{};
+    bool idapython_runtime_acquired_ = false;
 
-#ifdef IDASQL_HAS_AI_AGENT
+#ifdef IDASQL_HAS_MCP
     idasql::IDAMCPServer mcp_server_;
-    std::unique_ptr<idasql::AIAgent> mcp_agent_;  // AI agent for MCP
 #endif
 
     idasql::IDAHTTPServer http_server_;
@@ -152,7 +155,21 @@ struct idasql_plugmod_t : public plugmod_t
     {
         engine_ = std::make_unique<idasql::QueryEngine>();
         if (engine_->is_valid()) {
+            if (!idasql::plugin_functions::register_ui_context_sql_functions(engine_->database())) {
+                msg("IDASQL: Failed to register get_ui_context_json()\n");
+            }
             msg("IDASQL v" IDASQL_VERSION_STRING ": Query engine initialized\n");
+
+            std::string py_capture_error;
+            idapython_runtime_acquired_ = idasql::idapython::runtime_acquire(&py_capture_error);
+            if (!idapython_runtime_acquired_) {
+                msg("IDASQL: IDAPython capture runtime init failed: %s\n", py_capture_error.c_str());
+            }
+
+            std::string ui_context_capture_error;
+            if (!idasql::ui_context::initialize_capture_helper(&ui_context_capture_error)) {
+                msg("IDASQL: UI context capture helper init failed: %s\n", ui_context_capture_error.c_str());
+            }
 
             // SQL executor that uses execute_sync for thread safety
             auto sql_executor = [this](const std::string& sql) -> std::string {
@@ -167,11 +184,11 @@ struct idasql_plugmod_t : public plugmod_t
             // Create CLI with execute_sync wrapper for thread safety
             cli_ = std::make_unique<idasql::IdasqlCLI>(sql_executor);
 
-#ifdef IDASQL_HAS_AI_AGENT
+#ifdef IDASQL_HAS_MCP
             // Setup MCP callbacks
             cli_->session().callbacks().mcp_status = [this]() -> std::string {
                 if (mcp_server_.is_running()) {
-                    return idasql::format_mcp_status(mcp_server_.port(), true);
+                    return idasql::format_mcp_status(mcp_server_.port(), true, mcp_server_.bind_addr());
                 } else {
                     // Auto-start if not running
                     return start_mcp_server();
@@ -185,7 +202,6 @@ struct idasql_plugmod_t : public plugmod_t
             cli_->session().callbacks().mcp_stop = [this]() -> std::string {
                 if (mcp_server_.is_running()) {
                     mcp_server_.stop();
-                    mcp_agent_.reset();
                     return "MCP server stopped";
                 } else {
                     return "MCP server not running";
@@ -196,7 +212,7 @@ struct idasql_plugmod_t : public plugmod_t
             // Setup HTTP server callbacks
             cli_->session().callbacks().http_status = [this]() -> std::string {
                 if (http_server_.is_running()) {
-                    return idasql::format_http_status(http_server_.port(), true);
+                    return idasql::format_http_status(http_server_.port(), true, http_server_.bind_addr());
                 } else {
                     return "HTTP server not running\nUse '.http start' to start\n";
                 }
@@ -223,11 +239,11 @@ struct idasql_plugmod_t : public plugmod_t
         }
     }
 
-#ifdef IDASQL_HAS_AI_AGENT
+#ifdef IDASQL_HAS_MCP
     std::string start_mcp_server(int req_port = 0, const std::string& bind_addr = "127.0.0.1")
     {
         if (mcp_server_.is_running()) {
-            return idasql::format_mcp_status(mcp_server_.port(), true);
+            return idasql::format_mcp_status(mcp_server_.port(), true, mcp_server_.bind_addr());
         }
 
         // SQL executor that uses execute_sync for thread safety
@@ -240,62 +256,26 @@ struct idasql_plugmod_t : public plugmod_t
             }
         };
 
-        // Create AI agent for MCP (runs on MCP thread, SQL via execute_sync)
-        mcp_agent_ = std::make_unique<idasql::AIAgent>(sql_executor);
-        mcp_agent_->start();
-
-        // MCP ask callback - agent runs on MCP thread
-        idasql::AskCallback ask_cb = [this](const std::string& question) -> std::string {
-            if (!mcp_agent_) return "Error: AI agent not available";
-            return mcp_agent_->query(question);
-        };
-
         // Start MCP server
-        int port = mcp_server_.start(req_port, sql_executor, ask_cb, bind_addr);
+        int port = mcp_server_.start(req_port, sql_executor, bind_addr);
         if (port <= 0) {
-            mcp_agent_.reset();
             return "Error: Failed to start MCP server";
         }
 
-        return idasql::format_mcp_info(port, true);
+        return idasql::format_mcp_info(port, mcp_server_.bind_addr());
     }
 #endif
 
     std::string start_http_server(int req_port = 0, const std::string& bind_addr = "127.0.0.1")
     {
         if (http_server_.is_running()) {
-            return idasql::format_http_status(http_server_.port(), true);
+            return idasql::format_http_status(http_server_.port(), true, http_server_.bind_addr());
         }
 
         // SQL executor that uses execute_sync for thread safety and returns JSON
         idasql::HTTPQueryCallback sql_cb = [this](const std::string& sql) -> std::string {
             idasql::QueryResult result = run_query_sync(sql);
-
-            xsql::json j = {{"success", result.success}};
-            if (result.success) {
-                j["columns"] = result.columns;
-                xsql::json rows = xsql::json::array();
-                for (const auto& row : result.rows) {
-                    rows.push_back(row.values);
-                }
-                j["rows"] = rows;
-                j["row_count"] = result.rows.size();
-                if (!result.warnings.empty()) {
-                    j["warnings"] = result.warnings;
-                }
-                if (result.timed_out) {
-                    j["timed_out"] = true;
-                }
-                if (result.partial) {
-                    j["partial"] = true;
-                }
-                if (result.elapsed_ms > 0) {
-                    j["elapsed_ms"] = result.elapsed_ms;
-                }
-            } else {
-                j["error"] = result.error;
-            }
-            return j.dump();
+            return idasql::query_result_to_json_safe(result);
         };
 
         // Start HTTP server, no queue (plugin mode)
@@ -304,23 +284,28 @@ struct idasql_plugmod_t : public plugmod_t
             return "Error: Failed to start HTTP server";
         }
 
-        return idasql::format_http_info(port, "Type '.http stop' to stop the server.");
+        return idasql::format_http_info(
+            port, http_server_.bind_addr(), "Type '.http stop' to stop the server.");
     }
 
     ~idasql_plugmod_t()
     {
-#ifdef IDASQL_HAS_AI_AGENT
+#ifdef IDASQL_HAS_MCP
         // Stop MCP server before destroying engine
         if (mcp_server_.is_running()) {
             mcp_server_.stop();
         }
-        mcp_agent_.reset();
 #endif
         // Stop HTTP server before destroying engine
         if (http_server_.is_running()) {
             http_server_.stop();
         }
         if (cli_) cli_->uninstall();
+        idasql::ui_context::shutdown_capture_helper();
+        if (idapython_runtime_acquired_) {
+            idasql::idapython::runtime_release();
+            idapython_runtime_acquired_ = false;
+        }
         engine_.reset();
         msg("IDASQL: Plugin terminated\n");
     }
@@ -332,7 +317,11 @@ struct idasql_plugmod_t : public plugmod_t
         switch (arg) {
             case 0:
                 msg("IDASQL v" IDASQL_VERSION_STRING " - SQL interface for IDA database\n");
-                msg("Use dot commands: .http, .mcp, .help\n");
+                msg("Use dot commands: .http");
+#ifdef IDASQL_HAS_MCP
+                msg(", .mcp");
+#endif
+                msg(", .help\n");
                 return true;
 
             case PLUGIN_ARG_TOGGLE_CLI:
@@ -378,7 +367,9 @@ plugin_t PLUGIN =
     "\n"
     "Auto-installs CLI on load. Use dot commands:\n"
     "  .http start/stop  - HTTP REST server\n"
+#ifdef IDASQL_HAS_MCP
     "  .mcp start/stop   - MCP server\n"
+#endif
     "  .help             - Show all commands\n"
     "\n"
     "run(23): Toggle CLI (command line interface)",

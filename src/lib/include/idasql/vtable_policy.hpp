@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * vtable_policy.hpp - Policy and configuration system for IDASQL
  *

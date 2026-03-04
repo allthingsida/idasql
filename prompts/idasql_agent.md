@@ -26,6 +26,23 @@ A comprehensive reference for AI agents to effectively use IDASQL - an SQL inter
 ### Addresses (ea_t)
 Everything in a binary has an **address** - a memory location where code or data lives. IDA uses `ea_t` (effective address) as unsigned 64-bit integers. SQL shows these as integers; use `printf('0x%X', address)` for hex display.
 
+Address-taking SQL functions accept:
+- integer EA values (preferred for deterministic scripts)
+- numeric strings (`'4198400'`, `'0x401000'`)
+- symbol names resolved with `get_name_ea(BADADDR, name)` (global names)
+
+Examples:
+```sql
+SELECT decompile('DriverEntry');
+SELECT set_type('DriverEntry', 'NTSTATUS DriverEntry(PDRIVER_OBJECT, PUNICODE_STRING);');
+SELECT comment_at('0x401000');
+```
+
+If a symbol cannot be resolved, SQL functions return an explicit error like:
+`Could not resolve name to address: <name>`.
+
+Local label lookup that depends on a specific `from` context is not consulted by default (`BADADDR` resolution). Use explicit numeric EAs when needed.
+
 ### Functions
 IDA groups code into **functions** with:
 - `address` / `start_ea` - Where the function begins
@@ -81,6 +98,42 @@ Core decompiler surfaces:
   - Not the preferred display surface for full-function code.
 - `ctree` and `ctree_call_args` for AST-level analysis
 - `ctree_lvars` for local variable rename/type/comment updates
+
+---
+
+## Context Awareness (Plugin UI)
+
+Use `get_ui_context_json()` when the user asks context-aware questions such as:
+- "what am I looking at?"
+- "what is on the screen?"
+- "what's selected?"
+- references like "this", "here", "current", "selected", or "that function"
+- "grab the UI context"
+
+Behavior contract:
+- If there is a selection, capture selection begin/end and preview text lines.
+- Capture current widget type/title and whether it is a custom view.
+- Capture chooser/list selections when available (for example, Local Types selections).
+- Capture code context (address/function/segment) when available.
+- In non-address views, return structured context with `has_address: false` and a reason.
+
+Temporal reference policy:
+- For `this` / `here` / `current` / `selected`, capture a fresh context snapshot for this user question.
+- For `that` / `previous` / `earlier`, use the most recently captured snapshot for this working flow when available.
+
+Freshness rule:
+- Capture context once per user question, then reuse it while answering that question.
+- Refresh context only when the user explicitly asks to re-check or refresh the UI context.
+
+Availability:
+- `get_ui_context_json()` is plugin-only (GUI runtime).
+- It is not available in idalib/CLI mode.
+- If unavailable, continue with non-UI SQL workflows and state that UI context is unavailable in this runtime.
+
+Database orientation:
+- Use `SELECT * FROM welcome` for a quick database overview (processor, bitness, address range, entry point, counts).
+- The `welcome` table contains only database metadata — no UI context.
+- For UI context (focused widget, selection, code location), use `get_ui_context_json()`.
 
 ---
 
@@ -200,6 +253,7 @@ PRAGMA idasql.query_timeout_ms = 60000;          -- set timeout (0 disables)
 PRAGMA idasql.queue_admission_timeout_ms = 120000;
 PRAGMA idasql.max_queue = 64;                    -- 0 = unbounded
 PRAGMA idasql.hints_enabled = 1;                 -- 1/0, on/off
+PRAGMA idasql.enable_idapython = 1;              -- 1/0, enable SQL Python execution
 PRAGMA idasql.timeout_push = 15000;              -- push old timeout, set new
 PRAGMA idasql.timeout_pop;                       -- restore previous timeout
 ```
@@ -621,7 +675,7 @@ FROM disasm_calls WHERE callee_name LIKE '%malloc%';
 
 ### Database Modification
 
-Most write examples are documented next to their tables (`breakpoints`, `segments`, `names`, `instructions`, `types*`, `bookmarks`, `comments`, `ctree_lvars`).
+Most write examples are documented next to their tables (`breakpoints`, `segments`, `names`, `instructions`, `types*`, `bookmarks`, `comments`, `ctree_lvars`, `netnode_kv`).
 Quick capability matrix:
 
 | Table | INSERT | UPDATE columns | DELETE |
@@ -639,6 +693,7 @@ Quick capability matrix:
 | `types_members` | Yes | Yes | Yes |
 | `types_enum_values` | Yes | Yes | Yes |
 | `ctree_lvars` | — | `name`, `type`, `comment` | — |
+| `netnode_kv` | Yes | `value` | Yes |
 
 Write support is covered by integration/e2e tests in:
 - `tests/idasql/write_operations_phase3_test.cpp`
@@ -647,6 +702,7 @@ Write support is covered by integration/e2e tests in:
 - `tests/idasql/comments_table_test.cpp`
 - `tests/idasql/names_table_test.cpp`
 - `tests/idasql/bytes_table_test.cpp`
+- `tests/idasql/netnode_kv_table_test.cpp`
 - `tests/idasql/patch_functions_test.cpp`
 - `tests/idasql/patched_bytes_table_test.cpp`
 
@@ -1049,6 +1105,31 @@ UPDATE bookmarks SET description = 'confirmed branch' WHERE index = 0;
 DELETE FROM bookmarks WHERE index = 0;
 ```
 
+#### netnode_kv
+Persistent key-value store backed by IDA netnodes. Data is saved inside the IDB automatically. Supports full CRUD and O(1) key lookup via `WHERE key = '...'`.
+
+| Column | Type | Writable | Description |
+|--------|------|----------|-------------|
+| `key` | TEXT | — | Unique key (identity, read-only) |
+| `value` | TEXT | Yes | Arbitrary-length value (blob storage) |
+
+```sql
+-- Store a value
+INSERT INTO netnode_kv(key, value) VALUES('author', 'alice');
+
+-- Read by key (O(1) lookup)
+SELECT value FROM netnode_kv WHERE key = 'author';
+
+-- List all entries
+SELECT * FROM netnode_kv;
+
+-- Update a value
+UPDATE netnode_kv SET value = '2.0' WHERE key = 'version';
+
+-- Delete an entry
+DELETE FROM netnode_kv WHERE key = 'author';
+```
+
 #### heads
 All defined items (code/data heads) in the database.
 
@@ -1324,6 +1405,8 @@ This is **much faster** than scanning all disassembly lines because:
 - `func_start()` is O(1) lookup in IDA's function index
 
 ### Names & Functions
+Address argument note: `addr`/`ea`/`func_addr` parameters accept integer EAs, numeric strings, and symbol names.
+
 | Function | Description |
 |----------|-------------|
 | `name_at(addr)` | Name at address |
@@ -1359,12 +1442,46 @@ This is **much faster** than scanning all disassembly lines because:
 |----------|-------------|
 | `set_name(addr, name)` | Set name at address |
 | `type_at(addr)` | Read type declaration applied at address |
-| `set_type(addr, decl)` | Apply C declaration/type at address (empty decl clears type) |
+| `set_type(addr, decl)` | Apply C declaration/type at address (empty decl clears type; `addr` may be EA, numeric string, or symbol name) |
 | `parse_decls(text)` | Import C declarations (struct/union/enum/typedef) into local types |
 
 Preferred SQL write surface for function metadata:
 - `UPDATE funcs SET name = '...', prototype = '...' WHERE address = ...`
 - `prototype` maps to `type_at/set_type` behavior and invalidates decompiler cache.
+
+### Python Execution
+| Function | Description |
+|----------|-------------|
+| `idapython_snippet(code[, sandbox])` | Execute Python snippet and return captured output text |
+| `idapython_file(path[, sandbox])` | Execute Python file and return captured output text |
+
+Runtime guard:
+
+```sql
+PRAGMA idasql.enable_idapython = 1;
+```
+
+Examples:
+
+```sql
+SELECT idapython_snippet('print("hello from idapython")');
+SELECT idapython_file('C:/temp/script.py');
+SELECT idapython_snippet('counter = globals().get("counter", 0) + 1; print(counter)', 'alpha');
+```
+
+Notes:
+- disabled by default until pragma is enabled
+- Python exceptions propagate as SQL errors
+- `sandbox` isolates/persists Python globals by sandbox key
+
+### Context Awareness (Plugin UI)
+| Function | Description |
+|----------|-------------|
+| `get_ui_context_json()` | Return current UI/widget/context JSON for context-aware prompts (plugin-only; executes through the same queued main-thread path and timeout behavior as other SQL functions) |
+
+```sql
+SELECT get_ui_context_json();
+```
 
 ### Item Analysis
 | Function | Description |
@@ -1402,7 +1519,7 @@ SELECT decode_insn(0x401000);
 
 | Function | Description |
 |----------|-------------|
-| `decompile(addr)` | **PREFERRED** — Full pseudocode with line prefixes (requires Hex-Rays) |
+| `decompile(addr)` | **PREFERRED** — Full pseudocode with line prefixes (`addr` may be EA, numeric string, or symbol name; available when decompiler surfaces are enabled) |
 | `decompile(addr, 1)` | Same output but forces re-decompilation (use after writes/renames) |
 | `list_lvars(addr)` | List local variables as JSON |
 | `rename_lvar(func_addr, lvar_idx, new_name)` | Rename a local variable by index |
@@ -1575,10 +1692,16 @@ SELECT set_union_selection_item(0x140001BD0, 42, '');
 -- Optional bridge when you want hybrid lookup + explicit item workflow:
 SELECT call_arg_item(0x140001BD0, 0x140001C3E, 0);
 
--- Non-call expression workflow (e.g., comparisons/ifs):
+-- Enum constant rendering in comparisons (e.g., fdwReason == 1 → DLL_PROCESS_ATTACH):
+-- PREFERRED: retype the variable to an enum type — the decompiler infers constants automatically
+SELECT parse_decls('typedef enum { DLL_PROCESS_DETACH=0, DLL_PROCESS_ATTACH=1 } fdw_reason_t;');
+UPDATE ctree_lvars SET type = 'fdw_reason_t' WHERE func_addr = 0x180001050 AND idx = 1;
+SELECT decompile(0x180001050, 1);  -- verify enum names appear
+
+-- Non-call expression workflow — advanced per-operand numform control:
 -- 1) resolve expression item deterministically by ea + op_name + nth
 SELECT ctree_item_at(0x140001BD0, 0x140001CBB, 'cot_eq', 0);
--- 2) apply/read via generic expression helpers
+-- 2) apply/read via generic expression helpers (opnum = disassembly operand index)
 SELECT set_numform_ea_expr(0x140001BD0, 0x140001CBB, 0, 'enum:operations_e', 'cot_eq', 0);
 SELECT get_numform_ea_expr(0x140001BD0, 0x140001CBB, 0, 'cot_eq', 0);
 SELECT set_numform_ea_expr(0x140001BD0, 0x140001CBB, 0, 'clear', 'cot_eq', 0);
@@ -2673,6 +2796,7 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Instruction analysis | `instructions WHERE func_addr = X` |
 | View function disassembly | `disasm_func(addr)` or `disasm_range(start, end)` |
 | View decompiled code | `decompile(addr)` |
+| UI/screen context questions | `get_ui_context_json()` (plugin UI only) |
 | Edit decompiler comments | `UPDATE pseudocode SET comment = '...' WHERE func_addr = X AND ea = Y` |
 | AST pattern matching | `ctree WHERE func_addr = X` |
 | Call patterns | `ctree_v_calls`, `disasm_calls` |
@@ -2694,6 +2818,7 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Add struct members | `types_members` (INSERT) |
 | Add enum values | `types_enum_values` (INSERT) |
 | Modify database | `funcs`, `names`, `comments`, `bookmarks` (INSERT/UPDATE/DELETE) |
+| Store custom key-value data | `netnode_kv` (full CRUD, persists in IDB) |
 | Entity search (structured) | `grep WHERE pattern = '...'` |
 | Entity search (JSON) | `grep('pattern', limit, offset)` |
 

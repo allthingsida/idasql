@@ -1,3 +1,6 @@
+// Copyright (c) Elias Bachaalany
+// SPDX-License-Identifier: MIT
+
 /**
  * platform.hpp - Platform fixups for IDA SDK compatibility
  *
