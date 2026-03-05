@@ -22,7 +22,16 @@ endif()
 # IDA SDK (required for CLI and plugin)
 # ============================================================================
 
-include($ENV{IDASDK}/src/cmake/bootstrap.cmake)
+# Fetch ida-cmake directly — decoupled from ida-sdk's submodule pin.
+FetchContent_Declare(ida_cmake
+    GIT_REPOSITORY https://github.com/allthingsida/ida-cmake.git
+    GIT_TAG        main
+    GIT_SHALLOW    TRUE
+)
+FetchContent_Populate(ida_cmake)
+
+# Bootstrap from fetched ida-cmake (not from ida-sdk's bundled copy)
+include(${ida_cmake_SOURCE_DIR}/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
 # Make imported IDA SDK targets globally visible so sibling directories
