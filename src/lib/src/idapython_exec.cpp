@@ -84,15 +84,17 @@ ssize_t idaapi UiMessageCapture::on_event(ssize_t code, va_list va) {
         return 0;
     }
 
-    // On GCC/Clang, va_list is an array type that decays to a pointer when
-    // passed through variadic args. On MSVC, va_list is char* (passed by value).
+    // va_list is an array type on x86-64 System V ABI (__va_list_tag[1]),
+    // so it decays to a pointer when passed through variadic args.
+    // On MSVC and ARM64 Apple (where va_list is char*), it is a scalar
+    // type passed by value — no decay, no extra indirection.
     va_list copy;
-#ifdef _MSC_VER
-    va_list format_args = va_arg(va, va_list);
-    va_copy(copy, format_args);
-#else
+#if defined(__x86_64__) && !defined(_MSC_VER)
     va_list* format_args = va_arg(va, va_list*);
     va_copy(copy, *format_args);
+#else
+    va_list format_args = va_arg(va, va_list);
+    va_copy(copy, format_args);
 #endif
     qstring formatted;
     formatted.vsprnt(format, copy);
