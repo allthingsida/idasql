@@ -21,6 +21,14 @@ std::string safe_func_name(ea_t ea) {
     return std::string(name.c_str());
 }
 
+std::string safe_func_prototype(ea_t ea) {
+    qstring out;
+    if (print_type(&out, ea, PRTYPE_1LINE | PRTYPE_SEMI)) {
+        return std::string(out.c_str());
+    }
+    return "";
+}
+
 std::string safe_segm_name(segment_t* seg) {
     if (!seg) return "";
     qstring name;
@@ -102,6 +110,8 @@ CachedTableDef<FuncRow> define_funcs() {
             func_t* f = getn_func(static_cast<size_t>(rowid));
             if (!f) return false;
             row.start_ea = f->start_ea;
+            row.original_name = safe_func_name(row.start_ea);
+            row.original_prototype = safe_func_prototype(row.start_ea);
             return true;
         })
         .column_int64("address", [](const FuncRow& row) -> int64_t {
@@ -112,21 +122,31 @@ CachedTableDef<FuncRow> define_funcs() {
                 return safe_func_name(row.start_ea);
             },
             [](FuncRow& row, const char* new_name) -> bool {
+                const std::string requested_name = new_name ? new_name : "";
+                if (requested_name == row.original_name) {
+                    return true;
+                }
                 auto_wait();
-                bool ok = set_name(row.start_ea, new_name, SN_CHECK) != 0;
+                bool ok = set_name(row.start_ea, requested_name.c_str(), SN_CHECK) != 0;
                 if (ok) decompiler::invalidate_decompiler_cache(row.start_ea);
                 auto_wait();
                 return ok;
             })
         .column_text_rw("prototype",
             [](const FuncRow& row) -> std::string {
-                qstring out;
-                if (print_type(&out, row.start_ea, PRTYPE_1LINE | PRTYPE_SEMI)) {
-                    return out.c_str();
-                }
-                return "";
+                return safe_func_prototype(row.start_ea);
             },
-            [](FuncRow& row, const char* new_decl) -> bool {
+            [](FuncRow& row, xsql::FunctionArg val) -> bool {
+                if (val.is_nochange()) {
+                    return true;
+                }
+                const char* new_decl = val.is_null() ? nullptr : val.as_c_str();
+                const std::string requested_decl = new_decl ? new_decl : "";
+                // no_shared_cache() can replay the pre-update declaration during
+                // rename-only updates; treat that exact replay as a no-op.
+                if (requested_decl == row.original_prototype) {
+                    return true;
+                }
                 auto_wait();
                 bool ok = false;
                 if (new_decl == nullptr || new_decl[0] == '\0') {
