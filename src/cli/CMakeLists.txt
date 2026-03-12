@@ -39,12 +39,12 @@ if(MSVC)
 elseif(APPLE)
     set_target_properties(idasql_cli PROPERTIES
         BUILD_WITH_INSTALL_RPATH TRUE
-        INSTALL_RPATH "@executable_path;$ENV{IDASDK}/src/bin"
+        INSTALL_RPATH "@executable_path/"
     )
 elseif(UNIX)
     set_target_properties(idasql_cli PROPERTIES
         BUILD_WITH_INSTALL_RPATH TRUE
-        INSTALL_RPATH "$ORIGIN;$ENV{IDASDK}/src/bin"
+        INSTALL_RPATH "$ORIGIN"
     )
 endif()
 

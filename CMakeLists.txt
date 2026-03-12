@@ -99,7 +99,6 @@ if(IDASQL_WITH_MCP)
         FetchContent_Declare(fastmcpp
             GIT_REPOSITORY https://github.com/0xeb/fastmcpp.git
             GIT_TAG        4837e8e0a27d0011b73643fe02b3553cd3935c34
-            GIT_SHALLOW    TRUE
         )
         FetchContent_MakeAvailable(fastmcpp)
     endif()
