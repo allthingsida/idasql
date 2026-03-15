@@ -5,6 +5,8 @@
 
 #include <idasql/string_utils.hpp>
 
+#include <xsql/json.hpp>
+
 #include <sstream>
 #include <unordered_map>
 
@@ -61,6 +63,124 @@ void append_row_context_error(const PseudocodeLine& row) {
     xsql::set_vtab_error(oss.str());
 }
 
+std::string get_function_name_text(ea_t func_addr) {
+    qstring name;
+    if (get_func_name(&name, func_addr) > 0) {
+        return name.c_str();
+    }
+    return "";
+}
+
+const item_preciser_t* all_comment_placements(size_t& count) {
+    static const item_preciser_t kPlacements[] = {
+        ITP_SEMI, ITP_BLOCK1, ITP_BLOCK2, ITP_CURLY1, ITP_CURLY2, ITP_BRACE1,
+        ITP_BRACE2, ITP_COLON, ITP_CASE, ITP_ELSE, ITP_DO, ITP_ASM, ITP_TRY
+    };
+    count = sizeof(kPlacements) / sizeof(kPlacements[0]);
+    return kPlacements;
+}
+
+bool clear_user_comments_for_target(
+        cfunc_t* cfunc,
+        ea_t func_addr,
+        ea_t target_ea,
+        const char* failure_prefix) {
+    size_t placement_count = 0;
+    const item_preciser_t* placements = all_comment_placements(placement_count);
+
+    for (size_t i = 0; i < placement_count; ++i) {
+        treeloc_t loc;
+        loc.ea = target_ea;
+        loc.itp = placements[i];
+        cfunc->set_user_cmt(loc, nullptr);
+    }
+
+    cfunc->save_user_cmts();
+    for (size_t i = 0; i < placement_count; ++i) {
+        treeloc_t loc;
+        loc.ea = target_ea;
+        loc.itp = placements[i];
+        if (!verify_comment_state(cfunc, loc, nullptr)) {
+            xsql::set_vtab_error(
+                std::string(failure_prefix) + " (" +
+                describe_comment_target(func_addr, target_ea, placements[i]) + ")");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool user_comment_map_contains(const user_cmts_t* map, const treeloc_t& key) {
+    if (map == nullptr) {
+        return false;
+    }
+    return user_cmts_find(map, key) != user_cmts_end(map);
+}
+
+bool find_current_pseudocode_comment_placement(
+        ea_t func_addr,
+        int line_num,
+        item_preciser_t* out_itp) {
+    if (out_itp == nullptr || line_num < 0) {
+        return false;
+    }
+
+    std::vector<PseudocodeLine> lines;
+    if (!collect_pseudocode(lines, func_addr)) {
+        return false;
+    }
+
+    for (const auto& line : lines) {
+        if (line.line_num == line_num && !line.comment.empty()) {
+            *out_itp = line.comment_placement;
+            return true;
+        }
+    }
+    return false;
+}
+
+void append_orphan_rows_from_maps(
+        std::vector<OrphanCommentInfo>& rows,
+        ea_t func_addr,
+        const user_cmts_t* before,
+        const user_cmts_t* after) {
+    if (before == nullptr) {
+        return;
+    }
+
+    const std::string func_name = get_function_name_text(func_addr);
+    for (auto it = user_cmts_begin(before); it != user_cmts_end(before); it = user_cmts_next(it)) {
+        const treeloc_t& loc = user_cmts_first(it);
+        if (user_comment_map_contains(after, loc)) {
+            continue;
+        }
+
+        const citem_cmt_t& cmt = user_cmts_second(it);
+        OrphanCommentInfo row;
+        row.func_addr = func_addr;
+        row.func_name = func_name;
+        row.ea = loc.ea;
+        row.comment_placement = loc.itp;
+        row.orphan_comment = cmt.c_str();
+        rows.push_back(std::move(row));
+    }
+}
+
+std::string build_orphan_comments_json(const std::vector<OrphanCommentInfo>& rows) {
+    xsql::json arr = xsql::json::array();
+    arr.get_ref<xsql::json::array_t&>().reserve(rows.size());
+
+    for (const auto& row : rows) {
+        arr.push_back({
+            {"ea", row.ea != BADADDR ? static_cast<int64_t>(row.ea) : 0},
+            {"comment_placement", itp_to_name(row.comment_placement)},
+            {"comment", row.orphan_comment}
+        });
+    }
+
+    return arr.dump();
+}
+
 }  // namespace
 
 // ============================================================================
@@ -90,6 +210,64 @@ void invalidate_decompiler_cache(ea_t ea) {
     }
 }
 
+bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif) {
+    if (!hexrays_available()) return false;
+    if (call_ea == BADADDR || call_ea == 0) return false;
+    func_t* f = get_func(call_ea);
+    if (f == nullptr) return false;
+
+    const bool ok = apply_callee_tinfo(call_ea, tif);
+    if (ok) {
+        udcall_map_t udcalls;
+        restore_user_defined_calls(&udcalls, f->start_ea);
+
+        udcall_t& udc = udcalls[call_ea];
+        udc.tif = tif;
+        save_user_defined_calls(f->start_ea, udcalls);
+
+        invalidate_decompiler_cache(call_ea);
+    }
+    return ok;
+}
+
+bool get_callee_tinfo_at(ea_t call_ea, tinfo_t& out_tif) {
+    out_tif.clear();
+    if (call_ea == BADADDR || call_ea == 0) return false;
+    if (get_op_tinfo(&out_tif, call_ea, 0)) {
+        return true;
+    }
+    if (!hexrays_available()) {
+        return false;
+    }
+
+    func_t* f = get_func(call_ea);
+    if (f == nullptr) {
+        return false;
+    }
+
+    udcall_map_t udcalls;
+    if (!restore_user_defined_calls(&udcalls, f->start_ea)) {
+        return false;
+    }
+
+    auto it = udcalls.find(call_ea);
+    if (it == udcalls.end()) {
+        return false;
+    }
+    if (it->second.tif.empty()) {
+        return false;
+    }
+
+    out_tif = it->second.tif;
+    return true;
+}
+
+bool get_call_arg_addrs(ea_t call_ea, eavec_t& out_addrs) {
+    out_addrs.clear();
+    if (call_ea == BADADDR || call_ea == 0) return false;
+    return get_arg_addrs(&out_addrs, call_ea);
+}
+
 // ============================================================================
 // ITP Helpers
 // ============================================================================
@@ -108,6 +286,7 @@ const char* itp_to_name(item_preciser_t itp) {
         case ITP_ELSE:   return "else";
         case ITP_DO:     return "do";
         case ITP_ASM:    return "asm";
+        case ITP_TRY:    return "try";
         default:         return "semi";
     }
 }
@@ -125,6 +304,7 @@ item_preciser_t name_to_itp(const char* name) {
     if (stricmp(name, "else") == 0)   return ITP_ELSE;
     if (stricmp(name, "do") == 0)     return ITP_DO;
     if (stricmp(name, "asm") == 0)    return ITP_ASM;
+    if (stricmp(name, "try") == 0)    return ITP_TRY;
     return ITP_SEMI;  // default
 }
 
@@ -244,6 +424,96 @@ void collect_all_pseudocode(std::vector<PseudocodeLine>& lines) {
         if (collect_pseudocode(func_lines, f->start_ea)) {
             lines.insert(lines.end(), func_lines.begin(), func_lines.end());
         }
+    }
+}
+
+bool collect_orphan_comments(std::vector<OrphanCommentInfo>& rows, ea_t func_addr) {
+    rows.clear();
+
+    if (!hexrays_available()) return false;
+
+    func_t* f = get_func(func_addr);
+    if (!f) return false;
+
+    hexrays_failure_t hf;
+    cfuncptr_t cfunc = decompile(f, &hf);
+    if (!cfunc) return false;
+    if (!cfunc->has_orphan_cmts()) return true;
+
+    user_cmts_t* before = restore_user_cmts(func_addr);
+    if (before == nullptr) return true;
+
+    cfunc->del_orphan_cmts();
+    append_orphan_rows_from_maps(rows, func_addr, before, cfunc->user_cmts);
+    user_cmts_free(before);
+
+    // del_orphan_cmts mutates the cached cfunc in-memory; discard it so later
+    // reads see a fresh decompilation backed by the on-disk database state.
+    invalidate_decompiler_cache(func_addr);
+    return true;
+}
+
+void collect_all_orphan_comments(std::vector<OrphanCommentInfo>& rows) {
+    rows.clear();
+
+    if (!hexrays_available()) return;
+
+    // Intentionally live-function scoped: we report orphaned comments reachable
+    // from the current function list, not historical comment maps for deleted or
+    // moved function entries left behind in the IDB.
+    rows.reserve(get_func_qty());
+    size_t func_qty = get_func_qty();
+    for (size_t i = 0; i < func_qty; i++) {
+        func_t* f = getn_func(i);
+        if (!f) continue;
+
+        std::vector<OrphanCommentInfo> func_rows;
+        if (collect_orphan_comments(func_rows, f->start_ea) && !func_rows.empty()) {
+            rows.insert(rows.end(), func_rows.begin(), func_rows.end());
+        }
+    }
+}
+
+bool collect_orphan_comment_group(OrphanCommentGroupInfo& row, ea_t func_addr) {
+    row = OrphanCommentGroupInfo{};
+    row.func_addr = func_addr;
+
+    std::vector<OrphanCommentInfo> precise_rows;
+    if (!collect_orphan_comments(precise_rows, func_addr)) {
+        return false;
+    }
+
+    if (precise_rows.empty()) {
+        row.func_name = get_function_name_text(func_addr);
+        row.orphan_comments_json = "[]";
+        return true;
+    }
+
+    row.func_name = precise_rows.front().func_name;
+    row.orphan_count = static_cast<int>(precise_rows.size());
+    row.orphan_comments_json = build_orphan_comments_json(precise_rows);
+    return true;
+}
+
+void collect_all_orphan_comment_groups(std::vector<OrphanCommentGroupInfo>& rows) {
+    rows.clear();
+
+    if (!hexrays_available()) return;
+
+    rows.reserve(get_func_qty() / 4 + 1);
+    size_t func_qty = get_func_qty();
+    for (size_t i = 0; i < func_qty; i++) {
+        func_t* f = getn_func(i);
+        if (!f) continue;
+
+        OrphanCommentGroupInfo row;
+        if (!collect_orphan_comment_group(row, f->start_ea)) {
+            continue;
+        }
+        if (row.orphan_count == 0) {
+            continue;
+        }
+        rows.push_back(std::move(row));
     }
 }
 
@@ -908,6 +1178,132 @@ void PseudocodeLineNumIterator::column(xsql::FunctionContext& ctx, int col) {
 
 int64_t PseudocodeLineNumIterator::rowid() const { return static_cast<int64_t>(idx_); }
 
+// --- OrphanCommentsInFuncIterator ---
+
+OrphanCommentsInFuncIterator::OrphanCommentsInFuncIterator(ea_t func_addr) {
+    collect_orphan_comments(rows_, func_addr);
+}
+
+bool OrphanCommentsInFuncIterator::next() {
+    if (!started_) {
+        started_ = true;
+        if (rows_.empty()) return false;
+        idx_ = 0;
+        return true;
+    }
+    if (idx_ + 1 < rows_.size()) { ++idx_; return true; }
+    idx_ = rows_.size();
+    return false;
+}
+
+bool OrphanCommentsInFuncIterator::eof() const { return started_ && idx_ >= rows_.size(); }
+
+void OrphanCommentsInFuncIterator::column(xsql::FunctionContext& ctx, int col) {
+    if (idx_ >= rows_.size()) { ctx.result_null(); return; }
+    const auto& row = rows_[idx_];
+    switch (col) {
+        case 0: ctx.result_int64(row.func_addr); break;
+        case 1: !row.func_name.empty() ? ctx.result_text(row.func_name.c_str()) : ctx.result_null(); break;
+        case 2: row.ea != BADADDR ? ctx.result_int64(row.ea) : ctx.result_null(); break;
+        case 3: ctx.result_text(itp_to_name(row.comment_placement)); break;
+        case 4: ctx.result_text(row.orphan_comment.c_str()); break;
+        default: ctx.result_null(); break;
+    }
+}
+
+int64_t OrphanCommentsInFuncIterator::rowid() const { return static_cast<int64_t>(idx_); }
+
+// --- OrphanCommentsAtEaIterator ---
+
+OrphanCommentsAtEaIterator::OrphanCommentsAtEaIterator(ea_t ea) {
+    func_t* f = get_func(ea);
+    if (f == nullptr) {
+        return;
+    }
+
+    std::vector<OrphanCommentInfo> func_rows;
+    if (!collect_orphan_comments(func_rows, f->start_ea)) {
+        return;
+    }
+
+    for (const auto& row : func_rows) {
+        if (row.ea == ea) {
+            rows_.push_back(row);
+        }
+    }
+}
+
+bool OrphanCommentsAtEaIterator::next() {
+    if (!started_) {
+        started_ = true;
+        if (rows_.empty()) return false;
+        idx_ = 0;
+        return true;
+    }
+    if (idx_ + 1 < rows_.size()) { ++idx_; return true; }
+    idx_ = rows_.size();
+    return false;
+}
+
+bool OrphanCommentsAtEaIterator::eof() const { return started_ && idx_ >= rows_.size(); }
+
+void OrphanCommentsAtEaIterator::column(xsql::FunctionContext& ctx, int col) {
+    if (idx_ >= rows_.size()) { ctx.result_null(); return; }
+    const auto& row = rows_[idx_];
+    switch (col) {
+        case 0: ctx.result_int64(row.func_addr); break;
+        case 1: !row.func_name.empty() ? ctx.result_text(row.func_name.c_str()) : ctx.result_null(); break;
+        case 2: row.ea != BADADDR ? ctx.result_int64(row.ea) : ctx.result_null(); break;
+        case 3: ctx.result_text(itp_to_name(row.comment_placement)); break;
+        case 4: ctx.result_text(row.orphan_comment.c_str()); break;
+        default: ctx.result_null(); break;
+    }
+}
+
+int64_t OrphanCommentsAtEaIterator::rowid() const { return static_cast<int64_t>(idx_); }
+
+// --- OrphanCommentGroupsInFuncIterator ---
+
+OrphanCommentGroupsInFuncIterator::OrphanCommentGroupsInFuncIterator(ea_t func_addr) {
+    OrphanCommentGroupInfo row;
+    if (collect_orphan_comment_group(row, func_addr) && row.orphan_count > 0) {
+        rows_.push_back(std::move(row));
+    }
+}
+
+bool OrphanCommentGroupsInFuncIterator::next() {
+    if (!started_) {
+        started_ = true;
+        if (rows_.empty()) return false;
+        idx_ = 0;
+        return true;
+    }
+    if (idx_ + 1 < rows_.size()) { ++idx_; return true; }
+    idx_ = rows_.size();
+    return false;
+}
+
+bool OrphanCommentGroupsInFuncIterator::eof() const { return started_ && idx_ >= rows_.size(); }
+
+void OrphanCommentGroupsInFuncIterator::column(xsql::FunctionContext& ctx, int col) {
+    if (idx_ >= rows_.size()) { ctx.result_null(); return; }
+    const auto& row = rows_[idx_];
+    switch (col) {
+        case 0: ctx.result_int64(row.func_addr); break;
+        case 1: !row.func_name.empty() ? ctx.result_text(row.func_name.c_str()) : ctx.result_null(); break;
+        case 2: ctx.result_int(row.orphan_count); break;
+        case 3: ctx.result_text(row.orphan_comments_json.c_str()); break;
+        default: ctx.result_null(); break;
+    }
+}
+
+int64_t OrphanCommentGroupsInFuncIterator::rowid() const {
+    if (idx_ >= rows_.size()) {
+        return static_cast<int64_t>(idx_);
+    }
+    return static_cast<int64_t>(rows_[idx_].func_addr);
+}
+
 // --- LvarsInFuncIterator ---
 
 LvarsInFuncIterator::LvarsInFuncIterator(ea_t func_addr) {
@@ -1228,29 +1624,66 @@ bool clear_decompiler_comment_all_placements(ea_t func_addr, ea_t target_ea) {
 
     // Clear any existing comment regardless of placement so UPDATE statements
     // like "SET comment = NULL, comment_placement = 'semi'" are order-independent.
-    static const item_preciser_t kPlacements[] = {
-        ITP_SEMI, ITP_BLOCK1, ITP_BLOCK2, ITP_CURLY1, ITP_CURLY2, ITP_BRACE1,
-        ITP_BRACE2, ITP_COLON, ITP_CASE, ITP_ELSE, ITP_DO, ITP_ASM
-    };
-    for (item_preciser_t itp : kPlacements) {
-        treeloc_t loc;
-        loc.ea = target_ea;
-        loc.itp = itp;
-        cfunc->set_user_cmt(loc, nullptr);
+    if (!clear_user_comments_for_target(
+            &*cfunc,
+            func_addr,
+            target_ea,
+            "pseudocode comment clear did not persist")) {
+        return false;
+    }
+    invalidate_decompiler_cache(func_addr);
+    return true;
+}
+
+bool delete_orphan_comment(ea_t func_addr, ea_t target_ea, item_preciser_t itp) {
+    if (!hexrays_available()) {
+        xsql::set_vtab_error("cannot clear orphan comment: Hex-Rays decompiler is unavailable");
+        return false;
+    }
+    if (target_ea == BADADDR || target_ea == 0) {
+        xsql::set_vtab_error(
+            "cannot clear orphan comment: invalid comment coordinate (" +
+            describe_comment_target(func_addr, target_ea, itp) + ")");
+        return false;
     }
 
-    cfunc->save_user_cmts();
-    for (item_preciser_t itp : kPlacements) {
-        treeloc_t loc;
-        loc.ea = target_ea;
-        loc.itp = itp;
-        if (!verify_comment_state(&*cfunc, loc, nullptr)) {
-            xsql::set_vtab_error(
-                "pseudocode comment clear did not persist (" +
-                describe_comment_target(func_addr, target_ea, itp) + ")");
-            return false;
-        }
+    user_cmts_t* cmts = restore_user_cmts(func_addr);
+    if (cmts == nullptr) {
+        xsql::set_vtab_error(
+            "cannot clear orphan comment: no persisted decompiler comments for " +
+            describe_comment_target(func_addr, target_ea, itp));
+        return false;
     }
+
+    treeloc_t loc;
+    loc.ea = target_ea;
+    loc.itp = itp;
+
+    auto it = user_cmts_find(cmts, loc);
+    if (it == user_cmts_end(cmts)) {
+        user_cmts_free(cmts);
+        xsql::set_vtab_error(
+            "cannot clear orphan comment: comment not found for " +
+            describe_comment_target(func_addr, target_ea, itp));
+        return false;
+    }
+
+    user_cmts_erase(cmts, it);
+    save_user_cmts(func_addr, cmts);
+    user_cmts_free(cmts);
+
+    user_cmts_t* verify_cmts = restore_user_cmts(func_addr);
+    const bool still_present = user_comment_map_contains(verify_cmts, loc);
+    if (verify_cmts != nullptr) {
+        user_cmts_free(verify_cmts);
+    }
+    if (still_present) {
+        xsql::set_vtab_error(
+            "orphan comment clear did not persist (" +
+            describe_comment_target(func_addr, target_ea, itp) + ")");
+        return false;
+    }
+
     invalidate_decompiler_cache(func_addr);
     return true;
 }
@@ -1740,6 +2173,24 @@ CachedTableDef<PseudocodeLine> define_pseudocode() {
                 if (is_clear) {
                     ok = clear_decompiler_comment_all_placements(row.func_addr, row.ea);
                 } else {
+                    item_preciser_t previous_placement = ITP_SEMI;
+                    const bool placement_changed =
+                        find_current_pseudocode_comment_placement(
+                            row.func_addr,
+                            row.line_num,
+                            &previous_placement) &&
+                        previous_placement != row.comment_placement;
+                    if (placement_changed) {
+                        ok = set_decompiler_comment(
+                            row.func_addr,
+                            row.ea,
+                            nullptr,
+                            previous_placement);
+                        if (!ok) {
+                            append_row_context_error(row);
+                            return false;
+                        }
+                    }
                     ok = set_decompiler_comment(row.func_addr, row.ea, text, row.comment_placement);
                 }
                 if (!ok) {
@@ -1767,6 +2218,93 @@ CachedTableDef<PseudocodeLine> define_pseudocode() {
         .filter_eq("line_num", [](int64_t line_num) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<PseudocodeLineNumIterator>(static_cast<int>(line_num));
         }, 200.0, 100.0)
+        .build();
+}
+
+CachedTableDef<OrphanCommentInfo> define_pseudocode_orphan_comments() {
+    return cached_table<OrphanCommentInfo>("pseudocode_orphan_comments")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t { return get_func_qty() * 3; })
+        .cache_builder([](std::vector<OrphanCommentInfo>& rows) {
+            collect_all_orphan_comments(rows);
+        })
+        .row_populator([](OrphanCommentInfo& row, int argc, xsql::FunctionArg* argv) {
+            if (argc > 2) row.func_addr = static_cast<ea_t>(argv[2].as_int64());
+            if (argc > 3 && !argv[3].is_null()) {
+                const char* v = argv[3].as_c_str();
+                row.func_name = v ? v : "";
+            }
+            if (argc > 4) row.ea = static_cast<ea_t>(argv[4].as_int64());
+            if (argc > 5 && !argv[5].is_null()) {
+                row.comment_placement = name_to_itp(argv[5].as_c_str());
+            }
+            if (argc > 6 && !argv[6].is_null()) {
+                const char* v = argv[6].as_c_str();
+                row.orphan_comment = v ? v : "";
+            }
+        })
+        .column_int64("func_addr", [](const OrphanCommentInfo& row) -> int64_t { return row.func_addr; })
+        .column_text("func_name", [](const OrphanCommentInfo& row) -> std::string { return row.func_name; })
+        .column_int64("ea", [](const OrphanCommentInfo& row) -> int64_t {
+            return row.ea != BADADDR ? static_cast<int64_t>(row.ea) : 0;
+        })
+        .column_text("comment_placement", [](const OrphanCommentInfo& row) -> std::string {
+            return itp_to_name(row.comment_placement);
+        })
+        .column_text_rw("orphan_comment",
+            [](const OrphanCommentInfo& row) -> std::string { return row.orphan_comment; },
+            [](OrphanCommentInfo& row, xsql::FunctionArg val) -> bool {
+                const char* text = nullptr;
+                if (!val.is_null()) {
+                    text = val.as_c_str();
+                }
+                const bool is_clear = (text == nullptr || text[0] == '\0');
+                if (!is_clear) {
+                    xsql::set_vtab_error(
+                        "orphan comments are delete-only; set orphan_comment = NULL or '' to remove them");
+                    return false;
+                }
+
+                const bool ok = delete_orphan_comment(row.func_addr, row.ea, row.comment_placement);
+                if (ok) {
+                    row.orphan_comment.clear();
+                }
+                return ok;
+            })
+        .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<OrphanCommentsInFuncIterator>(static_cast<ea_t>(func_addr));
+        }, 10.0)
+        .filter_eq("ea", [](int64_t ea) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<OrphanCommentsAtEaIterator>(static_cast<ea_t>(ea));
+        }, 20.0, 10.0)
+        .build();
+}
+
+CachedTableDef<OrphanCommentGroupInfo> define_pseudocode_orphan_comment_groups() {
+    return cached_table<OrphanCommentGroupInfo>("pseudocode_v_orphan_comment_groups")
+        .no_shared_cache()
+        .estimate_rows([]() -> size_t {
+            const size_t func_qty = get_func_qty();
+            return func_qty > 0 ? (func_qty / 4) + 1 : 1;
+        })
+        .cache_builder([](std::vector<OrphanCommentGroupInfo>& rows) {
+            collect_all_orphan_comment_groups(rows);
+        })
+        .column_int64("func_addr", [](const OrphanCommentGroupInfo& row) -> int64_t {
+            return static_cast<int64_t>(row.func_addr);
+        })
+        .column_text("func_name", [](const OrphanCommentGroupInfo& row) -> std::string {
+            return row.func_name;
+        })
+        .column_int("orphan_count", [](const OrphanCommentGroupInfo& row) -> int {
+            return row.orphan_count;
+        })
+        .column_text("orphan_comments_json", [](const OrphanCommentGroupInfo& row) -> std::string {
+            return row.orphan_comments_json;
+        })
+        .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<OrphanCommentGroupsInFuncIterator>(static_cast<ea_t>(func_addr));
+        }, 5.0, 1.0)
         .build();
 }
 
@@ -1981,6 +2519,27 @@ bool register_ctree_views(xsql::Database& db) {
     )";
     db.exec(v_calls);
 
+    const char* v_indirect_calls = R"(
+        CREATE VIEW IF NOT EXISTS ctree_v_indirect_calls AS
+        SELECT
+            c.func_addr,
+            c.item_id AS call_item_id,
+            c.ea AS call_ea,
+            x.item_id AS target_item_id,
+            x.op_name AS target_op,
+            x.var_idx AS target_var_idx,
+            x.var_name AS target_var_name,
+            x.obj_name AS call_obj_name,
+            x.helper_name AS call_helper_name,
+            (SELECT COUNT(*) FROM ctree_call_args a
+             WHERE a.func_addr = c.func_addr AND a.call_item_id = c.item_id) AS arg_count
+        FROM ctree c
+        LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
+        WHERE c.op_name = 'cot_call'
+          AND COALESCE(x.op_name, '') NOT IN ('cot_obj', 'cot_helper')
+    )";
+    db.exec(v_indirect_calls);
+
     const char* v_loops = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_loops AS
         SELECT * FROM ctree
@@ -2173,6 +2732,8 @@ bool register_ctree_views(xsql::Database& db) {
 
 DecompilerRegistry::DecompilerRegistry()
     : pseudocode(define_pseudocode())
+    , pseudocode_orphan_comments(define_pseudocode_orphan_comments())
+    , pseudocode_orphan_comment_groups(define_pseudocode_orphan_comment_groups())
     , ctree_lvars(define_ctree_lvars())
     , ctree_labels(define_ctree_labels())
     , ctree(define_ctree())
@@ -2190,6 +2751,12 @@ void DecompilerRegistry::register_all(xsql::Database& db) {
     // Cached table (query-scoped cache, freed when no cursors reference it)
     db.register_cached_table("ida_pseudocode", &pseudocode);
     db.create_table("pseudocode", "ida_pseudocode");
+
+    db.register_cached_table("ida_pseudocode_orphan_comments", &pseudocode_orphan_comments);
+    db.create_table("pseudocode_orphan_comments", "ida_pseudocode_orphan_comments");
+
+    db.register_cached_table("ida_pseudocode_orphan_comment_groups", &pseudocode_orphan_comment_groups);
+    db.create_table("pseudocode_v_orphan_comment_groups", "ida_pseudocode_orphan_comment_groups");
 
     db.register_cached_table("ida_ctree_lvars", &ctree_lvars);
     db.create_table("ctree_lvars", "ida_ctree_lvars");

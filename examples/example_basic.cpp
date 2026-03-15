@@ -20,6 +20,7 @@
 
 #include <iostream>
 #include <idasql/database.hpp>
+#include <idalib.hpp>
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -30,6 +31,12 @@ int main(int argc, char* argv[]) {
     // ==========================================================================
     // Open the IDA database using Session
     // ==========================================================================
+
+    int init_rc = init_library();
+    if (init_rc != 0) {
+        std::cerr << "Error: Failed to initialize IDA library: " << init_rc << "\n";
+        return 1;
+    }
 
     idasql::Session session;
 

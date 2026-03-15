@@ -55,6 +55,15 @@ bool init_hexrays();
 // Safe to call even if Hex-Rays is unavailable or ea is not in a function.
 void invalidate_decompiler_cache(ea_t ea);
 
+// Apply an explicit callee type to one call site.
+bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif);
+
+// Read explicit operand/call-site type info from a call instruction.
+bool get_callee_tinfo_at(ea_t call_ea, tinfo_t& out_tif);
+
+// Read stored argument-loader addresses for a call site.
+bool get_call_arg_addrs(ea_t call_ea, eavec_t& out_addrs);
+
 // ============================================================================
 // Data Structures
 // ============================================================================
@@ -71,6 +80,23 @@ struct PseudocodeLine {
     ea_t ea;              // Associated address (from COLOR_ADDR anchor)
     std::string comment;  // User comment at this ea (from restore_user_cmts)
     item_preciser_t comment_placement = ITP_SEMI;  // Comment placement type
+};
+
+// Persisted decompiler comments that no longer map to the current ctree/pseudocode.
+struct OrphanCommentInfo {
+    ea_t func_addr;
+    std::string func_name;
+    ea_t ea;
+    item_preciser_t comment_placement = ITP_SEMI;
+    std::string orphan_comment;
+};
+
+// One grouped orphan summary row per function.
+struct OrphanCommentGroupInfo {
+    ea_t func_addr;
+    std::string func_name;
+    int orphan_count = 0;
+    std::string orphan_comments_json;
 };
 
 // Local variable data
@@ -209,6 +235,18 @@ bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_addr);
 // Collect pseudocode for all functions
 void collect_all_pseudocode(std::vector<PseudocodeLine>& lines);
 
+// Collect orphan comments for a single function
+bool collect_orphan_comments(std::vector<OrphanCommentInfo>& rows, ea_t func_addr);
+
+// Collect orphan comments for all functions
+void collect_all_orphan_comments(std::vector<OrphanCommentInfo>& rows);
+
+// Collect grouped orphan comment summary for a single function.
+bool collect_orphan_comment_group(OrphanCommentGroupInfo& row, ea_t func_addr);
+
+// Collect grouped orphan comment summaries for all functions.
+void collect_all_orphan_comment_groups(std::vector<OrphanCommentGroupInfo>& rows);
+
 // Collect lvars for a single function
 bool collect_lvars(std::vector<LvarInfo>& vars, ea_t func_addr);
 
@@ -312,6 +350,48 @@ public:
     int64_t rowid() const override;
 };
 
+// Orphan comment iterator for single function
+class OrphanCommentsInFuncIterator : public xsql::RowIterator {
+    std::vector<OrphanCommentInfo> rows_;
+    size_t idx_ = 0;
+    bool started_ = false;
+
+public:
+    explicit OrphanCommentsInFuncIterator(ea_t func_addr);
+    bool next() override;
+    bool eof() const override;
+    void column(xsql::FunctionContext& ctx, int col) override;
+    int64_t rowid() const override;
+};
+
+// Orphan comment iterator for a single mapped address
+class OrphanCommentsAtEaIterator : public xsql::RowIterator {
+    std::vector<OrphanCommentInfo> rows_;
+    size_t idx_ = 0;
+    bool started_ = false;
+
+public:
+    explicit OrphanCommentsAtEaIterator(ea_t ea);
+    bool next() override;
+    bool eof() const override;
+    void column(xsql::FunctionContext& ctx, int col) override;
+    int64_t rowid() const override;
+};
+
+// Grouped orphan comment iterator for a single function.
+class OrphanCommentGroupsInFuncIterator : public xsql::RowIterator {
+    std::vector<OrphanCommentGroupInfo> rows_;
+    size_t idx_ = 0;
+    bool started_ = false;
+
+public:
+    explicit OrphanCommentGroupsInFuncIterator(ea_t func_addr);
+    bool next() override;
+    bool eof() const override;
+    void column(xsql::FunctionContext& ctx, int col) override;
+    int64_t rowid() const override;
+};
+
 // Lvars iterator for single function
 class LvarsInFuncIterator : public xsql::RowIterator {
     std::vector<LvarInfo> vars_;
@@ -398,6 +478,9 @@ bool set_decompiler_comment(ea_t func_addr, ea_t target_ea, const char* comment,
 // Clear any existing comment regardless of placement
 bool clear_decompiler_comment_all_placements(ea_t func_addr, ea_t target_ea);
 
+// Delete one orphan comment by exact treeloc.
+bool delete_orphan_comment(ea_t func_addr, ea_t target_ea, item_preciser_t itp);
+
 // Resolve an EA for a ctree item within a function
 bool get_ctree_item_ea(ea_t func_addr, int item_id, ea_t& out_ea);
 
@@ -447,6 +530,8 @@ bool rename_label(ea_t func_addr, int label_num, const char* new_name);
 // ============================================================================
 
 CachedTableDef<PseudocodeLine> define_pseudocode();
+CachedTableDef<OrphanCommentInfo> define_pseudocode_orphan_comments();
+CachedTableDef<OrphanCommentGroupInfo> define_pseudocode_orphan_comment_groups();
 CachedTableDef<LvarInfo> define_ctree_lvars();
 CachedTableDef<CtreeLabelInfo> define_ctree_labels();
 GeneratorTableDef<CtreeItem> define_ctree();
@@ -465,6 +550,8 @@ bool register_ctree_views(xsql::Database& db);
 struct DecompilerRegistry {
     // Cached tables (query-scoped cache, write support)
     CachedTableDef<PseudocodeLine> pseudocode;
+    CachedTableDef<OrphanCommentInfo> pseudocode_orphan_comments;
+    CachedTableDef<OrphanCommentGroupInfo> pseudocode_orphan_comment_groups;
     CachedTableDef<LvarInfo> ctree_lvars;
     CachedTableDef<CtreeLabelInfo> ctree_labels;
     // Generator tables (lazy full scans)

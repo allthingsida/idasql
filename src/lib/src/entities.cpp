@@ -29,6 +29,16 @@ std::string safe_func_prototype(ea_t ea) {
     return "";
 }
 
+std::string safe_func_comment(ea_t ea, bool repeatable) {
+    func_t* f = get_func(ea);
+    if (!f) return "";
+
+    qstring out;
+    const ssize_t len = get_func_cmt(&out, f, repeatable);
+    if (len <= 0) return "";
+    return std::string(out.c_str());
+}
+
 std::string safe_segm_name(segment_t* seg) {
     if (!seg) return "";
     qstring name;
@@ -89,6 +99,34 @@ bool get_func_type_details(ea_t ea, func_type_data_t& fi) {
     return tif.get_func_details(&fi);
 }
 
+bool update_function_comment(FuncRow& row, xsql::FunctionArg val, bool repeatable) {
+    if (val.is_nochange()) {
+        return true;
+    }
+
+    func_t* f = get_func(row.start_ea);
+    if (!f) return false;
+
+    const char* new_comment = val.is_null() ? nullptr : val.as_c_str();
+    const std::string requested_comment = new_comment ? new_comment : "";
+    std::string& original_comment = repeatable ? row.original_rpt_comment : row.original_comment;
+
+    // no_shared_cache() can replay the pre-update value during unrelated
+    // column updates; treat that exact replay as a no-op.
+    if (requested_comment == original_comment) {
+        return true;
+    }
+
+    auto_wait();
+    const bool ok = set_func_cmt(f, requested_comment.c_str(), repeatable);
+    if (ok) {
+        original_comment = requested_comment;
+        decompiler::invalidate_decompiler_cache(row.start_ea);
+    }
+    auto_wait();
+    return ok;
+}
+
 // ============================================================================
 // FUNCS Table (with UPDATE/DELETE support)
 // ============================================================================
@@ -112,6 +150,8 @@ CachedTableDef<FuncRow> define_funcs() {
             row.start_ea = f->start_ea;
             row.original_name = safe_func_name(row.start_ea);
             row.original_prototype = safe_func_prototype(row.start_ea);
+            row.original_comment = safe_func_comment(row.start_ea, false);
+            row.original_rpt_comment = safe_func_comment(row.start_ea, true);
             return true;
         })
         .column_int64("address", [](const FuncRow& row) -> int64_t {
@@ -158,6 +198,20 @@ CachedTableDef<FuncRow> define_funcs() {
                 if (ok) decompiler::invalidate_decompiler_cache(row.start_ea);
                 auto_wait();
                 return ok;
+            })
+        .column_text_rw("comment",
+            [](const FuncRow& row) -> std::string {
+                return safe_func_comment(row.start_ea, false);
+            },
+            [](FuncRow& row, xsql::FunctionArg val) -> bool {
+                return update_function_comment(row, val, false);
+            })
+        .column_text_rw("rpt_comment",
+            [](const FuncRow& row) -> std::string {
+                return safe_func_comment(row.start_ea, true);
+            },
+            [](FuncRow& row, xsql::FunctionArg val) -> bool {
+                return update_function_comment(row, val, true);
             })
         .column_int64("size", [](const FuncRow& row) -> int64_t {
             func_t* f = get_func(row.start_ea);
@@ -2249,24 +2303,28 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
             const char* key = argv[0].as_c_str();
             if (!key || !key[0]) return false;
 
-            netnode master = get_netnode_kv_master(true);
-            if (master == BADNODE) return false;
-
-            // Check if key already exists
-            nodeidx_t existing = master.hashval_long(key);
-            if (existing != 0) return false;
-
-            // Create entry netnode
-            netnode entry;
-            if (!entry.create()) return false;
-
             const char* val = "";
             if (argc > 1 && !argv[1].is_null()) {
                 val = argv[1].as_c_str();
                 if (!val) val = "";
             }
-
             size_t len = strlen(val);
+
+            netnode master = get_netnode_kv_master(true);
+            if (master == BADNODE) return false;
+
+            // Upsert: if key already exists, update its value
+            nodeidx_t existing = master.hashval_long(key);
+            if (existing != 0) {
+                netnode entry(existing);
+                entry.setblob(val, len, 0, stag);
+                return true;
+            }
+
+            // Create new entry netnode
+            netnode entry;
+            if (!entry.create()) return false;
+
             entry.setblob(val, len, 0, stag);
             nodeidx_t entry_id = static_cast<nodeidx_t>(entry);
             master.hashset(key, entry_id);

@@ -138,6 +138,7 @@ struct TablePrinter {
 #include <xsql/json.hpp>
 #endif
 #include <idasql/idapython.hpp>
+#include <idalib.hpp>
 #include <loader.hpp>  // save_database()
 
 struct idapython_runtime_guard_t {
@@ -963,6 +964,12 @@ int main(int argc, char* argv[]) {
     //=========================================================================
     // Local mode - requires IDA SDK
     //=========================================================================
+    int init_rc = init_library();
+    if (init_rc != 0) {
+        std::cerr << "Error: Failed to initialize IDA library: " << init_rc << std::endl;
+        return 1;
+    }
+
     std::cerr << "Opening: " << db_path << "..." << std::endl;
     idasql::Database db;
     if (!db.open(db_path.c_str())) {

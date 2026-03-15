@@ -38,6 +38,8 @@ static bool resolve_address_arg(
         const char* arg_name,
         ea_t& out_ea);
 
+static bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif);
+
 // ============================================================================
 // Disassembly Functions
 // ============================================================================
@@ -675,6 +677,51 @@ static void sql_type_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg*
     ctx.result_null();
 }
 
+static bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif) {
+    out_tif.clear();
+    if (decl_text == nullptr || *decl_text == '\0') {
+        return false;
+    }
+
+    std::string decl = decl_text;
+    while (!decl.empty() && std::isspace(static_cast<unsigned char>(decl.back()))) {
+        decl.pop_back();
+    }
+    if (decl.empty()) {
+        return false;
+    }
+    if (decl.back() != ';') {
+        decl.push_back(';');
+    }
+
+    qstring parsed_name;
+    bool ok = parse_decl(&out_tif, &parsed_name, nullptr, decl.c_str(), PT_SIL);
+    if (!ok) {
+        const size_t open_paren = decl.find('(');
+        const bool looks_like_funcptr = decl.find("(*") != std::string::npos
+            || decl.find("(__") != std::string::npos;
+        if (open_paren != std::string::npos && !looks_like_funcptr) {
+            std::string named_decl = decl;
+            named_decl.insert(open_paren, " __idasql_callee");
+            ok = parse_decl(&out_tif, &parsed_name, nullptr, named_decl.c_str(), PT_SIL);
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+
+    if (out_tif.is_funcptr()) {
+        out_tif = out_tif.get_pointed_object();
+    } else if (!out_tif.is_func() && out_tif.is_ptr()) {
+        tinfo_t pointed = out_tif.get_pointed_object();
+        if (pointed.is_func()) {
+            out_tif = pointed;
+        }
+    }
+
+    return out_tif.is_func();
+}
+
 // set_type(address, decl) - Apply C declaration/type at address
 // Returns: 1 on success, 0 on parse/apply failure
 static void sql_set_type(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
@@ -720,6 +767,95 @@ static void sql_parse_decls(xsql::FunctionContext& ctx, int argc, xsql::Function
     // Allow redeclarations while keeping parser behavior deterministic.
     const int errors = parse_decls(nullptr, decls, nullptr, HTI_DCL | HTI_HIGH | HTI_SEMICOLON);
     ctx.result_int(errors == 0 ? 1 : 0);
+}
+
+// apply_callee_type(call_ea, decl) - Apply an explicit callee prototype at one call site
+// Returns: 1 on success, 0 on parse/apply failure
+static void sql_apply_callee_type(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc < 2) {
+        ctx.result_error("apply_callee_type requires 2 arguments (call_ea, declaration)");
+        return;
+    }
+    if (!decompiler::hexrays_available()) {
+        ctx.result_error("Hex-Rays not available");
+        return;
+    }
+
+    ea_t call_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "call_ea", call_ea)) {
+        return;
+    }
+
+    const char* decl = argv[1].as_c_str();
+    if (decl == nullptr || *decl == '\0') {
+        ctx.result_error("apply_callee_type requires a non-empty declaration");
+        return;
+    }
+
+    tinfo_t tif;
+    if (!parse_callee_decl(decl, tif)) {
+        ctx.result_int(0);
+        return;
+    }
+
+    const bool ok = decompiler::apply_callee_tinfo_at(call_ea, tif);
+    ctx.result_int(ok ? 1 : 0);
+}
+
+// callee_type_at(call_ea) - Get the explicit call-site type, if any
+static void sql_callee_type_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc < 1) {
+        ctx.result_error("callee_type_at requires 1 argument (call_ea)");
+        return;
+    }
+    if (!decompiler::hexrays_available()) {
+        ctx.result_error("Hex-Rays not available");
+        return;
+    }
+
+    ea_t call_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "call_ea", call_ea)) {
+        return;
+    }
+
+    tinfo_t tif;
+    if (!decompiler::get_callee_tinfo_at(call_ea, tif)) {
+        ctx.result_null();
+        return;
+    }
+
+    qstring out;
+    if (!tif.print(&out, nullptr, PRTYPE_1LINE | PRTYPE_SEMI)) {
+        ctx.result_null();
+        return;
+    }
+    ctx.result_text(out.c_str());
+}
+
+// call_arg_addrs(call_ea) - Get persisted argument-loader addresses for a typed call site
+static void sql_call_arg_addrs(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    if (argc < 1) {
+        ctx.result_error("call_arg_addrs requires 1 argument (call_ea)");
+        return;
+    }
+    if (!decompiler::hexrays_available()) {
+        ctx.result_error("Hex-Rays not available");
+        return;
+    }
+
+    ea_t call_ea = BADADDR;
+    if (!resolve_address_arg(ctx, argv, 0, "call_ea", call_ea)) {
+        return;
+    }
+
+    eavec_t addrs;
+    xsql::json arr = xsql::json::array();
+    if (decompiler::get_call_arg_addrs(call_ea, addrs)) {
+        for (ea_t ea : addrs) {
+            arr.push_back(static_cast<int64_t>(ea));
+        }
+    }
+    ctx.result_text(arr.dump());
 }
 
 // ============================================================================
@@ -3336,6 +3472,9 @@ void register_sql_functions(xsql::Database& db) {
     if (decompiler::hexrays_available()) {
         db.register_function("decompile", 1, xsql::ScalarFn(sql_decompile));
         db.register_function("decompile", 2, xsql::ScalarFn(sql_decompile_2));
+        db.register_function("apply_callee_type", 2, xsql::ScalarFn(sql_apply_callee_type));
+        db.register_function("callee_type_at", 1, xsql::ScalarFn(sql_callee_type_at));
+        db.register_function("call_arg_addrs", 1, xsql::ScalarFn(sql_call_arg_addrs));
         db.register_function("list_lvars", 1, xsql::ScalarFn(sql_list_lvars));
         db.register_function("rename_lvar", 3, xsql::ScalarFn(sql_rename_lvar));
         db.register_function("rename_lvar_by_name", 3, xsql::ScalarFn(sql_rename_lvar_by_name));

@@ -35,6 +35,8 @@ struct FuncRow {
     ea_t start_ea = BADADDR;
     std::string original_name;
     std::string original_prototype;
+    std::string original_comment;
+    std::string original_rpt_comment;
 
     // Lazy-computed type details
     mutable func_type_data_t fi;

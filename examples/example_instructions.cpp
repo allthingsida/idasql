@@ -14,10 +14,17 @@
 #include <iostream>
 #include <iomanip>
 #include <idasql/database.hpp>
+#include <idalib.hpp>
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <database.i64>\n";
+        return 1;
+    }
+
+    int init_rc = init_library();
+    if (init_rc != 0) {
+        std::cerr << "Error: Failed to initialize IDA library: " << init_rc << "\n";
         return 1;
     }
 

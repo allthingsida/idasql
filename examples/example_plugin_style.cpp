@@ -18,6 +18,7 @@
 
 #include <iostream>
 #include <idasql/database.hpp>
+#include <idalib.hpp>
 
 // Simulates what your plugin code would look like
 void plugin_main() {
@@ -90,6 +91,12 @@ int main(int argc, char* argv[]) {
     }
 
     // Simulate IDA being open (in a plugin, this is already done)
+    int init_rc = init_library();
+    if (init_rc != 0) {
+        std::cerr << "Error: Failed to initialize IDA library: " << init_rc << "\n";
+        return 1;
+    }
+
     idasql::Session session;
     if (!session.open(argv[1])) {
         std::cerr << "Error: " << session.error() << "\n";

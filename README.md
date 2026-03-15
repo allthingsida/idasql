@@ -176,7 +176,7 @@ claude /install-plugin https://github.com/allthingsida/idasql-skills
 $ idasql
 Error: Database path required (-s)
 
-idasql v0.0.11 - SQL interface to IDA databases
+idasql v0.0.12 - SQL interface to IDA databases
 
 Usage: idasql -s <database> [-q <query>] [-f <file>] [-i] [--export <file>]
 

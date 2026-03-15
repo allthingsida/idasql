@@ -7,6 +7,7 @@
  * Usage:
  *   #include <idasql/idasql.hpp>
  *
+ *   init_library();
  *   idasql::Session session;
  *   session.open("database.i64");
  *   auto result = session.query("SELECT * FROM funcs LIMIT 10");

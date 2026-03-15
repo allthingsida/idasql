@@ -11,9 +11,10 @@
  *   - Just creates SQLite + virtual tables
  *   - No IDA lifecycle management
  *
- * TIER 2: Session (for standalone CLI tools)
- *   - Full IDA lifecycle: init_library + open_database + close
- *   - Use for tools like idasql.exe that manage everything
+ * TIER 2: Session (for pre-initialized standalone tools)
+ *   - Database lifecycle only: open_database + close
+ *   - Caller must initialize the IDA runtime before Session::open()
+ *   - Use for tools like idasql.exe after one-time init_library()
  *
  * TIER 3: Free functions (quick one-liners)
  *   - idasql::query(), idasql::exec(), idasql::execute()
@@ -233,16 +234,21 @@ private:
 };
 
 // ============================================================================
-// TIER 2: Session - Full IDA lifecycle management
+// TIER 2: Session - Database lifecycle management
 // ============================================================================
 
 /**
- * Session - Manages THE IDA database session
+ * Session - Manages THE IDA database session after runtime initialization
  *
- * Use this for standalone tools that need to open/close IDA databases.
+ * Use this for standalone tools that need to open/close IDA databases
+ * after calling init_library() once for the process.
  * Remember: IDA is singleton, so there's only ever ONE session.
  *
  * Example (CLI tool):
+ *   if (init_library() != 0) {
+ *       std::cerr << "init failed" << std::endl;
+ *       return 1;
+ *   }
  *   idasql::Session session;
  *   if (!session.open("binary.i64")) {
  *       std::cerr << session.error() << std::endl;
