@@ -1309,6 +1309,19 @@ void TypesRegistry::create_views(xsql::Database& db) {
     db.exec("CREATE VIEW IF NOT EXISTS types_v_enums AS SELECT * FROM types WHERE is_enum = 1");
     db.exec("CREATE VIEW IF NOT EXISTS types_v_typedefs AS SELECT * FROM types WHERE is_typedef = 1");
     db.exec("CREATE VIEW IF NOT EXISTS types_v_funcs AS SELECT * FROM types WHERE is_func = 1");
+
+    // Inheritance view: struct/class base classes
+    db.exec(R"(
+        CREATE VIEW IF NOT EXISTS types_v_inheritance AS
+        SELECT
+            m.type_ordinal as derived_ordinal,
+            m.type_name as derived_name,
+            m.member_type as base_type_name,
+            m.member_type_ordinal as base_ordinal,
+            m."offset" as base_offset
+        FROM types_members m
+        WHERE m.is_baseclass = 1
+    )");
 }
 
 } // namespace types

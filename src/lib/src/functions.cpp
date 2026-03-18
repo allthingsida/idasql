@@ -1728,30 +1728,30 @@ static void sql_gen_schema_dot(xsql::FunctionContext& ctx, int argc, xsql::Funct
     if (!ctx.query_each(
             "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') ORDER BY name",
             [&](const xsql::QueryRow& row) {
-                const char* name = row.text(0);
-                const char* type = row.text(1);
-                if (!name) return;
+                if (row.is_null(0)) return;
+                std::string name = row.text(0);
+                std::string type = row.text(1);
 
                 tables.push_back(name);
 
                 // Get column info for this table
-                std::string pragma = "PRAGMA table_info('" + escape_sql_text(name) + "')";
+                std::string pragma = "PRAGMA table_info('" + escape_sql_text(name.c_str()) + "')";
                 bool emitted = false;
                 bool first = true;
                 ctx.query_each(pragma, [&](const xsql::QueryRow& col_row) {
                     if (!emitted) {
                         dot << "  " << name << " [label=\"{" << name;
-                        if (type && strcmp(type, "view") == 0) dot << " (view)";
+                        if (type == "view") dot << " (view)";
                         dot << "|";
                         emitted = true;
                     }
 
-                    const char* col_name = col_row.text(1);
-                    const char* col_type = col_row.text(2);
+                    std::string col_name = col_row.is_null(1) ? "?" : col_row.text(1);
+                    std::string col_type = col_row.is_null(2) ? "" : col_row.text(2);
                     if (!first) dot << "\\l";
                     first = false;
-                    dot << (col_name ? col_name : "?");
-                    if (col_type && strlen(col_type) > 0) {
+                    dot << col_name;
+                    if (!col_type.empty()) {
                         dot << " : " << col_type;
                     }
                 });
@@ -3238,20 +3238,18 @@ static void sql_grep(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* ar
     xsql::json arr = xsql::json::array();
     std::string err;
     if (!ctx.query_each(query.str(), [&](const xsql::QueryRow& row) {
-        const char* name = row.text(0);
-        const char* kind = row.text(1);
-        const char* parent = row.text(4);
-        const char* full_name = row.text(5);
+        std::string name = row.is_null(0) ? "" : row.text(0);
+        std::string kind = row.is_null(1) ? "" : row.text(1);
 
         xsql::json obj = {
-            {"name", name ? name : ""},
-            {"kind", kind ? kind : ""},
-            {"full_name", full_name ? full_name : ""}
+            {"name", name},
+            {"kind", kind},
+            {"full_name", row.is_null(5) ? "" : row.text(5)}
         };
 
         obj["address"] = row.is_null(2) ? xsql::json(nullptr) : xsql::json(row.int64_value(2));
         obj["ordinal"] = row.is_null(3) ? xsql::json(nullptr) : xsql::json(row.int_value(3));
-        obj["parent_name"] = parent ? xsql::json(parent) : xsql::json(nullptr);
+        obj["parent_name"] = row.is_null(4) ? xsql::json(nullptr) : xsql::json(row.text(4));
         arr.push_back(obj);
     }, &err)) {
         std::string err_msg = "grep query error: " + err;

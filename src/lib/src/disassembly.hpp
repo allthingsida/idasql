@@ -4,7 +4,7 @@
 /**
  * disassembly.hpp - Disassembly-level SQL tables
  *
- * Tables: disasm_calls, disasm_loops
+ * Tables: disasm_calls, disasm_loops, call_graph, shortest_path, cfg_edges
  */
 
 #pragma once
@@ -18,6 +18,9 @@
 
 #include <vector>
 #include <string>
+#include <unordered_set>
+#include <unordered_map>
+#include <queue>
 
 namespace idasql {
 namespace disassembly {
@@ -40,15 +43,49 @@ struct LoopInfo {
     ea_t back_edge_block_end;
 };
 
+// call_graph virtual table row
+struct CallGraphRow {
+    ea_t func_addr = BADADDR;
+    std::string func_name;
+    int depth = 0;
+    ea_t parent_addr = BADADDR;
+};
+
+// shortest_path virtual table row
+struct ShortestPathRow {
+    int step = 0;
+    ea_t func_addr = BADADDR;
+    std::string func_name;
+};
+
+// cfg_edges table row
+struct CfgEdgeInfo {
+    ea_t func_ea;
+    ea_t from_block;
+    ea_t to_block;
+    std::string edge_type;  // "normal", "true", "false"
+};
+
 void collect_loops_for_func(std::vector<LoopInfo>& loops, func_t* pfn);
+
+// Get callees of a function (used by call_graph BFS)
+void get_function_callees(ea_t func_addr, std::vector<ea_t>& callees);
+// Get callers of a function (used by call_graph reverse BFS)
+void get_function_callers(ea_t func_addr, std::vector<ea_t>& callers);
 
 GeneratorTableDef<DisasmCallInfo> define_disasm_calls();
 GeneratorTableDef<LoopInfo> define_disasm_loops();
+GeneratorTableDef<CallGraphRow> define_call_graph();
+GeneratorTableDef<ShortestPathRow> define_shortest_path();
+GeneratorTableDef<CfgEdgeInfo> define_cfg_edges();
 bool register_disasm_views(xsql::Database& db);
 
 struct DisassemblyRegistry {
     GeneratorTableDef<DisasmCallInfo> disasm_calls;
     GeneratorTableDef<LoopInfo> disasm_loops;
+    GeneratorTableDef<CallGraphRow> call_graph;
+    GeneratorTableDef<ShortestPathRow> shortest_path;
+    GeneratorTableDef<CfgEdgeInfo> cfg_edges;
 
     DisassemblyRegistry();
     void register_all(xsql::Database& db);
