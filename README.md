@@ -426,4 +426,4 @@ Tools: `idasql_query` (direct SQL)
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+This project is licensed under the [Mozilla Public License 2.0](LICENSE).

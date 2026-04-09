@@ -24,6 +24,6 @@
       "linux-x86_64",
       "macos-aarch64"
     ],
-    "license": "MIT"
+    "license": "MPL-2.0"
   }
 }

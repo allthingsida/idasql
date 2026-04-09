@@ -1,5 +1,9 @@
-// Copyright (c) Elias Bachaalany
-// SPDX-License-Identifier: MIT
+// Copyright (c) 2024-2026 Elias Bachaalany
+// SPDX-License-Identifier: MPL-2.0
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "entities.hpp"
 #include "entities_search.hpp"
@@ -1218,7 +1222,7 @@ CachedTableDef<FunctionChunkInfo> define_function_chunks() {
         cache.reserve(chunk_qty);
 
         for (size_t i = 0; i < chunk_qty; i++) {
-          func_t *chunk = getn_fchunk(i);
+          func_t *chunk = getn_fchunk(static_cast<int>(i));
           if (!chunk)
             continue;
 

@@ -1,5 +1,9 @@
-// Copyright (c) Elias Bachaalany
-// SPDX-License-Identifier: MIT
+// Copyright (c) 2024-2026 Elias Bachaalany
+// SPDX-License-Identifier: MPL-2.0
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "entities_dbg.hpp"
 
@@ -58,50 +62,50 @@ VTableDef define_breakpoints() {
         // Column 0: address (R)
         .column_int64("address", [](size_t i) -> int64_t {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return 0;
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return static_cast<int64_t>(bpt.ea);
         })
         // Column 1: enabled (RW)
         .column_int_rw("enabled",
             [](size_t i) -> int {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return 0;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
                 return bpt.enabled() ? 1 : 0;
             },
             [](size_t i, int val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
                 return enable_bpt(bpt.loc, val != 0);
             })
         // Column 2: type (RW)
         .column_int_rw("type",
             [](size_t i) -> int {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return 0;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
                 return static_cast<int>(bpt.type);
             },
             [](size_t i, int val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
                 bpt.type = static_cast<bpttype_t>(val);
                 return update_bpt(&bpt);
             })
         // Column 3: type_name (R)
         .column_text("type_name", [](size_t i) -> std::string {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return "";
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             return bpt_type_name(bpt.type);
         })
         // Column 4: size (RW)
         .column_int_rw("size",
             [](size_t i) -> int {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return 0;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
                 return bpt.size;
             },
             [](size_t i, int val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
                 bpt.size = val;
                 return update_bpt(&bpt);
             })
@@ -109,12 +113,12 @@ VTableDef define_breakpoints() {
         .column_int64_rw("flags",
             [](size_t i) -> int64_t {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return 0;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
                 return static_cast<int64_t>(bpt.flags);
             },
             [](size_t i, int64_t val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
                 // Preserve BPT_ENABLED from current state so flags writes
                 // don't undo enable_bpt() calls during batch vtable updates
                 uint32 cur_enabled = bpt.flags & BPT_ENABLED;
@@ -125,12 +129,12 @@ VTableDef define_breakpoints() {
         .column_int_rw("pass_count",
             [](size_t i) -> int {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return 0;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
                 return bpt.pass_count;
             },
             [](size_t i, int val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
                 bpt.pass_count = val;
                 return update_bpt(&bpt);
             })
@@ -138,43 +142,43 @@ VTableDef define_breakpoints() {
         .column_text_rw("condition",
             [](size_t i) -> std::string {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return "";
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
                 return std::string(bpt.cndbody.c_str());
             },
             [](size_t i, const char* val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
                 bpt.cndbody = val;
                 return update_bpt(&bpt);
             })
         // Column 8: loc_type (R)
         .column_int("loc_type", [](size_t i) -> int {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return 0;
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return bpt.loc.type();
         })
         // Column 9: loc_type_name (R)
         .column_text("loc_type_name", [](size_t i) -> std::string {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return "";
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             return bpt_loc_type_name(bpt.loc.type());
         })
         // Column 10: module (R)
         .column_text("module", [](size_t i) -> std::string {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return "";
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             return safe_bpt_loc_path(bpt);
         })
         // Column 11: symbol (R)
         .column_text("symbol", [](size_t i) -> std::string {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return "";
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             return safe_bpt_loc_symbol(bpt);
         })
         // Column 12: offset (R)
         .column_int64("offset", [](size_t i) -> int64_t {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return 0;
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             int lt = bpt.loc.type();
             if (lt == BPLT_REL || lt == BPLT_SYM)
                 return static_cast<int64_t>(bpt.loc.offset());
@@ -183,7 +187,7 @@ VTableDef define_breakpoints() {
         // Column 13: source_file (R)
         .column_text("source_file", [](size_t i) -> std::string {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return "";
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             if (bpt.loc.type() == BPLT_SRC) {
                 const char* p = bpt.loc.path();
                 return p ? std::string(p) : "";
@@ -193,7 +197,7 @@ VTableDef define_breakpoints() {
         // Column 14: source_line (R)
         .column_int("source_line", [](size_t i) -> int {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return 0;
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             if (bpt.loc.type() == BPLT_SRC)
                 return bpt.loc.lineno();
             return 0;
@@ -201,37 +205,37 @@ VTableDef define_breakpoints() {
         // Column 15: is_hardware (R)
         .column_int("is_hardware", [](size_t i) -> int {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return 0;
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return bpt.is_hwbpt() ? 1 : 0;
         })
         // Column 16: is_active (R)
         .column_int("is_active", [](size_t i) -> int {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return 0;
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return bpt.is_active() ? 1 : 0;
         })
         // Column 17: group (RW)
         .column_text_rw("group",
             [](size_t i) -> std::string {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return "";
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
                 return safe_bpt_group(bpt);
             },
             [](size_t i, const char* val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(i, &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
                 return set_bpt_group(bpt, val);
             })
         // Column 18: bptid (R)
         .column_int64("bptid", [](size_t i) -> int64_t {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return 0;
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return static_cast<int64_t>(bpt.bptid);
         })
         // DELETE support
         .deletable([](size_t i) -> bool {
             bpt_t bpt;
-            if (!getn_bpt(i, &bpt)) return false;
+            if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
             return del_bpt(bpt.loc);
         })
         // INSERT support

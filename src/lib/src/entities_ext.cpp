@@ -1,5 +1,9 @@
-// Copyright (c) Elias Bachaalany
-// SPDX-License-Identifier: MIT
+// Copyright (c) 2024-2026 Elias Bachaalany
+// SPDX-License-Identifier: MPL-2.0
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 #include "entities_ext.hpp"
 
@@ -188,29 +192,29 @@ VTableDef define_fchunks() {
             return get_fchunk_qty();
         })
         .column_int64("start_ea", [](size_t i) -> int64_t {
-            func_t* chunk = getn_fchunk(i);
+            func_t* chunk = getn_fchunk(static_cast<int>(i));
             return chunk ? chunk->start_ea : 0;
         })
         .column_int64("end_ea", [](size_t i) -> int64_t {
-            func_t* chunk = getn_fchunk(i);
+            func_t* chunk = getn_fchunk(static_cast<int>(i));
             return chunk ? chunk->end_ea : 0;
         })
         .column_int64("size", [](size_t i) -> int64_t {
-            func_t* chunk = getn_fchunk(i);
+            func_t* chunk = getn_fchunk(static_cast<int>(i));
             return chunk ? chunk->size() : 0;
         })
         .column_int64("owner", [](size_t i) -> int64_t {
-            func_t* chunk = getn_fchunk(i);
+            func_t* chunk = getn_fchunk(static_cast<int>(i));
             if (!chunk) return 0;
             func_t* owner = get_func(chunk->start_ea);
             return owner ? owner->start_ea : 0;
         })
         .column_int("flags", [](size_t i) -> int {
-            func_t* chunk = getn_fchunk(i);
-            return chunk ? chunk->flags : 0;
+            func_t* chunk = getn_fchunk(static_cast<int>(i));
+            return chunk ? static_cast<int>(chunk->flags) : 0;
         })
         .column_int("is_tail", [](size_t i) -> int {
-            func_t* chunk = getn_fchunk(i);
+            func_t* chunk = getn_fchunk(static_cast<int>(i));
             return chunk ? ((chunk->flags & FUNC_TAIL) ? 1 : 0) : 0;
         })
         .build();
