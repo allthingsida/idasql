@@ -1,3 +1,4 @@
+_build*/
 .cache/
 claude-skill/bin/idasql.exe
 # Generated files
