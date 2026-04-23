@@ -2052,23 +2052,41 @@ bool rename_label(ea_t func_addr, int label_num, const char* new_name) {
 }
 
 bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
-    if (!hexrays_available())
+    const std::string ctx = "func=" + format_ea_hex(func_addr) +
+                            " idx=" + std::to_string(lvar_idx);
+    if (!hexrays_available()) {
+        xsql::set_vtab_error("cannot set lvar type: Hex-Rays decompiler is unavailable (" + ctx + ")");
         return false;
+    }
 
     func_t* f = get_func(func_addr);
-    if (!f)
+    if (!f) {
+        xsql::set_vtab_error("cannot set lvar type: function not found (" + ctx + ")");
         return false;
+    }
 
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile(f, &hf);
-    if (!cfunc)
+    if (!cfunc) {
+        xsql::set_vtab_error("cannot set lvar type: decompilation failed (" + ctx + ")");
         return false;
+    }
 
     lvars_t* lvars = cfunc->get_lvars();
-    if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size())
+    if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size()) {
+        xsql::set_vtab_error("cannot set lvar type: lvar index out of range (" + ctx + ")");
         return false;
+    }
 
     lvar_t& lv = (*lvars)[lvar_idx];
+
+    // Idempotent: if the current type display string matches the request,
+    // skip the mutation.  This avoids spurious failures when the vtab
+    // framework replays unchanged column values during a different-column
+    // UPDATE (no_shared_cache tables fire ALL writable setters).
+    qstring current_type_str;
+    lv.type().print(&current_type_str);
+    if (type_str && current_type_str == type_str) return true;
 
     // Parse type string - try named type first, then parse as declaration
     tinfo_t tif;
@@ -2077,8 +2095,12 @@ bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
         qstring decl;
         decl.sprnt("%s __x;", type_str);
         qstring out_name;
-        if (!parse_decl(&tif, &out_name, nullptr, decl.c_str(), PT_SIL))
+        if (!parse_decl(&tif, &out_name, nullptr, decl.c_str(), PT_SIL)) {
+            xsql::set_vtab_error(
+                "cannot set lvar type: failed to parse type '" +
+                std::string(type_str ? type_str : "") + "' (" + ctx + ")");
             return false;
+        }
     }
 
     // Use modify_user_lvar_info to persist the type change
@@ -2088,36 +2110,58 @@ bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
     lsi.flags = 0;  // No special flags needed
 
     bool ok = modify_user_lvar_info(func_addr, MLI_TYPE, lsi);
-    if (ok) invalidate_decompiler_cache(func_addr);
+    if (ok) {
+        invalidate_decompiler_cache(func_addr);
+    } else {
+        xsql::set_vtab_error("cannot set lvar type: modify_user_lvar_info failed (" + ctx + ")");
+    }
     return ok;
 }
 
 bool set_lvar_comment_at(ea_t func_addr, int lvar_idx, const char* comment) {
-    if (!hexrays_available())
+    const std::string ctx = "func=" + format_ea_hex(func_addr) +
+                            " idx=" + std::to_string(lvar_idx);
+    if (!hexrays_available()) {
+        xsql::set_vtab_error("cannot set lvar comment: Hex-Rays decompiler is unavailable (" + ctx + ")");
         return false;
+    }
 
     func_t* f = get_func(func_addr);
-    if (!f)
+    if (!f) {
+        xsql::set_vtab_error("cannot set lvar comment: function not found (" + ctx + ")");
         return false;
+    }
 
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile(f, &hf);
-    if (!cfunc)
+    if (!cfunc) {
+        xsql::set_vtab_error("cannot set lvar comment: decompilation failed (" + ctx + ")");
         return false;
+    }
 
     lvars_t* lvars = cfunc->get_lvars();
-    if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size())
+    if (!lvars || lvar_idx < 0 || static_cast<size_t>(lvar_idx) >= lvars->size()) {
+        xsql::set_vtab_error("cannot set lvar comment: lvar index out of range (" + ctx + ")");
         return false;
+    }
 
     lvar_t& lv = (*lvars)[lvar_idx];
 
+    // Idempotent: skip if current comment matches the request.
+    const std::string requested_cmt = comment ? comment : "";
+    if (std::string(lv.cmt.c_str()) == requested_cmt) return true;
+
     lvar_saved_info_t lsi;
     lsi.ll = lv;  // Copy lvar_locator_t
-    lsi.cmt = comment ? comment : "";
+    lsi.cmt = requested_cmt.c_str();
     lsi.flags = 0;
 
     bool ok = modify_user_lvar_info(func_addr, MLI_CMT, lsi);
-    if (ok) invalidate_decompiler_cache(func_addr);
+    if (ok) {
+        invalidate_decompiler_cache(func_addr);
+    } else {
+        xsql::set_vtab_error("cannot set lvar comment: modify_user_lvar_info failed (" + ctx + ")");
+    }
     return ok;
 }
 
@@ -2343,15 +2387,24 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
                 return row.name;
             },
             [](LvarInfo& row, const char* new_name) -> bool {
-                bool ok = rename_lvar_at(row.func_addr, row.idx, new_name);
-                if (ok) row.name = new_name ? new_name : "";
-                return ok;
+                // rename_lvar_at_ex handles unchanged names internally
+                auto r = rename_lvar_at_ex(row.func_addr, row.idx, new_name);
+                if (r.success && (r.applied || r.reason == "unchanged")) {
+                    row.name = new_name ? new_name : "";
+                    return true;
+                }
+                xsql::set_vtab_error(
+                    "ctree_lvars rename failed: " + r.reason +
+                    " (func=" + format_ea_hex(r.func_addr) +
+                    " idx=" + std::to_string(r.lvar_idx) + ")");
+                return false;
             })
         .column_text_rw("type",
             [](const LvarInfo& row) -> std::string {
                 return row.type;
             },
             [](LvarInfo& row, const char* new_type) -> bool {
+                // set_lvar_type_at handles unchanged types internally
                 bool ok = set_lvar_type_at(row.func_addr, row.idx, new_type);
                 if (ok) row.type = new_type ? new_type : "";
                 return ok;
@@ -2361,6 +2414,7 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
                 return row.comment;
             },
             [](LvarInfo& row, const char* new_comment) -> bool {
+                // set_lvar_comment_at handles unchanged comments internally
                 bool ok = set_lvar_comment_at(row.func_addr, row.idx, new_comment);
                 if (ok) row.comment = new_comment ? new_comment : "";
                 return ok;
@@ -2401,9 +2455,17 @@ CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
                 return row.name;
             },
             [](CtreeLabelInfo& row, const char* new_name) -> bool {
+                const std::string requested = new_name ? new_name : "";
+                if (requested == row.name) return true;
                 bool ok = rename_label(row.func_addr, row.label_num, new_name);
-                if (!ok) return false;
-                row.name = new_name ? new_name : "";
+                if (!ok) {
+                    xsql::set_vtab_error(
+                        "ctree_labels rename failed (func=" +
+                        format_ea_hex(row.func_addr) +
+                        " label=" + std::to_string(row.label_num) + ")");
+                    return false;
+                }
+                row.name = requested;
                 row.is_user_defined = row.name != default_label_name(row.label_num);
                 return true;
             })

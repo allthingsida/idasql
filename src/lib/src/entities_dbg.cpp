@@ -74,8 +74,13 @@ VTableDef define_breakpoints() {
             },
             [](size_t i, int val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
-                return enable_bpt(bpt.loc, val != 0);
+                if (!getn_bpt(static_cast<int>(i), &bpt)) {
+                    xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
+                    return false;
+                }
+                bool ok = enable_bpt(bpt.loc, val != 0);
+                if (!ok) xsql::set_vtab_error("breakpoints: failed to set enabled state");
+                return ok;
             })
         // Column 2: type (RW)
         .column_int_rw("type",
@@ -86,9 +91,14 @@ VTableDef define_breakpoints() {
             },
             [](size_t i, int val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) {
+                    xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
+                    return false;
+                }
                 bpt.type = static_cast<bpttype_t>(val);
-                return update_bpt(&bpt);
+                bool ok = update_bpt(&bpt);
+                if (!ok) xsql::set_vtab_error("breakpoints: failed to update type");
+                return ok;
             })
         // Column 3: type_name (R)
         .column_text("type_name", [](size_t i) -> std::string {
@@ -105,9 +115,14 @@ VTableDef define_breakpoints() {
             },
             [](size_t i, int val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) {
+                    xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
+                    return false;
+                }
                 bpt.size = val;
-                return update_bpt(&bpt);
+                bool ok = update_bpt(&bpt);
+                if (!ok) xsql::set_vtab_error("breakpoints: failed to update size");
+                return ok;
             })
         // Column 5: flags (RW)
         .column_int64_rw("flags",
@@ -118,12 +133,17 @@ VTableDef define_breakpoints() {
             },
             [](size_t i, int64_t val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) {
+                    xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
+                    return false;
+                }
                 // Preserve BPT_ENABLED from current state so flags writes
                 // don't undo enable_bpt() calls during batch vtable updates
                 uint32 cur_enabled = bpt.flags & BPT_ENABLED;
                 bpt.flags = (static_cast<uint32>(val) & ~BPT_ENABLED) | cur_enabled;
-                return update_bpt(&bpt);
+                bool ok = update_bpt(&bpt);
+                if (!ok) xsql::set_vtab_error("breakpoints: failed to update flags");
+                return ok;
             })
         // Column 6: pass_count (RW)
         .column_int_rw("pass_count",
@@ -134,9 +154,14 @@ VTableDef define_breakpoints() {
             },
             [](size_t i, int val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) {
+                    xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
+                    return false;
+                }
                 bpt.pass_count = val;
-                return update_bpt(&bpt);
+                bool ok = update_bpt(&bpt);
+                if (!ok) xsql::set_vtab_error("breakpoints: failed to update pass_count");
+                return ok;
             })
         // Column 7: condition (RW)
         .column_text_rw("condition",
@@ -147,9 +172,14 @@ VTableDef define_breakpoints() {
             },
             [](size_t i, const char* val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
+                if (!getn_bpt(static_cast<int>(i), &bpt)) {
+                    xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
+                    return false;
+                }
                 bpt.cndbody = val;
-                return update_bpt(&bpt);
+                bool ok = update_bpt(&bpt);
+                if (!ok) xsql::set_vtab_error("breakpoints: failed to update condition");
+                return ok;
             })
         // Column 8: loc_type (R)
         .column_int("loc_type", [](size_t i) -> int {
@@ -223,8 +253,13 @@ VTableDef define_breakpoints() {
             },
             [](size_t i, const char* val) -> bool {
                 bpt_t bpt;
-                if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
-                return set_bpt_group(bpt, val);
+                if (!getn_bpt(static_cast<int>(i), &bpt)) {
+                    xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
+                    return false;
+                }
+                bool ok = set_bpt_group(bpt, val);
+                if (!ok) xsql::set_vtab_error("breakpoints: failed to set group");
+                return ok;
             })
         // Column 18: bptid (R)
         .column_int64("bptid", [](size_t i) -> int64_t {

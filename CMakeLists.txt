@@ -81,7 +81,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/lib/include)
 # MCP Support (optional)
 # ============================================================================
 
-option(IDASQL_WITH_MCP "Build with MCP server support (fastmcpp)" OFF)
+option(IDASQL_WITH_MCP "Build with MCP server support (fastmcpp)" ON)
 
 if(IDASQL_WITH_MCP)
     message(STATUS "idasql: Building with MCP support via fastmcpp")

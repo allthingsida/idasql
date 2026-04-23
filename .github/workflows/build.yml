@@ -32,7 +32,7 @@ jobs:
         run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_MCP=OFF -DIDASQL_BUILD_EXAMPLES=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Build
         run: cmake --build build --config Release
@@ -65,7 +65,7 @@ jobs:
         run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_WITH_MCP=OFF -DIDASQL_BUILD_EXAMPLES=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Build
         run: cmake --build build --config Release
@@ -100,7 +100,7 @@ jobs:
         run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
 
       - name: Configure
-        run: cmake -B build -DIDASQL_WITH_MCP=OFF -DIDASQL_BUILD_EXAMPLES=ON
+        run: cmake -B build -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Build
         run: cmake --build build --config Release

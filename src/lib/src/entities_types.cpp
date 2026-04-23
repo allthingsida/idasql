@@ -128,16 +128,27 @@ CachedTableDef<TypeEntry> define_types() {
                 return row.name;
             },
             [](TypeEntry& row, const char* new_name) -> bool {
-                if (!new_name || !new_name[0]) return false;
+                if (!new_name || !new_name[0]) {
+                    xsql::set_vtab_error("types: name cannot be empty (ordinal=" + std::to_string(row.ordinal) + ")");
+                    return false;
+                }
 
                 til_t* ti = get_idati();
-                if (!ti) return false;
+                if (!ti) {
+                    xsql::set_vtab_error("types: type library not available");
+                    return false;
+                }
 
                 tinfo_t tif;
-                if (!tif.get_numbered_type(ti, row.ordinal)) return false;
+                if (!tif.get_numbered_type(ti, row.ordinal)) {
+                    xsql::set_vtab_error("types: ordinal " + std::to_string(row.ordinal) + " not found");
+                    return false;
+                }
 
                 bool ok = tif.rename_type(new_name) == TERR_OK;
                 if (ok) row.name = new_name;
+                else xsql::set_vtab_error("types: failed to rename ordinal " +
+                                          std::to_string(row.ordinal) + " to '" + new_name + "'");
                 return ok;
             })
         .column_text("kind", [](const TypeEntry& row) -> std::string {
@@ -499,12 +510,20 @@ CachedTableDef<MemberEntry> define_types_members() {
                 return row.member_name;
             },
             [](MemberEntry& row, const char* new_name) -> bool {
+                const std::string ctx = "type=" + row.type_name + " member=" + std::to_string(row.member_index);
                 TypeMemberRef ref(row.type_ordinal);
-                if (!ref.valid) return false;
-                if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) return false;
+                if (!ref.valid) {
+                    xsql::set_vtab_error("types_members: type not found (" + ctx + ")");
+                    return false;
+                }
+                if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) {
+                    xsql::set_vtab_error("types_members: member index out of range (" + ctx + ")");
+                    return false;
+                }
                 ref.udt[row.member_index].name = new_name ? new_name : "";
                 bool ok = ref.save();
                 if (ok) row.member_name = new_name ? new_name : "";
+                else xsql::set_vtab_error("types_members: failed to save (" + ctx + ")");
                 return ok;
             })
         .column_int64("offset", [](const MemberEntry& row) -> int64_t {
@@ -533,12 +552,20 @@ CachedTableDef<MemberEntry> define_types_members() {
                 return row.comment;
             },
             [](MemberEntry& row, const char* new_comment) -> bool {
+                const std::string ctx = "type=" + row.type_name + " member=" + std::to_string(row.member_index);
                 TypeMemberRef ref(row.type_ordinal);
-                if (!ref.valid) return false;
-                if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) return false;
+                if (!ref.valid) {
+                    xsql::set_vtab_error("types_members: type not found (" + ctx + ")");
+                    return false;
+                }
+                if (row.member_index < 0 || static_cast<size_t>(row.member_index) >= ref.udt.size()) {
+                    xsql::set_vtab_error("types_members: member index out of range (" + ctx + ")");
+                    return false;
+                }
                 ref.udt[row.member_index].cmt = new_comment ? new_comment : "";
                 bool ok = ref.save();
                 if (ok) row.comment = new_comment ? new_comment : "";
+                else xsql::set_vtab_error("types_members: failed to save (" + ctx + ")");
                 return ok;
             })
         .column_int("mt_is_struct", [](const MemberEntry& row) -> int {
@@ -798,12 +825,20 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
                 return row.value_name;
             },
             [](EnumValueEntry& row, const char* new_name) -> bool {
+                const std::string ctx = "enum=" + row.type_name + " value_index=" + std::to_string(row.value_index);
                 EnumTypeRef ref(row.type_ordinal);
-                if (!ref.valid) return false;
-                if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) return false;
+                if (!ref.valid) {
+                    xsql::set_vtab_error("types_enum_values: enum type not found (" + ctx + ")");
+                    return false;
+                }
+                if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) {
+                    xsql::set_vtab_error("types_enum_values: value index out of range (" + ctx + ")");
+                    return false;
+                }
                 ref.ei[row.value_index].name = new_name ? new_name : "";
                 bool ok = ref.save();
                 if (ok) row.value_name = new_name ? new_name : "";
+                else xsql::set_vtab_error("types_enum_values: failed to save (" + ctx + ")");
                 return ok;
             })
         .column_int64_rw("value",
@@ -811,14 +846,23 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
                 return row.value;
             },
             [](EnumValueEntry& row, int64_t new_value) -> bool {
+                const std::string ctx = "enum=" + row.type_name + " value_index=" + std::to_string(row.value_index);
                 EnumTypeRef ref(row.type_ordinal);
-                if (!ref.valid) return false;
-                if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) return false;
+                if (!ref.valid) {
+                    xsql::set_vtab_error("types_enum_values: enum type not found (" + ctx + ")");
+                    return false;
+                }
+                if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) {
+                    xsql::set_vtab_error("types_enum_values: value index out of range (" + ctx + ")");
+                    return false;
+                }
                 ref.ei[row.value_index].value = static_cast<uint64_t>(new_value);
                 bool ok = ref.save();
                 if (ok) {
                     row.value = new_value;
                     row.uvalue = static_cast<uint64_t>(new_value);
+                } else {
+                    xsql::set_vtab_error("types_enum_values: failed to save (" + ctx + ")");
                 }
                 return ok;
             })
@@ -830,12 +874,20 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
                 return row.comment;
             },
             [](EnumValueEntry& row, const char* new_comment) -> bool {
+                const std::string ctx = "enum=" + row.type_name + " value_index=" + std::to_string(row.value_index);
                 EnumTypeRef ref(row.type_ordinal);
-                if (!ref.valid) return false;
-                if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) return false;
+                if (!ref.valid) {
+                    xsql::set_vtab_error("types_enum_values: enum type not found (" + ctx + ")");
+                    return false;
+                }
+                if (row.value_index < 0 || static_cast<size_t>(row.value_index) >= ref.ei.size()) {
+                    xsql::set_vtab_error("types_enum_values: value index out of range (" + ctx + ")");
+                    return false;
+                }
                 ref.ei[row.value_index].cmt = new_comment ? new_comment : "";
                 bool ok = ref.save();
                 if (ok) row.comment = new_comment ? new_comment : "";
+                else xsql::set_vtab_error("types_enum_values: failed to save (" + ctx + ")");
                 return ok;
             })
         .deletable([](EnumValueEntry& row) -> bool {

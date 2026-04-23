@@ -388,9 +388,14 @@ VTableDef define_segments() {
           [](size_t i, const char *new_name) -> bool {
             auto_wait();
             segment_t *s = getnseg(static_cast<int>(i));
-            if (!s)
+            if (!s) {
+              xsql::set_vtab_error("segments: segment not found at index " + std::to_string(i));
               return false;
+            }
             bool ok = set_segm_name(s, new_name) != 0;
+            if (!ok)
+              xsql::set_vtab_error("segments: failed to rename segment " +
+                                   idasql::format_ea_hex(s->start_ea));
             auto_wait();
             return ok;
           })
@@ -405,9 +410,14 @@ VTableDef define_segments() {
           [](size_t i, const char *new_class) -> bool {
             auto_wait();
             segment_t *s = getnseg(static_cast<int>(i));
-            if (!s)
+            if (!s) {
+              xsql::set_vtab_error("segments: segment not found at index " + std::to_string(i));
               return false;
+            }
             bool ok = set_segm_class(s, new_class) != 0;
+            if (!ok)
+              xsql::set_vtab_error("segments: failed to set class on segment " +
+                                   idasql::format_ea_hex(s->start_ea));
             auto_wait();
             return ok;
           })
@@ -422,10 +432,15 @@ VTableDef define_segments() {
           [](size_t i, int new_perm) -> bool {
             auto_wait();
             segment_t *s = getnseg(static_cast<int>(i));
-            if (!s)
+            if (!s) {
+              xsql::set_vtab_error("segments: segment not found at index " + std::to_string(i));
               return false;
+            }
             s->perm = static_cast<uchar>(new_perm);
             bool ok = s->update();
+            if (!ok)
+              xsql::set_vtab_error("segments: failed to update permissions on segment " +
+                                   idasql::format_ea_hex(s->start_ea));
             auto_wait();
             return ok;
           })
@@ -524,11 +539,15 @@ VTableDef define_names() {
           [](size_t i, const char *new_name) -> bool {
             auto_wait();
             ea_t ea = get_nlist_ea(i);
-            if (ea == BADADDR)
+            if (ea == BADADDR) {
+              xsql::set_vtab_error("names: address not found at index " + std::to_string(i));
               return false;
+            }
             bool ok = set_name(ea, new_name, SN_CHECK) != 0;
             if (ok)
               decompiler::invalidate_decompiler_cache(ea);
+            else
+              xsql::set_vtab_error("names: failed to rename " + idasql::format_ea_hex(ea));
             auto_wait();
             return ok;
           })
@@ -648,10 +667,19 @@ CachedTableDef<CommentRow> define_comments() {
           "comment",
           [](const CommentRow &row) -> std::string { return row.comment; },
           [](CommentRow &row, const char *new_cmt) -> bool {
+            const std::string requested = new_cmt ? new_cmt : "";
+            // Idempotent: read current comment from IDA to skip no-ops
+            // (row_populator means row.comment has argv values, not IDA state)
+            qstring cur;
+            get_cmt(&cur, row.ea, false);
+            if (requested == std::string(cur.c_str())) return true;
             auto_wait();
-            bool ok = set_cmt(row.ea, new_cmt ? new_cmt : "", false);
+            bool ok = set_cmt(row.ea, requested.c_str(), false);
             if (ok)
-              row.comment = new_cmt ? new_cmt : "";
+              row.comment = requested;
+            else
+              xsql::set_vtab_error("comments: failed to set comment at " +
+                                   idasql::format_ea_hex(row.ea));
             auto_wait();
             return ok;
           })
@@ -659,10 +687,17 @@ CachedTableDef<CommentRow> define_comments() {
           "rpt_comment",
           [](const CommentRow &row) -> std::string { return row.rpt_comment; },
           [](CommentRow &row, const char *new_cmt) -> bool {
+            const std::string requested = new_cmt ? new_cmt : "";
+            qstring cur;
+            get_cmt(&cur, row.ea, true);
+            if (requested == std::string(cur.c_str())) return true;
             auto_wait();
-            bool ok = set_cmt(row.ea, new_cmt ? new_cmt : "", true);
+            bool ok = set_cmt(row.ea, requested.c_str(), true);
             if (ok)
-              row.rpt_comment = new_cmt ? new_cmt : "";
+              row.rpt_comment = requested;
+            else
+              xsql::set_vtab_error("comments: failed to set repeatable comment at " +
+                                   idasql::format_ea_hex(row.ea));
             auto_wait();
             return ok;
           })
@@ -1624,7 +1659,11 @@ CachedTableDef<HeadRow> define_bytes() {
       .column_int_rw(
           "value", [](const HeadRow &row) -> int { return get_byte(row.ea); },
           [](HeadRow &row, int val) -> bool {
-            return patch_byte(row.ea, static_cast<uint64>(val));
+            bool ok = patch_byte(row.ea, static_cast<uint64>(val));
+            if (!ok)
+              xsql::set_vtab_error("bytes: failed to patch byte at " +
+                                   idasql::format_ea_hex(row.ea));
+            return ok;
           })
       .column_int("original_value",
                   [](const HeadRow &row) -> int {
@@ -2841,12 +2880,16 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
           [](const NetnodeKvRow &row) -> std::string { return row.value; },
           [](NetnodeKvRow &row, const char *new_value) -> bool {
             netnode master = get_netnode_kv_master(false);
-            if (master == BADNODE)
+            if (master == BADNODE) {
+              xsql::set_vtab_error("netnode_kv: storage master node not found");
               return false;
+            }
 
             nodeidx_t entry_id = master.hashval_long(row.key.c_str());
-            if (entry_id == 0)
+            if (entry_id == 0) {
+              xsql::set_vtab_error("netnode_kv: key '" + row.key + "' not found");
               return false;
+            }
 
             netnode entry(entry_id);
             const char *val = new_value ? new_value : "";
@@ -2854,6 +2897,8 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
             bool ok = entry.setblob(val, len, 0, stag);
             if (ok)
               row.value = val;
+            else
+              xsql::set_vtab_error("netnode_kv: failed to update key '" + row.key + "'");
             return ok;
           })
       .row_lookup([](NetnodeKvRow &row, int64_t raw_rowid) -> bool {
