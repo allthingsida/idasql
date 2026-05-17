@@ -31,11 +31,14 @@ Address-taking SQL functions accept:
 - numeric strings (`'4198400'`, `'0x401000'`)
 - symbol names resolved with `get_name_ea(BADADDR, name)` (global names)
 
+Quoted numeric strings are for address-taking scalar functions. For table
+predicates, compare address columns to integer EAs such as `address = 0x401000`.
+
 Examples:
 ```sql
 SELECT decompile('DriverEntry');
 SELECT set_type('DriverEntry', 'NTSTATUS DriverEntry(PDRIVER_OBJECT, PUNICODE_STRING);');
-SELECT comment_at('0x401000');
+SELECT (SELECT comment FROM comments WHERE address = 0x401000 LIMIT 1);
 ```
 
 If a symbol cannot be resolved, SQL functions return an explicit error like:
@@ -488,7 +491,12 @@ SELECT type_name, layout_name, COUNT(*) as count
 FROM strings GROUP BY type_name, layout_name ORDER BY count DESC;
 ```
 
-**Important:** For new analysis (exe/dll), strings are auto-built. For existing databases (i64/idb), strings are already saved. If you see 0 strings unexpectedly, run `SELECT rebuild_strings()` once to rebuild the list. See String List Functions section below.
+**Important:** For new analysis (exe/dll), strings are auto-built. For existing databases (i64/idb), strings are already saved. If you see 0 strings unexpectedly, run `SELECT rebuild_strings()` once to rebuild the list. See String List Surfaces section below.
+
+Current count:
+```sql
+SELECT COUNT(*) AS strings FROM strings;
+```
 
 #### xrefs
 Cross-references - the most important table for understanding code relationships.
@@ -523,7 +531,7 @@ Basic blocks within functions. **Use `func_ea` constraint for performance.**
 SELECT * FROM blocks WHERE func_ea = 0x401000;
 
 -- Functions with most basic blocks
-SELECT func_at(func_ea) as name, COUNT(*) as blocks
+SELECT (SELECT name FROM funcs WHERE func_ea >= address AND func_ea < end_ea LIMIT 1) as name, COUNT(*) as blocks
 FROM blocks GROUP BY func_ea ORDER BY blocks DESC LIMIT 10;
 ```
 `WHERE func_ea = X` is the optimized path. Without it, `blocks` may scan all functions.
@@ -581,7 +589,7 @@ Use `strings + xrefs + funcs` directly. This is the canonical pattern.
 SELECT
     s.content as string_value,
     printf('0x%X', x.from_ea) as ref_addr,
-    func_at(x.from_ea) as func_name
+    (SELECT name FROM funcs WHERE x.from_ea >= address AND x.from_ea < end_ea LIMIT 1) as func_name
 FROM strings s
 JOIN xrefs x ON x.to_ea = s.address
 WHERE s.content LIKE '%error%' OR s.content LIKE '%fail%'
@@ -589,7 +597,7 @@ ORDER BY func_name, ref_addr;
 
 -- Functions with most string references
 SELECT
-    func_at(x.from_ea) as func_name,
+    (SELECT name FROM funcs WHERE x.from_ea >= address AND x.from_ea < end_ea LIMIT 1) as func_name,
     COUNT(*) as string_refs
 FROM strings s
 JOIN xrefs x ON x.to_ea = s.address
@@ -655,7 +663,41 @@ SET operand1_format_spec = 'clear'
 WHERE address = 0x401020;
 ```
 
-**Performance:** `WHERE func_addr = X` uses O(function_size) iteration. Without this constraint, it scans the entire database - SLOW.
+#### instruction_operands
+
+`instruction_operands` exposes one row per decoded non-void operand. Use it when you need operand type/value fields, all operands as rows, or the old scalar operand/decode helper shape in joinable form.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `address` | INT | Instruction address |
+| `func_addr` | INT | Containing function |
+| `opnum` | INT | Operand index |
+| `text` | TEXT | Operand text |
+| `type_code` | INT | IDA operand type code |
+| `type_name` | TEXT | Operand type name (`reg`, `imm`, `near`, ...) |
+| `dtype` | INT | Operand dtype |
+| `reg` | INT | Register number when applicable |
+| `addr` | INT | Referenced address/displacement when applicable |
+| `raw_value` | INT | Raw operand value |
+| `value` | INT | Best-effort scalar operand value |
+
+```sql
+-- Operand rows for one instruction
+SELECT opnum, text, type_name, value
+FROM instruction_operands
+WHERE address = 0x401000
+ORDER BY opnum;
+
+-- Instruction details with normalized operands
+SELECT i.address, i.itype, i.mnemonic, i.size, o.opnum, o.text, o.type_name, o.value
+FROM instructions i
+LEFT JOIN instruction_operands o
+  ON o.address = i.address AND o.func_addr = 0x401000
+WHERE i.func_addr = 0x401000
+ORDER BY i.address, o.opnum;
+```
+
+**Performance:** `WHERE address = X` decodes one instruction; `WHERE func_addr = X` uses O(function_size) iteration. Without one of these constraints, it scans the entire database - SLOW.
 
 #### disasm_calls
 All call instructions with resolved targets.
@@ -669,7 +711,7 @@ All call instructions with resolved targets.
 
 ```sql
 -- Functions that call malloc
-SELECT DISTINCT func_at(func_addr) as caller
+SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as caller
 FROM disasm_calls WHERE callee_name LIKE '%malloc%';
 ```
 
@@ -730,7 +772,7 @@ INSERT INTO types_enum_values (type_ordinal, value_name, value) VALUES (15, 'FLA
 INSERT INTO types_enum_values (type_ordinal, value_name, value, comment)
 VALUES (15, 'FLAG_HIDDEN', 2, 'not visible in UI');
 -- Rename a local variable
-SELECT rename_lvar(0x401000, 2, 'buffer_size');
+UPDATE ctree_lvars SET name = 'buffer_size' WHERE func_addr = 0x401000 AND idx = 2;
 
 -- Change variable type
 UPDATE ctree_lvars SET type = 'char *'
@@ -920,15 +962,15 @@ Return statements with details about what's being returned.
 
 ```sql
 -- Functions that return 0
-SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name FROM ctree_v_returns
 WHERE return_op = 'cot_num' AND return_num = 0;
 
 -- Functions that return -1 (error sentinel)
-SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name FROM ctree_v_returns
 WHERE return_op = 'cot_num' AND return_num = -1;
 
 -- Functions that return their argument (pass-through)
-SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name FROM ctree_v_returns
 WHERE returns_arg = 1;
 ```
 
@@ -1046,21 +1088,32 @@ Convenience views for filtering types:
 ### Extended Tables
 
 #### bytes
-Byte-wise program view with patch support.
+Pure mapped-byte program view with patch support. This table is one row per
+mapped byte address; IDA item metadata such as size/type belongs to `heads`.
 
 | Column | Type | RW | Description |
 |--------|------|----|-------------|
-| `ea` | INT | R | Address |
+| `ea` | INT | R | Byte address |
 | `value` | INT | RW | Current byte value (UPDATE patches byte) |
 | `original_value` | INT | R | Original byte value before patch |
-| `size` | INT | R | Item size at address |
-| `type` | TEXT | R | Item type (`code`, `data`, etc.) |
 | `is_patched` | INT | R | 1 if byte differs from original |
+| `fpos` | INT | R | Physical/input file offset (NULL when unavailable) |
 
 ```sql
 -- Read one address
 SELECT ea, value, original_value, is_patched
 FROM bytes WHERE ea = 0x401000;
+
+-- Read a byte range, including item-tail bytes
+SELECT ea, value
+FROM bytes
+WHERE ea >= 0x401000 AND ea < 0x401010
+ORDER BY ea;
+
+-- Get item metadata separately
+SELECT address, size, type, flags, disasm
+FROM heads
+WHERE address = 0x401000;
 
 -- Patch via table update
 UPDATE bytes SET value = 0x90 WHERE ea = 0x401000;
@@ -1147,7 +1200,7 @@ All defined items (code/data heads) in the database.
 | `size` | INT | Item size |
 | `flags` | INT | IDA flags |
 
-**Performance:** This table can be very large. Always use address range filters.
+**Performance:** `WHERE address = X` and address range filters are optimized. Next/previous navigation should use `ORDER BY address [DESC] LIMIT 1`; broad scans can still be large.
 
 #### fixups
 Relocation and fixup information.
@@ -1194,7 +1247,7 @@ Function chunks (for functions with non-contiguous code, like exception handlers
 
 ```sql
 -- Functions with multiple chunks (complex control flow)
-SELECT func_at(func_addr) as name, COUNT(*) as chunks
+SELECT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name, COUNT(*) as chunks
 FROM fchunks GROUP BY func_addr HAVING chunks > 1;
 ```
 
@@ -1271,7 +1324,7 @@ Views for disassembly-level analysis (no Hex-Rays required):
 SELECT * FROM disasm_v_leaf_funcs LIMIT 10;
 
 -- Find hotspot calls (inside loops)
-SELECT func_at(func_addr) as func, callee_name
+SELECT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as func, callee_name
 FROM disasm_v_calls_in_loops;
 ```
 
@@ -1288,8 +1341,6 @@ FROM disasm_v_calls_in_loops;
 | `disasm(addr, n)` | Next N instructions from address (count-based, not boundary-aware) |
 | `disasm_range(start, end)` | All disassembly lines in address range [start, end) |
 | `disasm_func(addr)` | Full disassembly of function containing address |
-| `mnemonic(addr)` | Instruction mnemonic only |
-| `operand(addr, n)` | Operand text (n=0-5) |
 
 #### Disassembly Examples
 
@@ -1333,7 +1384,7 @@ WHERE func_addr = 0x401000 AND mnemonic = 'call';
 ### Byte Access and Patching
 | Function | Description |
 |----------|-------------|
-| `bytes(addr, n)` | Read `n` bytes as hex string |
+| `bytes(addr, n)` | Read `n` raw bytes as hex string |
 | `bytes_raw(addr, n)` | Read `n` bytes as BLOB |
 | `patch_byte(addr, val)` | Patch one byte at `addr` (returns 1/0) |
 | `patch_word(addr, val)` | Patch 2 bytes at `addr` (returns 1/0) |
@@ -1360,12 +1411,18 @@ SELECT save_database();
 ```
 
 ### Binary Search
-| Function | Description |
-|----------|-------------|
-| `search_bytes(pattern)` | Find all matches, returns JSON array |
-| `search_bytes(pattern, start, end)` | Search within address range |
-| `search_first(pattern)` | First match address (or NULL) |
-| `search_first(pattern, start, end)` | First match in range |
+Use the `byte_search` table for raw bytes/opcodes. It requires `WHERE pattern = ...`; `matched_hex` is an output column, not the search input.
+
+| Column | Description |
+|--------|-------------|
+| `address` | Match address |
+| `matched_hex` | Matched bytes rendered as hex text |
+| `matched_bytes` | Matched bytes as a BLOB |
+| `size` | Match size in bytes |
+| `pattern` | Hidden required IDA byte pattern input |
+| `start_ea` | Hidden optional inclusive lower bound |
+| `end_ea` | Hidden optional exclusive upper bound |
+| `max_results` | Hidden optional generator cap |
 
 **Pattern syntax (IDA native):**
 - `"48 8B 05"` - Exact bytes (hex, space-separated)
@@ -1377,18 +1434,23 @@ SELECT save_database();
 **Example:**
 ```sql
 -- Find all matches for a pattern
-SELECT search_bytes('48 8B ? 00');
-
--- Parse JSON results
-SELECT json_extract(value, '$.address') as addr
-FROM json_each(search_bytes('48 89 ?'))
+SELECT address, matched_hex, size
+FROM byte_search
+WHERE pattern = '48 8B ? 00'
 LIMIT 10;
 
 -- First match only
-SELECT printf('0x%llX', search_first('CC CC CC'));
+SELECT printf('0x%llX', address) AS addr
+FROM byte_search
+WHERE pattern = 'CC CC CC'
+ORDER BY address
+LIMIT 1;
 
 -- Search with alternatives
-SELECT search_bytes('E8 (01 02 03 04)');
+SELECT address, matched_hex
+FROM byte_search
+WHERE pattern = 'E8 (01 02 03 04)'
+LIMIT 20;
 ```
 
 **Optimization Pattern: Find functions using specific instruction**
@@ -1396,65 +1458,130 @@ SELECT search_bytes('E8 (01 02 03 04)');
 To answer "How many functions use RDTSC instruction?" efficiently:
 ```sql
 -- Count unique functions containing RDTSC (opcode: 0F 31)
-SELECT COUNT(DISTINCT func_start(json_extract(value, '$.address'))) as count
-FROM json_each(search_bytes('0F 31'))
-WHERE func_start(json_extract(value, '$.address')) IS NOT NULL;
+SELECT COUNT(DISTINCT f.address) as count
+FROM byte_search b
+JOIN funcs f ON b.address >= f.address AND b.address < f.end_ea
+WHERE b.pattern = '0F 31';
 
 -- List those functions with names
 SELECT DISTINCT
-    func_start(json_extract(value, '$.address')) as func_ea,
-    name_at(func_start(json_extract(value, '$.address'))) as func_name
-FROM json_each(search_bytes('0F 31'))
-WHERE func_start(json_extract(value, '$.address')) IS NOT NULL;
+    f.address as func_ea,
+    f.name as func_name
+FROM byte_search b
+JOIN funcs f ON b.address >= f.address AND b.address < f.end_ea
+WHERE b.pattern = '0F 31';
 ```
 
 This is **much faster** than scanning all disassembly lines because:
-- `search_bytes()` uses native binary search
-- `func_start()` is O(1) lookup in IDA's function index
+- `byte_search` uses IDA's native binary search
+- the containment join uses the compact `funcs` table instead of scanning every instruction
 
 ### Names & Functions
-Address argument note: `addr`/`ea`/`func_addr` parameters accept integer EAs, numeric strings, and symbol names.
+Use table lookups for address and containing-function metadata. Resolve symbol names to integer EAs before using these patterns.
 
-| Function | Description |
-|----------|-------------|
-| `name_at(addr)` | Name at address |
-| `func_at(addr)` | Function name containing address |
-| `func_start(addr)` | Start of containing function |
-| `func_end(addr)` | End of containing function |
-| `func_qty()` | Total function count |
-| `func_at_index(n)` | Function address at index (O(1)) |
+| Pattern | Description |
+|---------|-------------|
+| `SELECT name FROM names WHERE address = :ea LIMIT 1` | Name at address |
+| `SELECT name FROM funcs WHERE :ea >= address AND :ea < end_ea LIMIT 1` | Function containing address |
+| `SELECT address FROM funcs WHERE :ea >= address AND :ea < end_ea LIMIT 1` | Start of containing function |
+| `SELECT end_ea FROM funcs WHERE :ea >= address AND :ea < end_ea LIMIT 1` | End of containing function |
+
+Function count and index lookup are table-driven:
+
+```sql
+SELECT COUNT(*) AS function_count FROM funcs;
+SELECT address FROM funcs WHERE rowid = 0;
+```
 
 ### Cross-References
-| Function | Description |
-|----------|-------------|
-| `xrefs_to(addr)` | JSON array of xrefs TO address |
-| `xrefs_from(addr)` | JSON array of xrefs FROM address |
+Use the `xrefs` table for incoming, outgoing, and function-scoped edge queries:
+
+```sql
+SELECT from_ea, to_ea, type, is_code, from_func
+FROM xrefs
+WHERE to_ea = 0x401000;
+
+SELECT from_ea, to_ea, type, is_code, from_func
+FROM xrefs
+WHERE from_ea = 0x401000;
+
+SELECT from_ea, to_ea, type, is_code, from_func
+FROM xrefs
+WHERE from_func = 0x401000;
+```
 
 ### Navigation
-| Function | Description |
-|----------|-------------|
-| `next_head(addr)` | Next defined item |
-| `prev_head(addr)` | Previous defined item |
-| `segment_at(addr)` | Segment name at address |
-| `hex(val)` | Format as hex string |
+Use `heads` ordering for defined-item navigation, and SQLite formatting functions for display strings. Address equality/range filters are optimized; `ORDER BY address` or `ORDER BY address DESC` is consumed for next/previous-item lookups.
+
+```sql
+-- Next defined item
+SELECT address
+FROM heads
+WHERE address > 0x401000
+ORDER BY address
+LIMIT 1;
+
+-- Previous defined item
+SELECT address
+FROM heads
+WHERE address < 0x401000
+ORDER BY address DESC
+LIMIT 1;
+
+-- Nullable scalar shape for callers that need one column and one row
+SELECT (
+  SELECT address
+  FROM heads
+  WHERE address > 0x401000
+  ORDER BY address
+  LIMIT 1
+) AS next_address;
+
+-- Old IDASQL-style lowercase 0x-prefixed hex formatting
+SELECT printf('0x%llx', address) AS address_hex
+FROM heads
+LIMIT 10;
+```
+
+Segment lookup is table-driven:
+
+```sql
+SELECT name
+FROM segments
+WHERE 0x401000 >= start_ea
+  AND 0x401000 < end_ea
+LIMIT 1;
+```
 
 ### Comments
-| Function | Description |
-|----------|-------------|
-| `comment_at(addr)` | Get comment at address |
-| `set_comment(addr, text)` | Set regular comment |
-| `set_comment(addr, text, 1)` | Set repeatable comment |
+Read address comments through the `comments` table. To preserve the old scalar lookup shape, use a scalar subquery with regular comments first and repeatable comments as fallback:
+
+```sql
+SELECT (
+  SELECT COALESCE(NULLIF(comment, ''), NULLIF(rpt_comment, ''))
+  FROM comments
+  WHERE address = 0x401000
+  LIMIT 1
+) AS comment;
+```
+
+Write address comments through the table:
+
+```sql
+INSERT INTO comments(address, comment) VALUES (0x401000, 'regular comment');
+INSERT INTO comments(address, rpt_comment) VALUES (0x401000, 'repeatable comment');
+```
 
 ### Modification
 | Function | Description |
 |----------|-------------|
-| `set_name(addr, name)` | Set name at address |
 | `type_at(addr)` | Read type declaration applied at address |
 | `set_type(addr, decl)` | Apply C declaration/type at address (empty decl clears type; `addr` may be EA, numeric string, or symbol name) |
 | `parse_decls(text)` | Import C declarations (struct/union/enum/typedef) into local types |
 
 Preferred SQL write surface for function metadata:
 - `UPDATE funcs SET name = '...', prototype = '...' WHERE address = ...`
+- `INSERT INTO names(address, name) VALUES (..., '...')` or `UPDATE names SET name = '...' WHERE address = ...`
 - `prototype` maps to `type_at/set_type` behavior and invalidates decompiler cache.
 
 ### Python Execution
@@ -1492,36 +1619,50 @@ SELECT get_ui_context_json();
 ```
 
 ### Item Analysis
-| Function | Description |
-|----------|-------------|
-| `item_type(addr)` | Item type flags at address |
-| `item_size(addr)` | Item size at address |
-| `is_code(addr)` | Returns 1 if address is code |
-| `is_data(addr)` | Returns 1 if address is data |
-| `flags_at(addr)` | Raw IDA flags at address |
-
-### Instruction Details
-| Function | Description |
-|----------|-------------|
-| `itype(addr)` | Instruction type code (processor-specific) |
-| `decode_insn(addr)` | Full instruction info as JSON |
-| `operand_type(addr, n)` | Operand type code (o_void, o_reg, etc.) |
-| `operand_value(addr, n)` | Operand value (register num, immediate, etc.) |
+Use `heads` for item classification, size, and raw flags:
 
 ```sql
--- Get instruction type for filtering
-SELECT address, itype(address) as itype, mnemonic(address)
-FROM heads WHERE is_code(address) = 1 LIMIT 10;
+SELECT address, size, type, flags, disasm
+FROM heads
+WHERE address = 0x401000;
 
--- Decode full instruction
-SELECT decode_insn(0x401000);
+SELECT address, disasm
+FROM heads
+WHERE type = 'code'
+ORDER BY address
+LIMIT 10;
+```
+
+### Instruction Details
+Use `instructions` and `instruction_operands` for decoded instruction facts:
+
+```sql
+-- Instruction type and mnemonic for filtering
+SELECT address, itype, mnemonic
+FROM instructions
+WHERE func_addr = 0x401000
+LIMIT 10;
+
+-- Operand type/value details for one instruction
+SELECT opnum, text, type_code, type_name, value
+FROM instruction_operands
+WHERE address = 0x401000
+ORDER BY opnum;
+
+-- Full decoded instruction row shape
+SELECT i.address, i.itype, i.mnemonic, i.size, o.opnum, o.text, o.type_name, o.value
+FROM instructions i
+LEFT JOIN instruction_operands o
+  ON o.address = i.address AND o.address = 0x401000
+WHERE i.address = 0x401000
+ORDER BY o.opnum;
 ```
 
 ### Decompilation
 
 **When to use `decompile()` vs `pseudocode` table:**
 - **Read/show pseudocode** → always start with `SELECT decompile(addr)`. It returns the full function as one text block with per-line prefixes (`/* <ea> */` when available, `/*          */` when no line anchor exists).
-- **Local declaration hints** → declaration lines include compact local-variable index hints (`[lv:N]`) so rename operations can target `rename_lvar(func_addr, N, new_name)` safely.
+- **Local declaration hints** → declaration lines include compact local-variable index hints (`[lv:N]`) so rename operations can target `UPDATE ctree_lvars ... WHERE func_addr = ... AND idx = N` safely.
 - **Need fresh output after edits** → use `SELECT decompile(addr, 1)` to force re-decompilation.
 - **Need structured line access or comment CRUD** → query/update the `pseudocode` table.
 
@@ -1529,10 +1670,6 @@ SELECT decode_insn(0x401000);
 |----------|-------------|
 | `decompile(addr)` | **PREFERRED** — Full pseudocode with line prefixes (`addr` may be EA, numeric string, or symbol name; available when decompiler surfaces are enabled) |
 | `decompile(addr, 1)` | Same output but forces re-decompilation (use after writes/renames) |
-| `list_lvars(addr)` | List local variables as JSON |
-| `rename_lvar(func_addr, lvar_idx, new_name)` | Rename a local variable by index |
-| `rename_lvar_by_name(func_addr, old_name, new_name)` | Rename a local variable by existing name |
-| `set_lvar_comment(func_addr, lvar_idx, text)` | Set local-variable comment by index |
 | `set_union_selection(func_addr, ea, path)` | Set/clear union selection path at EA (`[0,1]` or `0,1`) |
 | `set_union_selection_item(func_addr, item_id, path)` | Set/clear union selection path by `ctree.item_id` |
 | `set_union_selection_ea_arg(func_addr, ea, arg_idx, path[, callee])` | **PREFERRED** call-arg targeting helper; resolves to item id or errors with hint |
@@ -1569,9 +1706,9 @@ SELECT decompile(0x401000);
 
 2. Baseline mutation surfaces (must exist in all supported plugin runtimes):
 ```sql
-SELECT set_name(0x401000, 'my_func');
-SELECT rename_lvar(0x401000, 0, 'arg0');
-SELECT set_lvar_comment(0x401000, 0, 'seed comment');
+INSERT INTO names(address, name) VALUES (0x401000, 'my_func');
+UPDATE ctree_lvars SET name = 'arg0' WHERE func_addr = 0x401000 AND idx = 0;
+UPDATE ctree_lvars SET comment = 'seed comment' WHERE func_addr = 0x401000 AND idx = 0;
 ```
 
 3. Advanced expression/representation helpers (optional in older/minimal runtimes):
@@ -1620,7 +1757,7 @@ If `set_union_selection*` / `set_numform*` / `ctree_item_at` are unavailable:
 
 - Use `UPDATE funcs SET prototype = ...` for function-level typing.
 - Use `UPDATE ctree_lvars SET type/comment = ...` for local shaping.
-- Prefer `rename_lvar*` for local names, even in fallback flows.
+- Use `UPDATE ctree_lvars SET name = ...` after selecting a deterministic `idx`.
 - Use `UPDATE pseudocode SET comment = ...` for stable semantic breadcrumbs.
 - Keep constants readable via comments when enum rendering primitives are unavailable.
 - Explicitly note unavailable primitives in your response so follow-up runs don't waste queries.
@@ -1633,29 +1770,35 @@ SELECT decompile(0x401000);
 SELECT decompile(0x401000, 1);
 
 -- Get all local variables in a function
-SELECT list_lvars(0x401000);
+SELECT idx, name, type, comment, size, is_arg, is_result, stkoff, mreg FROM ctree_lvars WHERE func_addr = 0x401000 ORDER BY idx;
 
 -- Rename by index (canonical, deterministic)
-SELECT rename_lvar(0x401000, 2, 'buffer_size');
+UPDATE ctree_lvars SET name = 'buffer_size' WHERE func_addr = 0x401000 AND idx = 2;
 
--- Rename by current name (convenience; fails if ambiguous)
-SELECT rename_lvar_by_name(0x401000, 'v2', 'buffer_size');
+-- Rename by current name: inspect/select one idx first, then update by idx
+UPDATE ctree_lvars SET name = 'buffer_size'
+WHERE func_addr = 0x401000
+  AND idx = (
+    SELECT idx FROM ctree_lvars
+    WHERE func_addr = 0x401000 AND name = 'v2'
+    ORDER BY idx LIMIT 1
+  );
 
 -- If you discovered the target via stack slot or another query, resolve idx first
-SELECT rename_lvar(
-  0x401000,
-  (SELECT idx
-   FROM ctree_lvars
-   WHERE func_addr = 0x401000 AND stkoff = 32
-   ORDER BY idx
-   LIMIT 1),
-  'ctx');
+UPDATE ctree_lvars SET name = 'ctx'
+WHERE func_addr = 0x401000
+  AND idx = (
+    SELECT idx
+    FROM ctree_lvars
+    WHERE func_addr = 0x401000 AND stkoff = 32
+    ORDER BY idx
+    LIMIT 1
+  );
 
 -- Set local-variable comment by index
-SELECT set_lvar_comment(0x401000, 2, 'points to decrypted buffer');
+UPDATE ctree_lvars SET comment = 'points to decrypted buffer' WHERE func_addr = 0x401000 AND idx = 2;
 
 -- Simple current-row UPDATE path for rename
--- Prefer rename_lvar* for split/array locals or scripted cleanup
 UPDATE ctree_lvars SET name = 'buffer_size'
 WHERE func_addr = 0x401000 AND idx = 2;
 
@@ -1665,10 +1808,10 @@ WHERE func_addr = 0x401000 AND idx = 2;
 
 -- Fallback when direct UPDATE comment write fails on a specific lvar
 -- (some runtimes can return "SQL logic error" for particular slots):
-SELECT set_lvar_comment(0x401000, 2, 'points to decrypted buffer');
+UPDATE ctree_lvars SET comment = 'points to decrypted buffer' WHERE func_addr = 0x401000 AND idx = 2;
 
 -- Mandatory verification loop after rename
-SELECT list_lvars(0x401000);
+SELECT idx, name, type, comment, size, is_arg, is_result, stkoff, mreg FROM ctree_lvars WHERE func_addr = 0x401000 ORDER BY idx;
 SELECT decompile(0x401000, 1);
 
 -- Import declarations + apply prototype to improve decompilation quality
@@ -1740,26 +1883,19 @@ SELECT ctree_item_at(0x140001BD0, 0x140001C49, 'cot_asg', 0);
 SELECT set_union_selection_ea_expr(0x140001BD0, 0x140001C49, '', 'cot_asg', 0);
 ```
 
-`rename_lvar*` functions return JSON with explicit fields:
-- `success` (execution success)
-- `applied` (observable rename applied)
-- `reason` (for non-applied cases: `not_found`, `ambiguous_name`, `unchanged`, `not_nameable`, ...)
+Decompiler local and label mutation is table-driven:
+- List locals with `ctree_lvars WHERE func_addr = ... ORDER BY idx`.
+- Rename/comment locals with `UPDATE ctree_lvars` using `func_addr + idx`.
+- Rename labels with `UPDATE ctree_labels` using `func_addr + label_num`.
 
 ### File Generation
 | Function | Description |
 |----------|-------------|
-| `gen_asm_file(start, end, path)` | Generate ASM file |
-| `gen_lst_file(start, end, path)` | Generate listing file |
-| `gen_map_file(path)` | Generate MAP file |
-| `gen_idc_file(start, end, path)` | Generate IDC script |
-| `gen_html_file(start, end, path)` | Generate HTML file |
+| `gen_listing(path)` | Generate full-database listing output (LST) to `path` |
 
 ```sql
--- Export function as ASM
-SELECT gen_asm_file(0x401000, 0x401100, '/tmp/func.asm');
-
--- Generate MAP file
-SELECT gen_map_file('/tmp/binary.map');
+-- Whole database listing export
+SELECT gen_listing('C:/tmp/full.lst');
 ```
 
 ### Graph Generation
@@ -1781,7 +1917,6 @@ SELECT gen_schema_dot();
 | Surface | Description |
 |---------|-------------|
 | `grep` table | Structured rows for composable SQL search |
-| `grep(pattern, limit, offset)` | JSON array for quick agent/tool output |
 
 Searches functions, labels, segments, structs, unions, enums, members, and enum members.
 Pattern rules:
@@ -1802,27 +1937,24 @@ FROM grep
 WHERE pattern = 'main'
 LIMIT 20;
 
--- JSON form with pagination
-SELECT grep('sub%', 10, 0);
-SELECT grep('sub%', 10, 10);
-
--- Parse JSON result from grep()
-SELECT json_extract(value, '$.name') as name,
-       printf('0x%llX', json_extract(value, '$.address')) as addr
-FROM json_each(grep('init', 50, 0))
-WHERE json_extract(value, '$.kind') = 'function';
+-- Pagination is ordinary SQL
+SELECT name, kind, address
+FROM grep
+WHERE pattern = 'init' AND kind = 'function'
+ORDER BY kind, name
+LIMIT 50 OFFSET 0;
 ```
 
-### String List Functions
+### String List Surfaces
 
-IDA maintains a cached list of strings. Use `rebuild_strings()` to detect and cache strings.
+IDA maintains a cached list of strings. Use `rebuild_strings()` to detect and cache strings, `COUNT(*) FROM strings` for the current count, and `strings` for row-level analysis.
 
-| Function | Description |
-|----------|-------------|
+| Surface | Description |
+|---------|-------------|
 | `rebuild_strings()` | Rebuild with ASCII + UTF-16, minlen 5 (default) |
 | `rebuild_strings(minlen)` | Rebuild with custom minimum length |
 | `rebuild_strings(minlen, types)` | Rebuild with custom length and type mask |
-| `string_count()` | Get current string count (no rebuild) |
+| `SELECT COUNT(*) FROM strings` | Current string-list count (optimized without row materialization) |
 
 **Type mask values:**
 - `1` = ASCII only (STRTYPE_C)
@@ -1833,7 +1965,7 @@ IDA maintains a cached list of strings. Use `rebuild_strings()` to detect and ca
 
 ```sql
 -- Check current string count
-SELECT string_count();
+SELECT COUNT(*) AS strings FROM strings;
 
 -- Rebuild with defaults (ASCII + UTF-16, minlen 5)
 SELECT rebuild_strings();
@@ -1896,8 +2028,6 @@ WHERE g.pattern = 'sub%' AND g.kind = 'function';
 | `parent_name` | TEXT | Parent type (for members) |
 | `full_name` | TEXT | Fully qualified name |
 
-For JSON output instead of rows, use `grep(pattern, limit, offset)`.
-
 ---
 
 ## Performance Rules
@@ -1933,7 +2063,9 @@ WHERE itype IN (16, 18)  -- x86 call opcodes
 SELECT address FROM funcs ORDER BY RANDOM() LIMIT 1;
 
 -- FAST: O(1) - direct index access
-SELECT func_at_index(ABS(RANDOM()) % func_qty());
+SELECT address
+FROM funcs
+WHERE rowid = ABS(RANDOM()) % (SELECT COUNT(*) FROM funcs);
 ```
 
 ---
@@ -1955,7 +2087,7 @@ LIMIT 10;
 ### Find Functions Calling a Specific API
 
 ```sql
-SELECT DISTINCT func_at(from_ea) as caller
+SELECT DISTINCT (SELECT name FROM funcs WHERE from_ea >= address AND from_ea < end_ea LIMIT 1) as caller
 FROM xrefs
 WHERE to_ea = (SELECT address FROM imports WHERE name = 'CreateFileW');
 ```
@@ -1963,7 +2095,7 @@ WHERE to_ea = (SELECT address FROM imports WHERE name = 'CreateFileW');
 ### String Cross-Reference Analysis
 
 ```sql
-SELECT s.content, func_at(x.from_ea) as used_by
+SELECT s.content, (SELECT name FROM funcs WHERE x.from_ea >= address AND x.from_ea < end_ea LIMIT 1) as used_by
 FROM strings s
 JOIN xrefs x ON s.address = x.to_ea
 WHERE s.content LIKE '%password%';
@@ -1972,7 +2104,7 @@ WHERE s.content LIKE '%password%';
 ### Function Complexity (by Block Count)
 
 ```sql
-SELECT func_at(func_ea) as name, COUNT(*) as block_count
+SELECT (SELECT name FROM funcs WHERE func_ea >= address AND func_ea < end_ea LIMIT 1) as name, COUNT(*) as block_count
 FROM blocks
 GROUP BY func_ea
 ORDER BY block_count DESC
@@ -2016,7 +2148,7 @@ ORDER BY f.name;
 ### Find Zero Comparisons (Potential Error Checks)
 
 ```sql
-SELECT func_at(func_addr) as func, printf('0x%X', ea) as addr
+SELECT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as func, printf('0x%X', ea) as addr
 FROM ctree_v_comparisons
 WHERE op_name = 'cot_eq' AND rhs_op = 'cot_num' AND rhs_num = 0;
 ```
@@ -2033,7 +2165,7 @@ ORDER BY f.name;
 ### malloc with Constant Size
 
 ```sql
-SELECT func_at(c.func_addr) as func, a.arg_num_value as size
+SELECT (SELECT name FROM funcs WHERE c.func_addr >= address AND c.func_addr < end_ea LIMIT 1) as func, a.arg_num_value as size
 FROM ctree_v_calls c
 JOIN ctree_call_args a ON a.func_addr = c.func_addr AND a.call_item_id = c.item_id
 WHERE c.callee_name LIKE '%malloc%'
@@ -2156,15 +2288,15 @@ HAVING COUNT(*) > 3
 ORDER BY return_count DESC;
 
 -- Functions that return 0 (common success pattern)
-SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name FROM ctree_v_returns
 WHERE return_op = 'cot_num' AND return_num = 0;
 
 -- Functions that return -1 (error sentinel)
-SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name FROM ctree_v_returns
 WHERE return_op = 'cot_num' AND return_num = -1;
 
 -- Functions that return a specific constant
-SELECT DISTINCT func_at(func_addr) as name FROM ctree_v_returns
+SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as name FROM ctree_v_returns
 WHERE return_op = 'cot_num' AND return_num = 1;
 ```
 
@@ -2346,7 +2478,7 @@ WITH RECURSIVE callers AS (
     JOIN disasm_calls dc ON dc.callee_addr = c.func_addr
     WHERE c.depth < 5
 )
-SELECT func_at(func_addr) as caller, MIN(depth) as distance
+SELECT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as caller, MIN(depth) as distance
 FROM callers
 GROUP BY func_addr
 ORDER BY distance, caller;
@@ -2357,11 +2489,14 @@ ORDER BY distance, caller;
 ```sql
 -- Rank functions by size within each segment
 SELECT
-    segment_at(f.address) as seg,
+    s.name as seg,
     f.name,
     f.size,
-    ROW_NUMBER() OVER (PARTITION BY segment_at(f.address) ORDER BY f.size DESC) as rank
+    ROW_NUMBER() OVER (PARTITION BY s.start_ea ORDER BY f.size DESC) as rank
 FROM funcs f
+JOIN segments s
+  ON f.address >= s.start_ea
+ AND f.address < s.end_ea
 WHERE f.size > 0;
 ```
 
@@ -2395,12 +2530,15 @@ WHERE size > 100;
 SELECT
     f.name,
     f.size,
-    segment_at(f.address) as segment,
+    s.name as segment,
     (SELECT COUNT(*) FROM blocks WHERE func_ea = f.address) as block_count,
     (SELECT COUNT(*) FROM disasm_calls WHERE func_addr = f.address) as outgoing_calls,
     (SELECT COUNT(*) FROM xrefs WHERE to_ea = f.address AND is_code = 1) as incoming_calls,
     (SELECT COUNT(*) FROM ctree_lvars WHERE func_addr = f.address) as local_vars
 FROM funcs f
+JOIN segments s
+  ON f.address >= s.start_ea
+ AND f.address < s.end_ea
 ORDER BY f.size DESC
 LIMIT 20;
 ```
@@ -2479,25 +2617,25 @@ WHERE length > 5;
 
 ```sql
 -- Comprehensive security audit in one query
-SELECT 'dangerous_func' as check_type, func_at(func_addr) as location, callee_name as detail
+SELECT 'dangerous_func' as check_type, (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) as location, callee_name as detail
 FROM disasm_calls
 WHERE callee_name IN ('strcpy', 'strcat', 'sprintf', 'gets', 'scanf')
 
 UNION ALL
 
-SELECT 'crypto_usage', func_at(func_addr), callee_name
+SELECT 'crypto_usage', (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1), callee_name
 FROM disasm_calls
 WHERE callee_name LIKE '%Crypt%' OR callee_name LIKE '%AES%' OR callee_name LIKE '%RSA%'
 
 UNION ALL
 
-SELECT 'network_call', func_at(func_addr), callee_name
+SELECT 'network_call', (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1), callee_name
 FROM disasm_calls
 WHERE callee_name IN ('socket', 'connect', 'send', 'recv', 'WSAStartup')
 
 UNION ALL
 
-SELECT 'registry_access', func_at(func_addr), callee_name
+SELECT 'registry_access', (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1), callee_name
 FROM disasm_calls
 WHERE callee_name LIKE 'Reg%'
 
@@ -2612,7 +2750,7 @@ Common Hex-Rays AST node types:
 
 - **No Hex-Rays license:** Decompiler tables (`pseudocode`, `ctree*`, `ctree_lvars`) will be empty or unavailable
 - **No constraint on decompiler tables:** Query will be extremely slow (decompiles all functions)
-- **Invalid address:** Functions like `func_at(addr)` return NULL
+- **Invalid address:** Containing-function table lookups return no row; use a scalar subquery when you need a nullable scalar result
 - **Missing function:** JOINs may return fewer rows than expected
 
 ---
@@ -2636,7 +2774,7 @@ SELECT content FROM strings WHERE length > 10 ORDER BY length DESC LIMIT 20;
 
 ```sql
 -- Dangerous string functions
-SELECT DISTINCT func_at(func_addr) FROM disasm_calls
+SELECT DISTINCT (SELECT name FROM funcs WHERE func_addr >= address AND func_addr < end_ea LIMIT 1) FROM disasm_calls
 WHERE callee_name IN ('strcpy', 'strcat', 'sprintf', 'gets');
 
 -- Crypto-related
@@ -2665,13 +2803,13 @@ SELECT name, type, size FROM ctree_lvars WHERE func_addr = 0x401000;
 SELECT callee_name FROM disasm_calls WHERE func_addr = 0x401000;
 
 -- What calls it
-SELECT func_at(from_ea) FROM xrefs WHERE to_ea = 0x401000 AND is_code = 1;
+SELECT (SELECT name FROM funcs WHERE from_ea >= address AND from_ea < end_ea LIMIT 1) FROM xrefs WHERE to_ea = 0x401000 AND is_code = 1;
 ```
 
 ### "Find all uses of a string"
 
 ```sql
-SELECT s.content, func_at(x.from_ea) as function, printf('0x%X', x.from_ea) as location
+SELECT s.content, (SELECT name FROM funcs WHERE x.from_ea >= address AND x.from_ea < end_ea LIMIT 1) as function, printf('0x%X', x.from_ea) as location
 FROM strings s
 JOIN xrefs x ON s.address = x.to_ea
 WHERE s.content LIKE '%config%';
@@ -2849,7 +2987,6 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | Modify database | `funcs`, `names`, `comments`, `bookmarks` (INSERT/UPDATE/DELETE) |
 | Store custom key-value data | `netnode_kv` (full CRUD, persists in IDB) |
 | Entity search (structured) | `grep WHERE pattern = '...'` |
-| Entity search (JSON) | `grep('pattern', limit, offset)` |
 
 **Remember:** Always use `func_addr = X` constraints on instruction and decompiler tables for acceptable performance.
 

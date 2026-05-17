@@ -1353,6 +1353,52 @@ void LvarsInFuncIterator::column(xsql::FunctionContext& ctx, int col) {
 
 int64_t LvarsInFuncIterator::rowid() const { return static_cast<int64_t>(idx_); }
 
+// --- CtreeLabelsInFuncIterator ---
+
+CtreeLabelsInFuncIterator::CtreeLabelsInFuncIterator(ea_t func_addr) {
+    collect_ctree_labels(labels_, func_addr);
+}
+
+bool CtreeLabelsInFuncIterator::next() {
+    if (!started_) {
+        started_ = true;
+        if (labels_.empty()) return false;
+        idx_ = 0;
+        return true;
+    }
+    if (idx_ + 1 < labels_.size()) { ++idx_; return true; }
+    idx_ = labels_.size();
+    return false;
+}
+
+bool CtreeLabelsInFuncIterator::eof() const {
+    return started_ && idx_ >= labels_.size();
+}
+
+void CtreeLabelsInFuncIterator::column(xsql::FunctionContext& ctx, int col) {
+    if (idx_ >= labels_.size()) { ctx.result_null(); return; }
+    const auto& label = labels_[idx_];
+    switch (col) {
+        case 0: ctx.result_int64(label.func_addr); break;
+        case 1: ctx.result_int(label.label_num); break;
+        case 2: ctx.result_text(label.name.c_str()); break;
+        case 3: ctx.result_int(label.item_id); break;
+        case 4:
+            if (label.item_ea != BADADDR) {
+                ctx.result_int64(label.item_ea);
+            } else {
+                ctx.result_int64(0);
+            }
+            break;
+        case 5: ctx.result_int(label.is_user_defined ? 1 : 0); break;
+        default: ctx.result_null(); break;
+    }
+}
+
+int64_t CtreeLabelsInFuncIterator::rowid() const {
+    return static_cast<int64_t>(idx_);
+}
+
 // --- CtreeInFuncIterator ---
 
 CtreeInFuncIterator::CtreeInFuncIterator(ea_t func_addr) {
@@ -2021,7 +2067,7 @@ LabelRenameResult rename_label_ex(ea_t func_addr, int label_num, const char* new
         user_labels_second(it) = new_name;
     }
 
-    save_user_labels(func_addr, labels, &*cfunc);
+    save_user_labels(func_addr, labels);
     user_labels_free(labels);
 
     invalidate_decompiler_cache(func_addr);
@@ -2448,6 +2494,22 @@ CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
             row = rows[idx];
             return true;
         })
+        .row_populator([](CtreeLabelInfo& row, int argc, xsql::FunctionArg* argv) {
+            // argv[2]=func_addr, argv[3]=label_num, argv[4]=name, argv[5]=item_id,
+            // argv[6]=item_ea, argv[7]=is_user_defined
+            if (argc > 2) row.func_addr = static_cast<ea_t>(argv[2].as_int64());
+            if (argc > 3) row.label_num = argv[3].as_int();
+            if (argc > 4 && !argv[4].is_null()) {
+                const char* v = argv[4].as_c_str();
+                row.name = v ? v : "";
+            }
+            if (argc > 5) row.item_id = argv[5].as_int();
+            if (argc > 6) {
+                ea_t ea = static_cast<ea_t>(argv[6].as_int64());
+                row.item_ea = ea != 0 ? ea : BADADDR;
+            }
+            if (argc > 7) row.is_user_defined = argv[7].as_int() != 0;
+        })
         .column_int64("func_addr", [](const CtreeLabelInfo& row) -> int64_t { return row.func_addr; })
         .column_int("label_num", [](const CtreeLabelInfo& row) -> int { return row.label_num; })
         .column_text_rw("name",
@@ -2456,11 +2518,11 @@ CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
             },
             [](CtreeLabelInfo& row, const char* new_name) -> bool {
                 const std::string requested = new_name ? new_name : "";
-                if (requested == row.name) return true;
-                bool ok = rename_label(row.func_addr, row.label_num, new_name);
-                if (!ok) {
+                LabelRenameResult r = rename_label_ex(row.func_addr, row.label_num, new_name);
+                if (!r.success || (!r.applied && r.reason != "unchanged")) {
                     xsql::set_vtab_error(
-                        "ctree_labels rename failed (func=" +
+                        "ctree_labels rename failed: " + r.reason +
+                        " (func=" +
                         format_ea_hex(row.func_addr) +
                         " label=" + std::to_string(row.label_num) + ")");
                     return false;
@@ -2478,6 +2540,9 @@ CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
         .column_int("is_user_defined", [](const CtreeLabelInfo& row) -> int {
             return row.is_user_defined ? 1 : 0;
         })
+        .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<CtreeLabelsInFuncIterator>(static_cast<ea_t>(func_addr));
+        }, 10.0, 8.0)
         .build();
 }
 

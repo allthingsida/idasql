@@ -6,7 +6,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 /**
- * search_bytes.hpp - Binary pattern search functions for IDASQL
+ * search_bytes.hpp - Binary pattern search table for IDASQL
  */
 
 #pragma once
@@ -14,8 +14,8 @@
 #include <idasql/platform.hpp>
 
 #include <xsql/database.hpp>
-#include <xsql/functions.hpp>
-#include <xsql/json.hpp>
+#include <xsql/vtable.hpp>
+
 #include <string>
 #include <vector>
 
@@ -37,9 +37,9 @@ size_t find_byte_pattern(
     std::vector<ByteSearchResult>& results,
     size_t max_results = 0);
 
-ea_t find_first_pattern(const char* pattern, ea_t start_ea, ea_t end_ea);
+xsql::GeneratorTableDef<ByteSearchResult> define_byte_search();
 
-bool register_search_bytes(xsql::Database& db);
+bool register_byte_search(xsql::Database& db);
 
 } // namespace search
 } // namespace idasql

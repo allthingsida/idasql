@@ -9,7 +9,6 @@
  * example_grep_search.cpp - Grep-style unified entity search
  *
  * Demonstrates:
- *   - grep() SQL function (JSON output)
  *   - grep virtual table (structured rows)
  *   - Pattern semantics and pagination
  */
@@ -41,14 +40,6 @@ int main(int argc, char* argv[]) {
     std::string escaped_pattern = pattern;
     for (size_t pos = 0; (pos = escaped_pattern.find('\'', pos)) != std::string::npos; pos += 2) {
         escaped_pattern.insert(pos, 1, '\'');
-    }
-
-    std::cout << "=== grep() JSON Search ===\n\n";
-    auto json_result = session.query(
-        "SELECT grep('" + escaped_pattern + "', 10, 0)"
-    );
-    if (json_result.row_count() > 0) {
-        std::cout << json_result.scalar() << "\n\n";
     }
 
     std::cout << "=== grep Table Search ===\n\n";

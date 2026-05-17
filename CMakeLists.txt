@@ -106,6 +106,12 @@ if(IDASQL_WITH_MCP)
     if(MSVC AND TARGET fastmcpp_core)
         target_compile_options(fastmcpp_core PRIVATE /MP)
     endif()
+
+    # fastmcpp_core is a static library that gets linked into the idasql plugin
+    # (a shared library on Linux). Enable PIC so the link succeeds.
+    if(TARGET fastmcpp_core)
+        set_property(TARGET fastmcpp_core PROPERTY POSITION_INDEPENDENT_CODE ON)
+    endif()
 endif()
 
 # Add subdirectories

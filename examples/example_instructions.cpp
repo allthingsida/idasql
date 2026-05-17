@@ -95,10 +95,11 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Functions with Most NOPs ===\n";
 
     auto nops = session.query(
-        "SELECT func_at(func_addr) as name, COUNT(*) as nop_count "
-        "FROM instructions "
-        "WHERE mnemonic = 'nop' "
-        "GROUP BY func_addr "
+        "SELECT f.name as name, COUNT(*) as nop_count "
+        "FROM instructions i "
+        "JOIN funcs f ON i.func_addr = f.address "
+        "WHERE i.mnemonic = 'nop' "
+        "GROUP BY i.func_addr, f.name "
         "HAVING nop_count > 5 "
         "ORDER BY nop_count DESC "
         "LIMIT 10"
@@ -135,11 +136,12 @@ int main(int argc, char* argv[]) {
     // Functions with unusual push/pop ratio
     auto unusual = session.query(
         "SELECT "
-        "  func_at(func_addr) as name, "
+        "  f.name as name, "
         "  SUM(CASE WHEN mnemonic = 'push' THEN 1 ELSE 0 END) as pushes, "
         "  SUM(CASE WHEN mnemonic = 'pop' THEN 1 ELSE 0 END) as pops "
-        "FROM instructions "
-        "GROUP BY func_addr "
+        "FROM instructions i "
+        "JOIN funcs f ON i.func_addr = f.address "
+        "GROUP BY i.func_addr, f.name "
         "HAVING pushes > 20 AND ABS(pushes - pops) > 5 "
         "ORDER BY pushes DESC "
         "LIMIT 10"

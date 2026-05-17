@@ -142,11 +142,12 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Functions Using Most Strings (Top 10) ===\n";
 
     auto by_func = session.query(
-        "SELECT func_at(x.from_ea) as func_name, COUNT(DISTINCT s.address) as str_count "
+        "SELECT f.name as func_name, COUNT(DISTINCT s.address) as str_count "
         "FROM strings s "
         "JOIN xrefs x ON s.address = x.to_ea "
-        "WHERE func_at(x.from_ea) IS NOT NULL "
-        "GROUP BY func_at(x.from_ea) "
+        "JOIN funcs f ON x.from_func = f.address "
+        "WHERE x.from_func != 0 "
+        "GROUP BY x.from_func, f.name "
         "ORDER BY str_count DESC "
         "LIMIT 10"
     );

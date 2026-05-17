@@ -116,8 +116,8 @@ int main(int argc, char* argv[]) {
 
     // Get function at specific index
     auto first_func = session.query(
-        "SELECT printf('0x%X', func_at_index(0)) as addr, "
-        "       func_at(func_at_index(0)) as name"
+        "SELECT printf('0x%X', address) as addr, name "
+        "FROM funcs WHERE rowid = 0"
     );
     if (!first_func.empty()) {
         std::cout << "First function: " << first_func.rows[0][1]

@@ -408,7 +408,7 @@ void QueryEngine::init() {
     decompiler_->register_all(db_);
 
     functions::register_sql_functions(db_);
-    search::register_search_bytes(db_);
+    search::register_byte_search(db_);
 }
 
 // ============================================================================

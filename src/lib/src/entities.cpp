@@ -166,6 +166,7 @@ CachedTableDef<FuncRow> define_funcs() {
   return cached_table<FuncRow>("funcs")
       .no_shared_cache()
       .estimate_rows([]() -> size_t { return get_func_qty(); })
+      .count([]() -> size_t { return get_func_qty(); })
       .cache_builder([](std::vector<FuncRow> &rows) {
         rows.clear();
         const size_t n = get_func_qty();
@@ -1360,6 +1361,7 @@ CachedTableDef<string_info_t> define_strings() {
   return cached_table<string_info_t>("strings")
       .no_shared_cache()
       .estimate_rows([]() -> size_t { return get_strlist_qty(); })
+      .count([]() -> size_t { return get_strlist_qty(); })
       .cache_builder([](std::vector<string_info_t> &cache) {
         size_t n = get_strlist_qty();
         for (size_t i = 0; i < n; i++) {
@@ -1552,13 +1554,167 @@ const char *get_item_type_str(ea_t ea) {
   return "other";
 }
 
-CachedTableDef<HeadRow> define_heads() {
-  return cached_table<HeadRow>("heads")
-      .no_shared_cache()
+namespace {
+
+enum class HeadOrder { Asc, Desc };
+
+struct HeadBounds {
+  bool has_lower = false;
+  ea_t lower = 0;
+  bool lower_inclusive = true;
+  bool has_upper = false;
+  ea_t upper = 0;
+  bool upper_inclusive = true;
+};
+
+bool is_defined_head(ea_t ea) {
+  return ea != BADADDR && is_head(get_flags(ea));
+}
+
+ea_t normalize_sql_ea(int64_t value) {
+  return static_cast<ea_t>(static_cast<uint64_t>(value));
+}
+
+void tighten_lower_bound(HeadBounds &bounds, ea_t ea, bool inclusive) {
+  if (!bounds.has_lower || ea > bounds.lower ||
+      (ea == bounds.lower && !inclusive && bounds.lower_inclusive)) {
+    bounds.has_lower = true;
+    bounds.lower = ea;
+    bounds.lower_inclusive = inclusive;
+  }
+}
+
+void tighten_upper_bound(HeadBounds &bounds, ea_t ea, bool inclusive) {
+  if (!bounds.has_upper || ea < bounds.upper ||
+      (ea == bounds.upper && !inclusive && bounds.upper_inclusive)) {
+    bounds.has_upper = true;
+    bounds.upper = ea;
+    bounds.upper_inclusive = inclusive;
+  }
+}
+
+bool head_within_bounds(ea_t ea, const HeadBounds &bounds) {
+  if (ea == BADADDR)
+    return false;
+  if (bounds.has_lower &&
+      (ea < bounds.lower ||
+       (ea == bounds.lower && !bounds.lower_inclusive))) {
+    return false;
+  }
+  if (bounds.has_upper &&
+      (ea > bounds.upper ||
+       (ea == bounds.upper && !bounds.upper_inclusive))) {
+    return false;
+  }
+  return true;
+}
+
+class HeadsGenerator : public xsql::Generator<HeadRow> {
+  HeadOrder order_;
+  HeadBounds bounds_;
+  bool started_ = false;
+  ea_t current_ea_ = BADADDR;
+  mutable HeadRow row_{BADADDR};
+
+  ea_t first_ascending() const {
+    const ea_t max_ea = inf_get_max_ea();
+    ea_t start = bounds_.has_lower ? bounds_.lower : inf_get_min_ea();
+    if (start == BADADDR || start >= max_ea)
+      return BADADDR;
+    if (bounds_.has_lower && !bounds_.lower_inclusive)
+      return next_head(start, max_ea);
+    if (is_defined_head(start))
+      return start;
+    return next_head(start, max_ea);
+  }
+
+  ea_t first_descending() const {
+    const ea_t min_ea = inf_get_min_ea();
+    ea_t start = bounds_.has_upper ? bounds_.upper : inf_get_max_ea();
+    if (start == BADADDR)
+      return BADADDR;
+    if (bounds_.has_upper && bounds_.upper_inclusive &&
+        is_defined_head(start)) {
+      return start;
+    }
+    if (start <= min_ea)
+      return BADADDR;
+    return prev_head(start, min_ea);
+  }
+
+public:
+  HeadsGenerator(HeadOrder order, HeadBounds bounds)
+      : order_(order), bounds_(bounds) {}
+
+  bool next() override {
+    ea_t next_ea = BADADDR;
+    if (!started_) {
+      started_ = true;
+      next_ea =
+          order_ == HeadOrder::Asc ? first_ascending() : first_descending();
+    } else if (order_ == HeadOrder::Asc) {
+      next_ea = next_head(current_ea_, inf_get_max_ea());
+    } else {
+      next_ea = prev_head(current_ea_, inf_get_min_ea());
+    }
+
+    if (!head_within_bounds(next_ea, bounds_)) {
+      current_ea_ = BADADDR;
+      return false;
+    }
+
+    current_ea_ = next_ea;
+    row_.ea = current_ea_;
+    return true;
+  }
+
+  const HeadRow &current() const override { return row_; }
+
+  int64_t rowid() const override { return static_cast<int64_t>(current_ea_); }
+};
+
+void apply_head_constraint(HeadBounds &bounds,
+                           const xsql::GeneratorConstraintArg &arg) {
+  const ea_t ea = normalize_sql_ea(arg.value.as_int64());
+  switch (arg.op) {
+  case xsql::ConstraintOp::Eq:
+    tighten_lower_bound(bounds, ea, true);
+    tighten_upper_bound(bounds, ea, true);
+    break;
+  case xsql::ConstraintOp::Gt:
+    tighten_lower_bound(bounds, ea, false);
+    break;
+  case xsql::ConstraintOp::Ge:
+    tighten_lower_bound(bounds, ea, true);
+    break;
+  case xsql::ConstraintOp::Lt:
+    tighten_upper_bound(bounds, ea, false);
+    break;
+  case xsql::ConstraintOp::Le:
+    tighten_upper_bound(bounds, ea, true);
+    break;
+  }
+}
+
+std::unique_ptr<xsql::Generator<HeadRow>>
+make_heads_generator(HeadOrder order,
+                     const std::vector<xsql::GeneratorConstraintArg> &args) {
+  HeadBounds bounds;
+  for (const auto &arg : args) {
+    apply_head_constraint(bounds, arg);
+  }
+  return std::make_unique<HeadsGenerator>(order, bounds);
+}
+
+} // namespace
+
+GeneratorTableDef<HeadRow> define_heads() {
+  return generator_table<HeadRow>("heads")
       .estimate_rows(
           []() -> size_t { return static_cast<size_t>(get_nlist_size()); })
-      .cache_builder(
-          [](std::vector<HeadRow> &rows) { collect_head_rows(rows); })
+      .generator([]() -> std::unique_ptr<xsql::Generator<HeadRow>> {
+        return std::make_unique<HeadsGenerator>(HeadOrder::Asc, HeadBounds{});
+      })
       .column_int64("address",
                     [](const HeadRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
@@ -1582,83 +1738,285 @@ CachedTableDef<HeadRow> define_heads() {
                      tag_remove(&line);
                      return line.c_str();
                    })
+      .constraint_filter(
+          {xsql::required_eq("address", "")},
+          [](const std::vector<xsql::GeneratorConstraintArg> &args)
+              -> std::unique_ptr<xsql::Generator<HeadRow>> {
+            return make_heads_generator(HeadOrder::Asc, args);
+          },
+          1.0, 1.0)
+      .constraint_filter(
+          {xsql::optional_ge("address"), xsql::optional_gt("address"),
+           xsql::optional_lt("address"), xsql::optional_le("address")},
+          [](const std::vector<xsql::GeneratorConstraintArg> &args)
+              -> std::unique_ptr<xsql::Generator<HeadRow>> {
+            return make_heads_generator(HeadOrder::Asc, args);
+          },
+          10.0, 100.0)
+      .order_by_consumed("address")
+      .constraint_filter(
+          {xsql::optional_ge("address"), xsql::optional_gt("address"),
+           xsql::optional_lt("address"), xsql::optional_le("address")},
+          [](const std::vector<xsql::GeneratorConstraintArg> &args)
+              -> std::unique_ptr<xsql::Generator<HeadRow>> {
+            return make_heads_generator(HeadOrder::Desc, args);
+          },
+          10.0, 100.0)
+      .order_by_consumed("address", true)
       .build();
 }
 
 // ============================================================================
-// BYTES Table - Read/write byte values with patch support
+// BYTES Table - Raw mapped bytes with patch support
 // ============================================================================
 
-BytesAtIterator::BytesAtIterator(ea_t ea) : ea_(ea) {}
+namespace {
 
-bool BytesAtIterator::next() {
-  if (yielded_) {
-    // Second call - exhausted
-    exhausted_ = true;
+enum class ByteOrder { Asc, Desc };
+
+struct ByteBounds {
+  bool has_lower = false;
+  ea_t lower = 0;
+  bool lower_inclusive = true;
+  bool has_upper = false;
+  ea_t upper = 0;
+  bool upper_inclusive = true;
+};
+
+void tighten_byte_lower_bound(ByteBounds &bounds, ea_t ea, bool inclusive) {
+  if (!bounds.has_lower || ea > bounds.lower ||
+      (ea == bounds.lower && !inclusive && bounds.lower_inclusive)) {
+    bounds.has_lower = true;
+    bounds.lower = ea;
+    bounds.lower_inclusive = inclusive;
+  }
+}
+
+void tighten_byte_upper_bound(ByteBounds &bounds, ea_t ea, bool inclusive) {
+  if (!bounds.has_upper || ea < bounds.upper ||
+      (ea == bounds.upper && !inclusive && bounds.upper_inclusive)) {
+    bounds.has_upper = true;
+    bounds.upper = ea;
+    bounds.upper_inclusive = inclusive;
+  }
+}
+
+bool byte_beyond_upper(ea_t ea, const ByteBounds &bounds) {
+  return bounds.has_upper &&
+         (ea > bounds.upper || (ea == bounds.upper && !bounds.upper_inclusive));
+}
+
+bool byte_below_lower(ea_t ea, const ByteBounds &bounds) {
+  return bounds.has_lower &&
+         (ea < bounds.lower || (ea == bounds.lower && !bounds.lower_inclusive));
+}
+
+bool byte_within_bounds(ea_t ea, const ByteBounds &bounds) {
+  if (ea == BADADDR)
     return false;
-  }
-  // First call - yield the single row
-  yielded_ = true;
-  return true;
+  return !byte_below_lower(ea, bounds) && !byte_beyond_upper(ea, bounds);
 }
 
-bool BytesAtIterator::eof() const { return exhausted_; }
+bool is_mapped_byte_address(ea_t ea) {
+  return ea != BADADDR && is_mapped(ea);
+}
 
-void BytesAtIterator::column(xsql::FunctionContext &ctx, int col) {
-  switch (col) {
-  case 0: // ea
-    ctx.result_int64(ea_);
-    break;
-  case 1: // value
-    ctx.result_int(get_byte(ea_));
-    break;
-  case 2: // original_value
-    ctx.result_int(static_cast<int>(get_original_byte(ea_)));
-    break;
-  case 3: // size
-    ctx.result_int(static_cast<int>(get_item_size(ea_)));
-    break;
-  case 4: // type
-    ctx.result_text(get_item_type_str(ea_));
-    break;
-  case 5: { // is_patched
-    int patched =
-        (get_byte(ea_) != static_cast<uchar>(get_original_byte(ea_))) ? 1 : 0;
-    ctx.result_int(patched);
-    break;
+size_t estimate_mapped_byte_rows() {
+  uint64 total = 0;
+  for (int i = 0; i < get_segm_qty(); ++i) {
+    segment_t *seg = getnseg(i);
+    if (!seg || seg->end_ea <= seg->start_ea)
+      continue;
+    total += static_cast<uint64>(seg->end_ea - seg->start_ea);
+    if (total > static_cast<uint64>(std::numeric_limits<size_t>::max()))
+      return std::numeric_limits<size_t>::max();
   }
-  case 6: { // fpos
-    const qoff64_t fpos = get_fileregion_offset(ea_);
-    if (fpos < 0)
-      ctx.result_null();
-    else
-      ctx.result_int64(static_cast<int64_t>(fpos));
-    break;
+  return static_cast<size_t>(total);
+}
+
+class BytesGenerator : public xsql::Generator<ByteRow> {
+  ByteOrder order_;
+  ByteBounds bounds_;
+  bool started_ = false;
+  ea_t current_ea_ = BADADDR;
+  mutable ByteRow row_{BADADDR};
+
+  ea_t first_ascending() const {
+    ea_t start = bounds_.has_lower ? bounds_.lower : inf_get_min_ea();
+    if (start == BADADDR)
+      return BADADDR;
+    if (bounds_.has_lower && !bounds_.lower_inclusive) {
+      if (start == BADADDR - 1)
+        return BADADDR;
+      ++start;
+    }
+    return next_mapped_at_or_after(start);
   }
+
+  ea_t first_descending() const {
+    if (get_segm_qty() <= 0)
+      return BADADDR;
+
+    ea_t start = BADADDR;
+    if (bounds_.has_upper) {
+      start = bounds_.upper;
+      if (!bounds_.upper_inclusive) {
+        if (start == 0)
+          return BADADDR;
+        --start;
+      }
+    } else {
+      segment_t *seg = get_last_seg();
+      if (!seg || seg->end_ea <= seg->start_ea)
+        return BADADDR;
+      start = seg->end_ea - 1;
+    }
+    return prev_mapped_at_or_before(start);
+  }
+
+  ea_t next_mapped_at_or_after(ea_t start) const {
+    segment_t *seg = getseg(start);
+    if (!seg)
+      seg = get_next_seg(start);
+
+    while (seg) {
+      ea_t ea = start > seg->start_ea ? start : seg->start_ea;
+      while (ea < seg->end_ea) {
+        if (byte_beyond_upper(ea, bounds_))
+          return BADADDR;
+        if (byte_within_bounds(ea, bounds_) && is_mapped_byte_address(ea))
+          return ea;
+        if (ea == BADADDR - 1)
+          return BADADDR;
+        ++ea;
+      }
+
+      seg = get_next_seg(seg->start_ea);
+      if (seg)
+        start = seg->start_ea;
+    }
+    return BADADDR;
+  }
+
+  ea_t prev_mapped_at_or_before(ea_t start) const {
+    segment_t *seg = getseg(start);
+    if (!seg)
+      seg = get_prev_seg(start);
+
+    while (seg) {
+      if (seg->end_ea <= seg->start_ea) {
+        seg = get_prev_seg(seg->start_ea);
+        continue;
+      }
+
+      ea_t ea = start < seg->end_ea ? start : seg->end_ea - 1;
+      while (true) {
+        if (byte_below_lower(ea, bounds_))
+          return BADADDR;
+        if (byte_within_bounds(ea, bounds_) && is_mapped_byte_address(ea))
+          return ea;
+        if (ea == seg->start_ea || ea == 0)
+          break;
+        --ea;
+      }
+
+      if (seg->start_ea == 0)
+        return BADADDR;
+      seg = get_prev_seg(seg->start_ea);
+      if (seg && seg->end_ea > seg->start_ea)
+        start = seg->end_ea - 1;
+    }
+    return BADADDR;
+  }
+
+public:
+  BytesGenerator(ByteOrder order, ByteBounds bounds)
+      : order_(order), bounds_(bounds) {}
+
+  bool next() override {
+    ea_t next_ea = BADADDR;
+    if (!started_) {
+      started_ = true;
+      next_ea =
+          order_ == ByteOrder::Asc ? first_ascending() : first_descending();
+    } else if (order_ == ByteOrder::Asc) {
+      if (current_ea_ == BADADDR - 1)
+        return false;
+      next_ea = next_mapped_at_or_after(current_ea_ + 1);
+    } else {
+      if (current_ea_ == 0)
+        return false;
+      next_ea = prev_mapped_at_or_before(current_ea_ - 1);
+    }
+
+    if (!byte_within_bounds(next_ea, bounds_)) {
+      current_ea_ = BADADDR;
+      return false;
+    }
+
+    current_ea_ = next_ea;
+    row_.ea = current_ea_;
+    return true;
+  }
+
+  const ByteRow &current() const override { return row_; }
+
+  int64_t rowid() const override { return static_cast<int64_t>(current_ea_); }
+};
+
+void apply_byte_constraint(ByteBounds &bounds,
+                           const xsql::GeneratorConstraintArg &arg) {
+  const ea_t ea = normalize_sql_ea(arg.value.as_int64());
+  switch (arg.op) {
+  case xsql::ConstraintOp::Eq:
+    tighten_byte_lower_bound(bounds, ea, true);
+    tighten_byte_upper_bound(bounds, ea, true);
+    break;
+  case xsql::ConstraintOp::Gt:
+    tighten_byte_lower_bound(bounds, ea, false);
+    break;
+  case xsql::ConstraintOp::Ge:
+    tighten_byte_lower_bound(bounds, ea, true);
+    break;
+  case xsql::ConstraintOp::Lt:
+    tighten_byte_upper_bound(bounds, ea, false);
+    break;
+  case xsql::ConstraintOp::Le:
+    tighten_byte_upper_bound(bounds, ea, true);
+    break;
   }
 }
 
-int64_t BytesAtIterator::rowid() const { return static_cast<int64_t>(ea_); }
+std::unique_ptr<xsql::Generator<ByteRow>>
+make_bytes_generator(ByteOrder order,
+                     const std::vector<xsql::GeneratorConstraintArg> &args) {
+  ByteBounds bounds;
+  for (const auto &arg : args) {
+    apply_byte_constraint(bounds, arg);
+  }
+  return std::make_unique<BytesGenerator>(order, bounds);
+}
 
-CachedTableDef<HeadRow> define_bytes() {
-  return cached_table<HeadRow>("bytes")
-      .no_shared_cache()
-      .estimate_rows(
-          []() -> size_t { return static_cast<size_t>(get_nlist_size()); })
-      .cache_builder(
-          [](std::vector<HeadRow> &rows) { collect_head_rows(rows); })
-      .row_populator([](HeadRow &row, int argc, xsql::FunctionArg *argv) {
-        // argv[2] = ea, argv[3] = value, ...
-        if (argc > 2)
-          row.ea = static_cast<ea_t>(argv[2].as_int64());
+} // namespace
+
+GeneratorTableDef<ByteRow> define_bytes() {
+  return generator_table<ByteRow>("bytes")
+      .estimate_rows([]() -> size_t { return estimate_mapped_byte_rows(); })
+      .generator([]() -> std::unique_ptr<xsql::Generator<ByteRow>> {
+        return std::make_unique<BytesGenerator>(ByteOrder::Asc, ByteBounds{});
       })
       .column_int64("ea",
-                    [](const HeadRow &row) -> int64_t {
+                    [](const ByteRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
                     })
       .column_int_rw(
-          "value", [](const HeadRow &row) -> int { return get_byte(row.ea); },
-          [](HeadRow &row, int val) -> bool {
+          "value", [](const ByteRow &row) -> int { return get_byte(row.ea); },
+          [](ByteRow &row, int val) -> bool {
+            if (!is_mapped_byte_address(row.ea)) {
+              xsql::set_vtab_error("bytes: address is not mapped: " +
+                                   idasql::format_ea_hex(row.ea));
+              return false;
+            }
             bool ok = patch_byte(row.ea, static_cast<uint64>(val));
             if (!ok)
               xsql::set_vtab_error("bytes: failed to patch byte at " +
@@ -1666,38 +2024,56 @@ CachedTableDef<HeadRow> define_bytes() {
             return ok;
           })
       .column_int("original_value",
-                  [](const HeadRow &row) -> int {
+                  [](const ByteRow &row) -> int {
                     return static_cast<int>(get_original_byte(row.ea));
                   })
-      .column_int("size",
-                  [](const HeadRow &row) -> int {
-                    return static_cast<int>(get_item_size(row.ea));
-                  })
-      .column_text("type",
-                   [](const HeadRow &row) -> std::string {
-                     return get_item_type_str(row.ea);
-                   })
       .column_int("is_patched",
-                  [](const HeadRow &row) -> int {
+                  [](const ByteRow &row) -> int {
                     return (get_byte(row.ea) !=
                             static_cast<uchar>(get_original_byte(row.ea)))
                                ? 1
                                : 0;
                   })
       .column("fpos", xsql::ColumnType::Integer,
-              [](xsql::FunctionContext &ctx, const HeadRow &row) {
+              [](xsql::FunctionContext &ctx, const ByteRow &row) {
                 const qoff64_t fpos = get_fileregion_offset(row.ea);
                 if (fpos < 0)
                   ctx.result_null();
                 else
                   ctx.result_int64(static_cast<int64_t>(fpos));
-              })
-      .filter_eq(
-          "ea",
-          [](int64_t ea_val) -> std::unique_ptr<xsql::RowIterator> {
-            return std::make_unique<BytesAtIterator>(static_cast<ea_t>(ea_val));
+      })
+      .row_lookup([](ByteRow &row, int64_t ea_val) -> bool {
+        const ea_t ea = normalize_sql_ea(ea_val);
+        if (!is_mapped_byte_address(ea))
+          return false;
+        row.ea = ea;
+        return true;
+      })
+      .constraint_filter(
+          {xsql::required_eq("ea", "")},
+          [](const std::vector<xsql::GeneratorConstraintArg> &args)
+              -> std::unique_ptr<xsql::Generator<ByteRow>> {
+            return make_bytes_generator(ByteOrder::Asc, args);
           },
-          1.0)
+          1.0, 1.0)
+      .constraint_filter(
+          {xsql::optional_ge("ea"), xsql::optional_gt("ea"),
+           xsql::optional_lt("ea"), xsql::optional_le("ea")},
+          [](const std::vector<xsql::GeneratorConstraintArg> &args)
+              -> std::unique_ptr<xsql::Generator<ByteRow>> {
+            return make_bytes_generator(ByteOrder::Asc, args);
+          },
+          10.0, 100.0)
+      .order_by_consumed("ea")
+      .constraint_filter(
+          {xsql::optional_ge("ea"), xsql::optional_gt("ea"),
+           xsql::optional_lt("ea"), xsql::optional_le("ea")},
+          [](const std::vector<xsql::GeneratorConstraintArg> &args)
+              -> std::unique_ptr<xsql::Generator<ByteRow>> {
+            return make_bytes_generator(ByteOrder::Desc, args);
+          },
+          10.0, 100.0)
+      .order_by_consumed("ea", true)
       .build();
 }
 
@@ -2183,10 +2559,10 @@ bool apply_operand_representation(ea_t ea, int opnum,
   return ok;
 }
 
-const char *operand_class_name(optype_t type) {
+const char *operand_type_name(optype_t type) {
   switch (type) {
   case o_void:
-    return "";
+    return "void";
   case o_reg:
     return "reg";
   case o_mem:
@@ -2208,6 +2584,29 @@ const char *operand_class_name(optype_t type) {
   case o_idpspec4:
   case o_idpspec5:
     return "idpspec";
+  default:
+    return "idpspec";
+  }
+}
+
+const char *operand_class_name(optype_t type) {
+  switch (type) {
+  case o_void:
+    return "";
+  case o_reg:
+  case o_mem:
+  case o_phrase:
+  case o_displ:
+  case o_imm:
+  case o_far:
+  case o_near:
+  case o_idpspec0:
+  case o_idpspec1:
+  case o_idpspec2:
+  case o_idpspec3:
+  case o_idpspec4:
+  case o_idpspec5:
+    return operand_type_name(type);
   default:
     return "unknown";
   }
@@ -2754,6 +3153,302 @@ CachedTableDef<InstructionRow> define_instructions() {
 }
 
 // ============================================================================
+// INSTRUCTION_OPERANDS Table - One decoded operand per row
+// ============================================================================
+
+static int64_t instruction_operand_rowid(ea_t ea, int opnum) {
+  return static_cast<int64_t>(ea) * kInstructionOperandCount + opnum;
+}
+
+static int64_t operand_value_for_row(const op_t &op) {
+  switch (op.type) {
+  case o_imm:
+    return static_cast<int64_t>(op.value);
+  case o_mem:
+  case o_near:
+  case o_far:
+  case o_displ:
+    return static_cast<int64_t>(op.addr);
+  case o_reg:
+    return static_cast<int64_t>(op.reg);
+  default:
+    return static_cast<int64_t>(op.value);
+  }
+}
+
+void instruction_operand_column_common(xsql::FunctionContext &ctx, ea_t ea,
+                                       int opnum, int col) {
+  insn_t insn;
+  op_t op;
+  if (!decode_operand(ea, opnum, insn, op, nullptr)) {
+    ctx.result_null();
+    return;
+  }
+
+  switch (col) {
+  case 0:
+    ctx.result_int64(ea);
+    break;
+  case 1: {
+    func_t *f = get_func(ea);
+    ctx.result_int64(f ? f->start_ea : 0);
+    break;
+  }
+  case 2:
+    ctx.result_int(opnum);
+    break;
+  case 3: {
+    qstring text;
+    print_operand(&text, ea, opnum);
+    tag_remove(&text);
+    ctx.result_text(text.c_str());
+    break;
+  }
+  case 4:
+    ctx.result_int(static_cast<int>(op.type));
+    break;
+  case 5:
+    ctx.result_text_static(operand_type_name(op.type));
+    break;
+  case 6:
+    ctx.result_int(static_cast<int>(op.dtype));
+    break;
+  case 7:
+    ctx.result_int(op.reg);
+    break;
+  case 8:
+    ctx.result_int64(static_cast<int64_t>(op.addr));
+    break;
+  case 9:
+    ctx.result_int64(static_cast<int64_t>(op.value));
+    break;
+  case 10:
+    ctx.result_int64(operand_value_for_row(op));
+    break;
+  default:
+    ctx.result_null();
+    break;
+  }
+}
+
+void collect_instruction_operand_rows(std::vector<InstructionOperandRow> &rows) {
+  rows.clear();
+
+  ea_t ea = inf_get_min_ea();
+  ea_t max_ea = inf_get_max_ea();
+  while (ea < max_ea && ea != BADADDR) {
+    if (is_code(get_flags(ea))) {
+      insn_t insn;
+      if (decode_insn(&insn, ea) > 0) {
+        for (int opnum = 0; opnum < UA_MAXOP; ++opnum) {
+          if (insn.ops[opnum].type == o_void)
+            break;
+          rows.push_back({ea, opnum});
+        }
+      }
+    }
+    ea = next_head(ea, max_ea);
+  }
+}
+
+InstructionOperandsAtAddressIterator::InstructionOperandsAtAddressIterator(
+    ea_t ea)
+    : ea_(ea) {}
+
+bool InstructionOperandsAtAddressIterator::advance_to_next_operand() {
+  while (++opnum_ < UA_MAXOP) {
+    if (insn_.ops[opnum_].type != o_void)
+      return true;
+  }
+  return false;
+}
+
+bool InstructionOperandsAtAddressIterator::next() {
+  if (!started_) {
+    started_ = true;
+    decoded_ = (ea_ != BADADDR) && is_code(get_flags(ea_)) &&
+               decode_insn(&insn_, ea_) > 0;
+    valid_ = decoded_ && advance_to_next_operand();
+    return valid_;
+  }
+
+  valid_ = decoded_ && advance_to_next_operand();
+  return valid_;
+}
+
+bool InstructionOperandsAtAddressIterator::eof() const {
+  return started_ && !valid_;
+}
+
+void InstructionOperandsAtAddressIterator::column(xsql::FunctionContext &ctx,
+                                                  int col) {
+  instruction_operand_column_common(ctx, ea_, opnum_, col);
+}
+
+int64_t InstructionOperandsAtAddressIterator::rowid() const {
+  return instruction_operand_rowid(ea_, opnum_);
+}
+
+InstructionOperandsInFuncIterator::InstructionOperandsInFuncIterator(
+    ea_t func_addr)
+    : func_addr_(func_addr) {
+  pfn_ = get_func(func_addr_);
+}
+
+bool InstructionOperandsInFuncIterator::load_current_instruction() {
+  if (!fii_valid_)
+    return false;
+  current_ea_ = fii_.current();
+  decoded_ = decode_insn(&insn_, current_ea_) > 0;
+  opnum_ = -1;
+  return decoded_;
+}
+
+bool InstructionOperandsInFuncIterator::advance_to_next_operand() {
+  while (++opnum_ < UA_MAXOP) {
+    if (insn_.ops[opnum_].type != o_void)
+      return true;
+  }
+  return false;
+}
+
+bool InstructionOperandsInFuncIterator::advance_to_next_instruction_with_operand() {
+  while (fii_valid_) {
+    if (load_current_instruction() && advance_to_next_operand())
+      return true;
+    fii_valid_ = fii_.next_code();
+  }
+  return false;
+}
+
+bool InstructionOperandsInFuncIterator::next() {
+  if (!pfn_)
+    return false;
+
+  if (!started_) {
+    started_ = true;
+    fii_valid_ = fii_.set(pfn_);
+    valid_ = advance_to_next_instruction_with_operand();
+    return valid_;
+  }
+
+  if (valid_ && advance_to_next_operand())
+    return true;
+
+  if (fii_valid_)
+    fii_valid_ = fii_.next_code();
+  valid_ = advance_to_next_instruction_with_operand();
+  return valid_;
+}
+
+bool InstructionOperandsInFuncIterator::eof() const {
+  return started_ && !valid_;
+}
+
+void InstructionOperandsInFuncIterator::column(xsql::FunctionContext &ctx,
+                                               int col) {
+  instruction_operand_column_common(ctx, current_ea_, opnum_, col);
+}
+
+int64_t InstructionOperandsInFuncIterator::rowid() const {
+  return instruction_operand_rowid(current_ea_, opnum_);
+}
+
+CachedTableDef<InstructionOperandRow> define_instruction_operands() {
+  return cached_table<InstructionOperandRow>("instruction_operands")
+      .no_shared_cache()
+      .estimate_rows([]() -> size_t {
+        return static_cast<size_t>(get_nlist_size()) * 2;
+      })
+      .cache_builder([](std::vector<InstructionOperandRow> &rows) {
+        collect_instruction_operand_rows(rows);
+      })
+      .column_int64("address",
+                    [](const InstructionOperandRow &row) -> int64_t {
+                      return static_cast<int64_t>(row.ea);
+                    })
+      .column_int64("func_addr", [](const InstructionOperandRow &row) -> int64_t {
+        func_t *f = get_func(row.ea);
+        return f ? f->start_ea : 0;
+      })
+      .column_int("opnum", [](const InstructionOperandRow &row) -> int {
+        return row.opnum;
+      })
+      .column_text("text", [](const InstructionOperandRow &row) -> std::string {
+        qstring text;
+        print_operand(&text, row.ea, row.opnum);
+        tag_remove(&text);
+        return text.c_str();
+      })
+      .column_int("type_code", [](const InstructionOperandRow &row) -> int {
+        insn_t insn;
+        op_t op;
+        if (!decode_operand(row.ea, row.opnum, insn, op, nullptr))
+          return 0;
+        return static_cast<int>(op.type);
+      })
+      .column_text("type_name",
+                   [](const InstructionOperandRow &row) -> std::string {
+                     insn_t insn;
+                     op_t op;
+                     if (!decode_operand(row.ea, row.opnum, insn, op, nullptr))
+                       return "";
+                     return operand_type_name(op.type);
+                   })
+      .column_int("dtype", [](const InstructionOperandRow &row) -> int {
+        insn_t insn;
+        op_t op;
+        if (!decode_operand(row.ea, row.opnum, insn, op, nullptr))
+          return 0;
+        return static_cast<int>(op.dtype);
+      })
+      .column_int("reg", [](const InstructionOperandRow &row) -> int {
+        insn_t insn;
+        op_t op;
+        if (!decode_operand(row.ea, row.opnum, insn, op, nullptr))
+          return 0;
+        return op.reg;
+      })
+      .column_int64("addr", [](const InstructionOperandRow &row) -> int64_t {
+        insn_t insn;
+        op_t op;
+        if (!decode_operand(row.ea, row.opnum, insn, op, nullptr))
+          return 0;
+        return static_cast<int64_t>(op.addr);
+      })
+      .column_int64("raw_value",
+                    [](const InstructionOperandRow &row) -> int64_t {
+                      insn_t insn;
+                      op_t op;
+                      if (!decode_operand(row.ea, row.opnum, insn, op, nullptr))
+                        return 0;
+                      return static_cast<int64_t>(op.value);
+                    })
+      .column_int64("value", [](const InstructionOperandRow &row) -> int64_t {
+        insn_t insn;
+        op_t op;
+        if (!decode_operand(row.ea, row.opnum, insn, op, nullptr))
+          return 0;
+        return operand_value_for_row(op);
+      })
+      .filter_eq(
+          "address",
+          [](int64_t address) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<InstructionOperandsAtAddressIterator>(
+                static_cast<ea_t>(address));
+          },
+          1.0, 4.0)
+      .filter_eq(
+          "func_addr",
+          [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
+            return std::make_unique<InstructionOperandsInFuncIterator>(
+                static_cast<ea_t>(func_addr));
+          },
+          200.0)
+      .build();
+}
+
+// ============================================================================
 // USERDATA Table - netnode-backed key-value store
 // ============================================================================
 
@@ -2989,7 +3684,8 @@ TableRegistry::TableRegistry()
       entries(define_entries()), comments(define_comments()),
       bookmarks(define_bookmarks()), heads(define_heads()),
       bytes(define_bytes()), patched_bytes(define_patched_bytes()),
-      instructions(define_instructions()), xrefs(define_xrefs()),
+      instructions(define_instructions()),
+      instruction_operands(define_instruction_operands()), xrefs(define_xrefs()),
       data_refs(define_data_refs()), blocks(define_blocks()),
       function_chunks(define_function_chunks()), imports(define_imports()),
       strings(define_strings()), netnode_kv(define_netnode_kv()) {
@@ -3020,10 +3716,11 @@ void TableRegistry::register_all(xsql::Database &db) {
   // Cached tables (query-scoped cache)
   register_cached_table(db, "comments", &comments);
   register_cached_table(db, "bookmarks", &bookmarks);
-  register_cached_table(db, "heads", &heads);
-  register_cached_table(db, "bytes", &bytes);
+  register_generator_table(db, "heads", &heads);
+  register_generator_table(db, "bytes", &bytes);
   register_cached_table(db, "patched_bytes", &patched_bytes);
   register_cached_table(db, "instructions", &instructions);
+  register_cached_table(db, "instruction_operands", &instruction_operands);
   register_cached_table(db, "xrefs", &xrefs);
   register_cached_table(db, "data_refs", &data_refs);
   register_cached_table(db, "blocks", &blocks);
@@ -3041,29 +3738,34 @@ void TableRegistry::register_all(xsql::Database &db) {
 
 void TableRegistry::create_helper_views(xsql::Database &db) {
   // callers view - who calls a function
-  // Uses pre-computed from_func and name_at() scalar to avoid expensive range
-  // JOINs
+  // Uses pre-computed from_func to avoid expensive range joins.
   db.exec(R"(
         CREATE VIEW IF NOT EXISTS callers AS
         SELECT
             x.to_ea as func_addr,
             x.from_ea as caller_addr,
-            COALESCE(name_at(x.from_func), printf('sub_%X', x.from_func)) as caller_name,
+            COALESCE(f.name, n.name, printf('sub_%X', x.from_func)) as caller_name,
             x.from_func as caller_func_addr
         FROM xrefs x
+        LEFT JOIN funcs f ON f.address = x.from_func
+        LEFT JOIN names n ON n.address = x.from_func
         WHERE x.is_code = 1 AND x.from_func != 0
     )");
 
   // callees view - what does a function call
-  // Uses from_func for grouping and name_at() for name resolution
+  // Uses from_func for grouping and table joins for name resolution.
   db.exec(R"(
         CREATE VIEW IF NOT EXISTS callees AS
         SELECT
             x.from_func as func_addr,
-            COALESCE(name_at(x.from_func), printf('sub_%X', x.from_func)) as func_name,
+            COALESCE(f.name, fn.name, printf('sub_%X', x.from_func)) as func_name,
             x.to_ea as callee_addr,
-            COALESCE(name_at(x.to_ea), printf('sub_%X', x.to_ea)) as callee_name
+            COALESCE(cn.name, cf.name, printf('sub_%X', x.to_ea)) as callee_name
         FROM xrefs x
+        LEFT JOIN funcs f ON f.address = x.from_func
+        LEFT JOIN names fn ON fn.address = x.from_func
+        LEFT JOIN names cn ON cn.address = x.to_ea
+        LEFT JOIN funcs cf ON cf.address = x.to_ea
         WHERE x.is_code = 1 AND x.from_func != 0
     )");
 
@@ -3076,9 +3778,11 @@ void TableRegistry::create_helper_views(xsql::Database &db) {
             s.length as string_length,
             x.from_ea as ref_addr,
             x.from_func as func_addr,
-            COALESCE(name_at(x.from_func), printf('sub_%X', x.from_func)) as func_name
+            COALESCE(f.name, n.name, printf('sub_%X', x.from_func)) as func_name
         FROM strings s
         JOIN xrefs x ON x.to_ea = s.address
+        LEFT JOIN funcs f ON f.address = x.from_func
+        LEFT JOIN names n ON n.address = x.from_func
         WHERE x.from_func != 0
     )");
 }

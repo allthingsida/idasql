@@ -27,6 +27,7 @@ struct WelcomeRow {
     int funcs_count = 0;
     int segments_count = 0;
     int names_count = 0;
+    int strings_count = 0;
 };
 
 CachedTableDef<WelcomeRow> define_welcome();

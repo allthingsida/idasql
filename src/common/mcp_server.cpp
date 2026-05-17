@@ -25,6 +25,10 @@ namespace idasql {
 
 using Json = nlohmann::json;
 
+static bool starts_with_text(const std::string& value, const char* prefix) {
+    return value.rfind(prefix, 0) == 0;
+}
+
 class IDAMCPServer::Impl {
 public:
     fastmcpp::tools::ToolManager tool_manager;
@@ -107,7 +111,7 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
     }
 
     // Convention: query callbacks return "Error: ..." on failure
-    bool ok = !cmd->result.starts_with("Error: ");
+    bool ok = !starts_with_text(cmd->result, "Error: ");
     return {ok, cmd->result};
 }
 
@@ -177,7 +181,7 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
                 }
                 result = query_cb_(query);
                 // Convention: query callbacks return "Error: ..." on failure
-                if (result.starts_with("Error: ")) {
+                if (starts_with_text(result, "Error: ")) {
                     success = false;
                 }
             }
@@ -212,13 +216,17 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
         "/messages"
     );
 
+    // Mark the IDASQL-side server state before exposing the SSE endpoint. The
+    // transport can accept a client immediately after start(), before this
+    // method returns to the CLI loop that drains queued commands.
+    running_.store(true);
     if (!impl_->server->start()) {
+        running_.store(false);
         impl_.reset();
         return -1;
     }
 
     port_ = impl_->server->port();
-    running_.store(true);
     return port_;
 }
 

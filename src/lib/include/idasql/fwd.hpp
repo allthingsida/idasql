@@ -52,7 +52,7 @@ namespace functions {
 }
 
 namespace search {
-    bool register_search_bytes(xsql::Database& db);
+    bool register_byte_search(xsql::Database& db);
 }
 
 } // namespace idasql

@@ -108,6 +108,10 @@ struct HeadRow {
   ea_t ea = BADADDR;
 };
 
+struct ByteRow {
+  ea_t ea = BADADDR;
+};
+
 struct PatchedByteInfo {
   ea_t ea;
   qoff64_t fpos;
@@ -117,6 +121,11 @@ struct PatchedByteInfo {
 
 struct InstructionRow {
   ea_t ea = BADADDR;
+};
+
+struct InstructionOperandRow {
+  ea_t ea = BADADDR;
+  int opnum = 0;
 };
 
 struct ImportEnumContext {
@@ -181,8 +190,10 @@ void collect_head_rows(std::vector<HeadRow> &rows);
 const char *get_item_type_str(ea_t ea);
 
 void collect_instruction_rows(std::vector<InstructionRow> &rows);
+void collect_instruction_operand_rows(std::vector<InstructionOperandRow> &rows);
 
 // Operand helpers
+const char *operand_type_name(optype_t type);
 std::string operand_kind_text(ea_t ea, int opnum);
 std::string operand_type_text(ea_t ea, int opnum);
 int operand_enum_serial(ea_t ea, int opnum);
@@ -197,6 +208,8 @@ std::string operand_format_spec_text(ea_t ea, int opnum);
 
 void instruction_column_common(xsql::FunctionContext &ctx, ea_t ea,
                                ea_t func_addr, int col);
+void instruction_operand_column_common(xsql::FunctionContext &ctx, ea_t ea,
+                                       int opnum, int col);
 
 // Constants
 inline constexpr int kInstructionOperandCount = 8;
@@ -259,10 +272,11 @@ VTableDef define_names();
 VTableDef define_entries();
 CachedTableDef<CommentRow> define_comments();
 CachedTableDef<BookmarkRow> define_bookmarks();
-CachedTableDef<HeadRow> define_heads();
-CachedTableDef<HeadRow> define_bytes();
+GeneratorTableDef<HeadRow> define_heads();
+GeneratorTableDef<ByteRow> define_bytes();
 CachedTableDef<PatchedByteInfo> define_patched_bytes();
 CachedTableDef<InstructionRow> define_instructions();
+CachedTableDef<InstructionOperandRow> define_instruction_operands();
 CachedTableDef<XrefInfo> define_xrefs();
 CachedTableDef<DataRefInfo> define_data_refs();
 CachedTableDef<BlockInfo> define_blocks();
@@ -358,20 +372,6 @@ public:
   int64_t rowid() const override;
 };
 
-// Iterator for single-address point query (constraint pushdown on ea)
-class BytesAtIterator : public xsql::RowIterator {
-  ea_t ea_;
-  bool yielded_ = false;
-  bool exhausted_ = false;
-
-public:
-  explicit BytesAtIterator(ea_t ea);
-  bool next() override;
-  bool eof() const override;
-  void column(xsql::FunctionContext &ctx, int col) override;
-  int64_t rowid() const override;
-};
-
 // Iterator for instructions within a single function (constraint pushdown)
 class InstructionsInFuncIterator : public xsql::RowIterator {
   ea_t func_addr_;
@@ -403,6 +403,50 @@ public:
   int64_t rowid() const override;
 };
 
+// Iterator for operands at a single instruction address.
+class InstructionOperandsAtAddressIterator : public xsql::RowIterator {
+  ea_t ea_;
+  insn_t insn_;
+  int opnum_ = -1;
+  bool started_ = false;
+  bool decoded_ = false;
+  bool valid_ = false;
+
+  bool advance_to_next_operand();
+
+public:
+  explicit InstructionOperandsAtAddressIterator(ea_t ea);
+  bool next() override;
+  bool eof() const override;
+  void column(xsql::FunctionContext &ctx, int col) override;
+  int64_t rowid() const override;
+};
+
+// Iterator for operands in instructions within a single function.
+class InstructionOperandsInFuncIterator : public xsql::RowIterator {
+  ea_t func_addr_;
+  func_t *pfn_ = nullptr;
+  func_item_iterator_t fii_;
+  insn_t insn_;
+  ea_t current_ea_ = BADADDR;
+  int opnum_ = -1;
+  bool started_ = false;
+  bool fii_valid_ = false;
+  bool decoded_ = false;
+  bool valid_ = false;
+
+  bool load_current_instruction();
+  bool advance_to_next_operand();
+  bool advance_to_next_instruction_with_operand();
+
+public:
+  explicit InstructionOperandsInFuncIterator(ea_t func_addr);
+  bool next() override;
+  bool eof() const override;
+  void column(xsql::FunctionContext &ctx, int col) override;
+  int64_t rowid() const override;
+};
+
 // ============================================================================
 // TableRegistry
 // ============================================================================
@@ -415,10 +459,11 @@ struct TableRegistry {
   VTableDef entries;
   CachedTableDef<CommentRow> comments;
   CachedTableDef<BookmarkRow> bookmarks;
-  CachedTableDef<HeadRow> heads;
-  CachedTableDef<HeadRow> bytes;
+  GeneratorTableDef<HeadRow> heads;
+  GeneratorTableDef<ByteRow> bytes;
   CachedTableDef<PatchedByteInfo> patched_bytes;
   CachedTableDef<InstructionRow> instructions;
+  CachedTableDef<InstructionOperandRow> instruction_operands;
 
   // Cached tables (query-scoped cache - memory freed after query)
   CachedTableDef<XrefInfo> xrefs;
@@ -454,6 +499,14 @@ private:
                              const CachedTableDef<RowData> *def) {
     std::string module_name = std::string("ida_") + name;
     db.register_cached_table(module_name.c_str(), def);
+    db.create_table(name, module_name.c_str());
+  }
+
+  template <typename RowData>
+  void register_generator_table(xsql::Database &db, const char *name,
+                                const GeneratorTableDef<RowData> *def) {
+    std::string module_name = std::string("ida_") + name;
+    db.register_generator_table(module_name.c_str(), def);
     db.create_table(name, module_name.c_str());
   }
 };

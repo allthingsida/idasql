@@ -53,6 +53,7 @@ static void collect_welcome(std::vector<WelcomeRow>& rows) {
     row.funcs_count = static_cast<int>(get_func_qty());
     row.segments_count = static_cast<int>(get_segm_qty());
     row.names_count = static_cast<int>(get_nlist_size());
+    row.strings_count = static_cast<int>(get_strlist_qty());
 
     std::ostringstream summary;
     summary << row.processor << " " << (row.is_64bit ? "64-bit" : "32-bit");
@@ -63,6 +64,7 @@ static void collect_welcome(std::vector<WelcomeRow>& rows) {
     }
     summary << " | funcs: " << row.funcs_count;
     summary << " | segs: " << row.segments_count;
+    summary << " | strings: " << row.strings_count;
     row.summary = summary.str();
 
     rows.push_back(std::move(row));
@@ -87,6 +89,7 @@ CachedTableDef<WelcomeRow> define_welcome() {
         .column_int("funcs_count", [](const WelcomeRow& row) -> int { return row.funcs_count; })
         .column_int("segments_count", [](const WelcomeRow& row) -> int { return row.segments_count; })
         .column_int("names_count", [](const WelcomeRow& row) -> int { return row.names_count; })
+        .column_int("strings_count", [](const WelcomeRow& row) -> int { return row.strings_count; })
         .build();
 }
 

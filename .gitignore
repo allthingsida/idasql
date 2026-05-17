@@ -9,7 +9,8 @@ build*/
 .claude/
 # IDE
 .vs/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 *.suo
 *.user
 *.sln.docstates

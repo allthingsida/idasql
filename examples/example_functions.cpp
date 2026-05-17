@@ -98,10 +98,11 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Top 10 Functions Making Most Calls ===\n";
 
     auto most_calls = session.query(
-        "SELECT func_at(func_addr) as name, COUNT(*) as calls "
-        "FROM instructions "
-        "WHERE mnemonic = 'call' "
-        "GROUP BY func_addr "
+        "SELECT f.name as name, COUNT(*) as calls "
+        "FROM instructions i "
+        "JOIN funcs f ON i.func_addr = f.address "
+        "WHERE i.mnemonic = 'call' "
+        "GROUP BY i.func_addr, f.name "
         "ORDER BY calls DESC "
         "LIMIT 10"
     );

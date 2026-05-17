@@ -410,6 +410,20 @@ public:
     int64_t rowid() const override;
 };
 
+// Ctree label iterator for single function
+class CtreeLabelsInFuncIterator : public xsql::RowIterator {
+    std::vector<CtreeLabelInfo> labels_;
+    size_t idx_ = 0;
+    bool started_ = false;
+
+public:
+    explicit CtreeLabelsInFuncIterator(ea_t func_addr);
+    bool next() override;
+    bool eof() const override;
+    void column(xsql::FunctionContext& ctx, int col) override;
+    int64_t rowid() const override;
+};
+
 // Ctree iterator for single function
 class CtreeInFuncIterator : public xsql::RowIterator {
     std::vector<CtreeItem> items_;

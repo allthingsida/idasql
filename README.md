@@ -176,7 +176,7 @@ claude /install-plugin https://github.com/allthingsida/idasql-skills
 $ idasql
 Error: Database path required (-s)
 
-idasql v0.0.12 - SQL interface to IDA databases
+idasql v0.0.14 - SQL interface to IDA databases
 
 Usage: idasql -s <database> [-q <query>] [-f <file>] [-i] [--export <file>]
 
@@ -211,13 +211,30 @@ Thank you for using IDA. Have a nice day!
 #### Prerequisites
 
 - CMake 3.20+
-- C++17 compiler
+- C++20 compiler
 - IDA SDK 9.0+ (set `IDASDK` environment variable)
 
 ```bash
-cmake -S src -B build -DIDASQL_WITH_MCP=OFF
+cmake -S . -B build -DIDASQL_WITH_MCP=ON -DIDASQL_BUILD_EXAMPLES=OFF
 cmake --build build --config Release
 ```
+
+Useful CMake switches:
+
+| Switch | Default | Description |
+|--------|---------|-------------|
+| `IDASQL_WITH_MCP` | `ON` | Build MCP server support via `fastmcpp`. Disable for a smaller/offline build or when you do not need `--mcp` / `.mcp`. |
+| `IDASQL_BUILD_CLI` | `ON` | Build the standalone `idasql` command-line tool. |
+| `IDASQL_BUILD_PLUGIN` | `ON` | Build the IDA plugin. |
+| `IDASQL_BUILD_EXAMPLES` | `ON` | Build the example programs under `examples/`. |
+
+Notes:
+
+- Hex-Rays support is always compiled in and detected at runtime. If Hex-Rays is unavailable, decompiler-backed tables/functions are simply not registered.
+- HTTP REST support is always compiled in; use `--http` from the CLI or `.http start` from the REPL/plugin CLI.
+- IDAPython SQL execution is compiled in but disabled by default at runtime. Enable it per session with `PRAGMA idasql.enable_idapython = 1;`.
+- `IDASQL_WITH_MCP=ON` fetches `fastmcpp`; `OFF` removes MCP support and the `--mcp` / `.mcp` commands.
+- `XSQL_WITH_THINCLIENT` is forced `ON`, and `HTTPLIB_USE_OPENSSL_IF_AVAILABLE` is forced `OFF` because IDASQL uses local plain HTTP.
 
 ## Available Tables
 
@@ -236,7 +253,8 @@ cmake --build build --config Release
 | `blocks` | Basic blocks - start/end address, func_ea, size |
 | `fchunks` | Function chunks - split/tail chunks with owner |
 | `instructions` | Disassembly - address, mnemonic, operands, itype, func_addr (DELETE) |
-| `heads` | All head items (code + data) - address, size, type, flags, disasm |
+| `instruction_operands` | Normalized instruction operands - opnum, text, type, value; optimized by `address` and `func_addr` |
+| `heads` | All head items (code + data) - optimized address lookup/range navigation |
 
 ### Strings & Bytes
 
@@ -310,14 +328,14 @@ cmake --build build --config Release
 
 | Function | Description |
 |----------|-------------|
-| `grep(pattern, limit, offset)` | Unified entity search function (returns JSON) |
 | `decompile(addr)` | Decompile function at address (returns pseudocode) |
 | `disasm_at(addr)` | Canonical disassembly listing at address |
 | `get_ui_context_json()` | Plugin-only UI context JSON (GUI runtime only) |
 
 ### Unified Entity Search
 
-Use the `grep` table for composable SQL searches and `grep()` when JSON output is preferred.
+Use the `grep` table for composable SQL searches over named functions, labels,
+segments, types, and members.
 
 ```sql
 -- Search anything starting with "Create"
@@ -339,8 +357,12 @@ FROM grep
 WHERE pattern = 'dw%'
   AND kind = 'member';
 
--- JSON form with pagination
-SELECT grep('Create%', 20, 0);
+-- Pagination
+SELECT name, kind, full_name
+FROM grep
+WHERE pattern = 'Create%'
+ORDER BY kind, name
+LIMIT 20 OFFSET 20;
 ```
 
 ## Integration
@@ -394,7 +416,7 @@ The server uses a random port (8100-8199) to avoid conflicts with `--http`.
 
 For MCP-compatible clients (Model Context Protocol, a standard for AI tool integration):
 
-`--mcp` and `.mcp` are available only when built with `-DIDASQL_WITH_MCP=ON` (default is `OFF`).
+`--mcp` and `.mcp` are available when built with `-DIDASQL_WITH_MCP=ON`, which is the default. Build with `-DIDASQL_WITH_MCP=OFF` to omit MCP support.
 
 ```bash
 # Standalone mode

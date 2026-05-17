@@ -10,7 +10,7 @@ ida_add_idalib(idasql_cli
 target_link_libraries(idasql_cli PRIVATE xsql::xsql)
 target_link_libraries(idasql_cli PRIVATE idasql)
 target_include_directories(idasql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include)
-target_compile_definitions(idasql_cli PRIVATE USE_IDA_SDK)
+target_compile_definitions(idasql_cli PRIVATE USE_IDA_SDK USE_HEXRAYS)
 
 # Output name: idasql (not idasql_cli), placed next to ida.exe for idalib
 set_target_properties(idasql_cli PROPERTIES
@@ -46,12 +46,6 @@ elseif(UNIX)
         BUILD_WITH_INSTALL_RPATH TRUE
         INSTALL_RPATH "$ORIGIN"
     )
-endif()
-
-# Hex-Rays decompiler support
-option(USE_HEXRAYS "Enable Hex-Rays decompiler support" ON)
-if(USE_HEXRAYS)
-    target_compile_definitions(idasql_cli PRIVATE USE_HEXRAYS)
 endif()
 
 # MCP support (from parent project)
