@@ -12,6 +12,7 @@
 #pragma once
 
 #include <idasql/database.hpp>
+#include "query_script.hpp"
 
 #include <string>
 #include <string_view>
@@ -196,6 +197,36 @@ inline void append_json_string_array(std::string& out, const std::vector<std::st
     out.push_back(']');
 }
 
+inline void append_query_result_json_payload(std::string& out, const QueryResult& result) {
+    out += "\"columns\":";
+    append_json_string_array(out, result.columns);
+
+    out += ",\"rows\":[";
+    for (size_t i = 0; i < result.rows.size(); ++i) {
+        if (i != 0) out.push_back(',');
+        append_json_string_array(out, result.rows[i].values);
+    }
+    out.push_back(']');
+
+    out += ",\"row_count\":";
+    out += std::to_string(result.rows.size());
+
+    if (!result.warnings.empty()) {
+        out += ",\"warnings\":";
+        append_json_string_array(out, result.warnings);
+    }
+    if (result.timed_out) {
+        out += ",\"timed_out\":true";
+    }
+    if (result.partial) {
+        out += ",\"partial\":true";
+    }
+    if (result.elapsed_ms > 0) {
+        out += ",\"elapsed_ms\":";
+        out += std::to_string(result.elapsed_ms);
+    }
+}
+
 inline std::string query_result_to_json_safe(const QueryResult& result) {
     std::string out;
     out.reserve(256);
@@ -203,36 +234,49 @@ inline std::string query_result_to_json_safe(const QueryResult& result) {
     out += result.success ? "true" : "false";
 
     if (result.success) {
-        out += ",\"columns\":";
-        append_json_string_array(out, result.columns);
-
-        out += ",\"rows\":[";
-        for (size_t i = 0; i < result.rows.size(); ++i) {
-            if (i != 0) out.push_back(',');
-            append_json_string_array(out, result.rows[i].values);
-        }
-        out.push_back(']');
-
-        out += ",\"row_count\":";
-        out += std::to_string(result.rows.size());
-
-        if (!result.warnings.empty()) {
-            out += ",\"warnings\":";
-            append_json_string_array(out, result.warnings);
-        }
-        if (result.timed_out) {
-            out += ",\"timed_out\":true";
-        }
-        if (result.partial) {
-            out += ",\"partial\":true";
-        }
-        if (result.elapsed_ms > 0) {
-            out += ",\"elapsed_ms\":";
-            out += std::to_string(result.elapsed_ms);
-        }
+        out.push_back(',');
+        append_query_result_json_payload(out, result);
     } else {
         out += ",\"error\":";
         append_json_string(out, result.error);
+    }
+
+    out.push_back('}');
+    return out;
+}
+
+inline std::string query_script_result_to_json_safe(const QueryScriptResult& script_result) {
+    if (!script_result.multi_statement) {
+        if (script_result.results.empty()) {
+            QueryResult result;
+            result.error = script_result.error.empty() ? "No query result" : script_result.error;
+            result.success = false;
+            return query_result_to_json_safe(result);
+        }
+        return query_result_to_json_safe(script_result.results[0]);
+    }
+
+    std::string out;
+    out.reserve(512);
+    out += "{\"success\":";
+    out += script_result.success ? "true" : "false";
+
+    if (script_result.success) {
+        out += ",\"statements\":[";
+        for (size_t i = 0; i < script_result.results.size(); ++i) {
+            if (i != 0) out.push_back(',');
+            out.push_back('{');
+            append_query_result_json_payload(out, script_result.results[i]);
+            out.push_back('}');
+        }
+        out.push_back(']');
+        out += ",\"statement_count\":";
+        out += std::to_string(script_result.results.size());
+    } else {
+        out += ",\"error\":";
+        append_json_string(out, script_result.error);
+        out += ",\"statement_index\":";
+        out += std::to_string(script_result.error_statement_index + 1);
     }
 
     out.push_back('}');

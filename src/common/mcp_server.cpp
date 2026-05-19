@@ -139,7 +139,7 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
         {"properties", {
             {"query", {
                 {"type", "string"},
-                {"description", "SQL query to execute against the IDA database"}
+                {"description", "SQL query or semicolon-separated script to execute against the IDA database"}
             }}
         }},
         {"required", Json::array({"query"})}
@@ -194,11 +194,11 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
             };
         }
     };
-    sql_query_tool.set_description("Execute a SQL query against the IDA database and return results");
+    sql_query_tool.set_description("Execute a SQL query or semicolon-separated script against the IDA database and return results");
     impl_->tool_manager.register_tool(sql_query_tool);
 
     std::unordered_map<std::string, std::string> descriptions = {
-        {"idasql_query", "Execute a SQL query against the IDA database and return results"}
+        {"idasql_query", "Execute a SQL query or semicolon-separated script against the IDA database and return results"}
     };
 
     auto handler = fastmcpp::mcp::make_mcp_handler(

@@ -78,6 +78,7 @@
 // HTTP server for .http REPL command
 #include "../common/http_server.hpp"
 #include "../common/json_utils.hpp"
+#include "../common/query_script.hpp"
 
 //=============================================================================
 // IDA execute_sync wrapper
@@ -107,6 +108,24 @@ struct query_request_t : public exec_request_t
     {
         batch_guard_t bg;
         result = engine->query(sql);
+        return result.success ? 0 : -1;
+    }
+};
+
+struct query_script_request_t : public exec_request_t
+{
+    idasql::QueryEngine* engine;
+    std::string sql;
+    idasql::QueryScriptResult result;
+
+    query_script_request_t(idasql::QueryEngine* e, const std::string& s)
+        : engine(e), sql(s) {}
+
+    virtual ssize_t idaapi execute() override
+    {
+        batch_guard_t bg;
+        result = idasql::execute_query_or_script(
+            sql, [this](const std::string& stmt) { return engine->query(stmt); });
         return result.success ? 0 : -1;
     }
 };
@@ -155,6 +174,28 @@ struct idasql_plugmod_t : public plugmod_t
         return req.result;
     }
 
+    idasql::QueryScriptResult run_query_script_sync(const std::string& sql)
+    {
+        std::lock_guard<std::mutex> exec_lock(query_exec_mutex_);
+
+        {
+            std::lock_guard<std::mutex> lock(query_meta_mutex_);
+            active_query_ = sql;
+            active_query_started_ = std::chrono::steady_clock::now();
+        }
+
+        query_script_request_t req(engine_.get(), sql);
+        execute_sync(req, MFF_WRITE);
+
+        {
+            std::lock_guard<std::mutex> lock(query_meta_mutex_);
+            active_query_.clear();
+            active_query_started_ = std::chrono::steady_clock::time_point{};
+        }
+
+        return req.result;
+    }
+
     idasql_plugmod_t()
     {
         engine_ = std::make_unique<idasql::QueryEngine>();
@@ -177,9 +218,9 @@ struct idasql_plugmod_t : public plugmod_t
 
             // SQL executor that uses execute_sync for thread safety
             auto sql_executor = [this](const std::string& sql) -> std::string {
-                idasql::QueryResult result = run_query_sync(sql);
+                idasql::QueryScriptResult result = run_query_script_sync(sql);
                 if (result.success) {
-                    return result.to_string();
+                    return idasql::query_script_result_to_text(result);
                 } else {
                     return "Error: " + result.error;
                 }
@@ -252,9 +293,9 @@ struct idasql_plugmod_t : public plugmod_t
 
         // SQL executor that uses execute_sync for thread safety
         auto sql_executor = [this](const std::string& sql) -> std::string {
-            idasql::QueryResult result = run_query_sync(sql);
+            idasql::QueryScriptResult result = run_query_script_sync(sql);
             if (result.success) {
-                return result.to_string();
+                return idasql::query_script_result_to_text(result);
             } else {
                 return "Error: " + result.error;
             }
@@ -278,8 +319,8 @@ struct idasql_plugmod_t : public plugmod_t
 
         // SQL executor that uses execute_sync for thread safety and returns JSON
         idasql::HTTPQueryCallback sql_cb = [this](const std::string& sql) -> std::string {
-            idasql::QueryResult result = run_query_sync(sql);
-            return idasql::query_result_to_json_safe(result);
+            idasql::QueryScriptResult result = run_query_script_sync(sql);
+            return idasql::query_script_result_to_json_safe(result);
         };
 
         // Start HTTP server, no queue (plugin mode)

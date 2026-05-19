@@ -31,6 +31,7 @@ static std::string build_http_help_text() {
         << "  SELECT * FROM welcome;\n\n"
         << "Response Format:\n"
         << "  Success: {\"success\": true, \"columns\": [...], \"rows\": [[...]], \"row_count\": N}\n"
+        << "  Script:  {\"success\": true, \"statements\": [{\"columns\": [...], \"rows\": [[...]], \"row_count\": N}], \"statement_count\": N}\n"
         << "  Error:   {\"success\": false, \"error\": \"message\"}\n\n"
         << "Example:\n"
         << "  curl http://localhost:<port>/help\n"

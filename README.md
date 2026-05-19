@@ -183,7 +183,7 @@ Usage: idasql -s <database> [-q <query>] [-f <file>] [-i] [--export <file>]
 Options:
   -s <file>            IDA database file (.idb/.i64) for local mode
   --token <token>      Auth token for HTTP/MCP server mode (if server requires it)
-  -q <sql>             Execute single SQL query
+  -q <sql>             Execute SQL query or semicolon-separated script
   -f <file>            Execute SQL from file
   -i                   Interactive REPL mode
   -w, --write          Save database on exit (persist changes)
@@ -196,6 +196,7 @@ Options:
 
 Examples:
   idasql -s test.i64 -q "SELECT name, address FROM funcs LIMIT 10"
+  idasql -s test.i64 -q "SELECT * FROM welcome; SELECT COUNT(*) FROM funcs;"
   idasql -s test.i64 -f queries.sql
   idasql -s test.i64 -i
   idasql -s test.i64 --export dump.sql
@@ -378,7 +379,11 @@ idasql -s database.i64 --http 8081
 ```bash
 curl http://localhost:8081/status
 curl -X POST http://localhost:8081/query -d "SELECT name FROM funcs LIMIT 5"
+curl -X POST http://localhost:8081/query -d "SELECT * FROM welcome; SELECT COUNT(*) FROM funcs;"
 ```
+
+Single-statement HTTP responses keep the `columns` / `rows` / `row_count` shape.
+Semicolon-separated scripts return a `statements` array with one result object per statement.
 
 For multiple databases, run separate instances:
 
@@ -438,7 +443,7 @@ Configure your MCP client:
 }
 ```
 
-Tools: `idasql_query` (direct SQL)
+Tools: `idasql_query` (direct SQL query or semicolon-separated script)
 
 ## Built With
 
