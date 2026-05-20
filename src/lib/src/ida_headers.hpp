@@ -85,3 +85,13 @@
 #ifdef _MSC_VER
 #undef strtoull
 #endif
+
+#if IDA_SDK_VERSION < 920
+using callcnv_t = cm_t;
+#ifndef HTI_SEMICOLON
+#define HTI_SEMICOLON 0
+#endif
+#ifndef GENDSM_UNHIDE
+#define GENDSM_UNHIDE 0
+#endif
+#endif

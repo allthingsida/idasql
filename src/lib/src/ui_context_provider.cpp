@@ -242,12 +242,15 @@ static bool is_address_widget_type(twidget_type_t widget_type) {
 }
 
 static bool is_chooser_like_widget_type(twidget_type_t widget_type) {
-    return is_chooser_widget(widget_type) ||
-           widget_type == BWN_FUNCS ||
-           widget_type == BWN_NAMES ||
-           widget_type == BWN_IMPORTS ||
-           widget_type == BWN_BPTS ||
-           widget_type == BWN_TITREE;
+    bool is_chooser_like = is_chooser_widget(widget_type) ||
+                           widget_type == BWN_FUNCS ||
+                           widget_type == BWN_NAMES ||
+                           widget_type == BWN_IMPORTS ||
+                           widget_type == BWN_BPTS;
+#ifdef BWN_TITREE
+    is_chooser_like = is_chooser_like || widget_type == BWN_TITREE;
+#endif
+    return is_chooser_like;
 }
 
 static const char* widget_type_name(twidget_type_t widget_type) {
@@ -262,7 +265,9 @@ static const char* widget_type_name(twidget_type_t widget_type) {
         case BWN_NAMES: return "BWN_NAMES";
         case BWN_IMPORTS: return "BWN_IMPORTS";
         case BWN_BPTS: return "BWN_BPTS";
+#ifdef BWN_TITREE
         case BWN_TITREE: return "BWN_TITREE";
+#endif
         default: break;
     }
     return nullptr;

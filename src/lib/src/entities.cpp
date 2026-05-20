@@ -2387,13 +2387,33 @@ bool operand_numeric_value(ea_t ea, int opnum, uint64 &out_value,
   }
 }
 
+ssize_t find_enum_member_by_name(const tinfo_t &enum_tif, edm_t *out,
+                                 const char *name) {
+#if IDA_SDK_VERSION >= 920
+  return enum_tif.get_edm(out, name);
+#else
+  return enum_tif.find_edm(out, name);
+#endif
+}
+
+ssize_t find_enum_member_by_value(const tinfo_t &enum_tif, edm_t *out,
+                                  uint64 value, bmask64_t bmask,
+                                  uchar serial) {
+#if IDA_SDK_VERSION >= 920
+  return enum_tif.get_edm_by_value(out, value, bmask, serial);
+#else
+  return enum_tif.find_edm(out, value, bmask, serial);
+#endif
+}
+
 bool resolve_enum_member_serial(const tinfo_t &enum_tif,
                                 const std::string &member_name,
                                 uchar &out_serial, std::string *out_error) {
   if (out_error)
     out_error->clear();
   edm_t target;
-  const ssize_t idx = enum_tif.get_edm(&target, member_name.c_str());
+  const ssize_t idx =
+      find_enum_member_by_name(enum_tif, &target, member_name.c_str());
   if (idx < 0) {
     if (out_error)
       *out_error = "enum member not found";
@@ -2402,8 +2422,8 @@ bool resolve_enum_member_serial(const tinfo_t &enum_tif,
 
   for (int s = 0; s <= 255; ++s) {
     edm_t candidate;
-    const ssize_t by_val = enum_tif.get_edm_by_value(
-        &candidate, target.value, DEFMASK64, static_cast<uchar>(s));
+    const ssize_t by_val = find_enum_member_by_value(
+        enum_tif, &candidate, target.value, DEFMASK64, static_cast<uchar>(s));
     if (by_val < 0)
       break;
     if (candidate.name == target.name) {
@@ -2483,7 +2503,8 @@ bool apply_operand_representation(ea_t ea, int opnum,
       }
 
       edm_t member;
-      if (enum_tif.get_edm(&member, req.enum_member_name.c_str()) < 0) {
+      if (find_enum_member_by_name(enum_tif, &member,
+                                   req.enum_member_name.c_str()) < 0) {
         if (out_error)
           *out_error = "enum member not found";
         auto_wait();

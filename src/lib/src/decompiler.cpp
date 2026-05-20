@@ -584,6 +584,17 @@ void collect_all_lvars(std::vector<LvarInfo>& vars) {
 // Ctree Collector
 // ============================================================================
 
+static citem_t* current_parent_item(ctree_parentee_t* visitor) {
+    if (visitor == nullptr) {
+        return nullptr;
+    }
+#if IDA_SDK_VERSION >= 920
+    return visitor->parent_item();
+#else
+    return visitor->parents.empty() ? nullptr : visitor->parents.back();
+#endif
+}
+
 ctree_collector_t::ctree_collector_t(std::vector<CtreeItem>& items_, cfunc_t* cfunc_, ea_t func_addr_)
     : ctree_parentee_t(false), items(items_), cfunc(cfunc_), func_addr(func_addr_), next_id(0) {}
 
@@ -604,7 +615,7 @@ int idaapi ctree_collector_t::visit_insn(cinsn_t* insn) {
         ci.goto_label_num = insn->cgoto->label_num;
     }
 
-    citem_t* p = parent_item();
+    citem_t* p = current_parent_item(this);
     if (p) {
         auto it = item_ids.find(p);
         if (it != item_ids.end()) ci.parent_id = it->second;
@@ -628,7 +639,7 @@ int idaapi ctree_collector_t::visit_expr(cexpr_t* expr) {
     ci.label_num = expr->label_num;
     ci.depth = static_cast<int>(parents.size());
 
-    citem_t* p = parent_item();
+    citem_t* p = current_parent_item(this);
     if (p) {
         auto it = item_ids.find(p);
         if (it != item_ids.end()) ci.parent_id = it->second;
