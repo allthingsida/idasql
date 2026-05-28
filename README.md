@@ -176,12 +176,13 @@ claude /install-plugin https://github.com/allthingsida/idasql-skills
 $ idasql
 Error: Database path required (-s)
 
-idasql v0.0.14 - SQL interface to IDA databases
+idasql v0.0.15 - SQL interface to IDA databases
 
-Usage: idasql -s <database> [-q <query>] [-f <file>] [-i] [--export <file>]
+Usage: idasql -s <file> [-q <query>] [-f <file>] [-i] [--export <file>]
 
 Options:
-  -s <file>            IDA database file (.idb/.i64) for local mode
+  -s <file>            IDA database (.idb/.i64) OR raw binary (.exe/.dll/firmware/etc.)
+                       — raw binaries trigger fresh idalib analysis and string-list rebuild
   --token <token>      Auth token for HTTP/MCP server mode (if server requires it)
   -q <sql>             Execute SQL query or semicolon-separated script
   -f <file>            Execute SQL from file
@@ -201,6 +202,8 @@ Examples:
   idasql -s test.i64 -i
   idasql -s test.i64 --export dump.sql
   idasql -s test.i64 --http 8080
+  idasql -s sample.exe --http 8081       # raw PE: idalib auto-analyzes, then serves SQL
+  idasql -s firmware.bin -q "SELECT * FROM welcome"
 
 Thank you for using IDA. Have a nice day!
 ```
@@ -382,8 +385,23 @@ curl -X POST http://localhost:8081/query -d "SELECT name FROM funcs LIMIT 5"
 curl -X POST http://localhost:8081/query -d "SELECT * FROM welcome; SELECT COUNT(*) FROM funcs;"
 ```
 
-Single-statement HTTP responses keep the `columns` / `rows` / `row_count` shape.
-Semicolon-separated scripts return a `statements` array with one result object per statement.
+All `/query` responses use the canonical script envelope — single statement = array of one entry:
+
+```
+{
+  "success": true,
+  "statement_count": <N>,
+  "results": [
+    { "statement_index": 0, "success": true, "columns": [...], "rows": [...], "row_count": <N>, "elapsed_ms": <ms>, "error": null },
+    ...
+  ],
+  "row_count_total": <N>,
+  "elapsed_ms_total": <ms>,
+  "first_error_index": null
+}
+```
+
+Fail-fast is the default; pass `continue_on_error=true` (e.g. `?continue_on_error=1`) to run every statement regardless of earlier failures. Each `results[i].error` is canonical for per-statement failures; `first_error_index` points at the earliest failure or is `null`. On splitter failure (e.g. an unterminated quote) the response is `success:false`, `statement_count:0`, `results:[]`, plus a top-level `parse_error`.
 
 For multiple databases, run separate instances:
 

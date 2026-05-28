@@ -12,7 +12,6 @@
 #pragma once
 
 #include <idasql/database.hpp>
-#include "query_script.hpp"
 
 #include <string>
 #include <string_view>
@@ -245,42 +244,10 @@ inline std::string query_result_to_json_safe(const QueryResult& result) {
     return out;
 }
 
-inline std::string query_script_result_to_json_safe(const QueryScriptResult& script_result) {
-    if (!script_result.multi_statement) {
-        if (script_result.results.empty()) {
-            QueryResult result;
-            result.error = script_result.error.empty() ? "No query result" : script_result.error;
-            result.success = false;
-            return query_result_to_json_safe(result);
-        }
-        return query_result_to_json_safe(script_result.results[0]);
-    }
-
-    std::string out;
-    out.reserve(512);
-    out += "{\"success\":";
-    out += script_result.success ? "true" : "false";
-
-    if (script_result.success) {
-        out += ",\"statements\":[";
-        for (size_t i = 0; i < script_result.results.size(); ++i) {
-            if (i != 0) out.push_back(',');
-            out.push_back('{');
-            append_query_result_json_payload(out, script_result.results[i]);
-            out.push_back('}');
-        }
-        out.push_back(']');
-        out += ",\"statement_count\":";
-        out += std::to_string(script_result.results.size());
-    } else {
-        out += ",\"error\":";
-        append_json_string(out, script_result.error);
-        out += ",\"statement_index\":";
-        out += std::to_string(script_result.error_statement_index + 1);
-    }
-
-    out.push_back('}');
-    return out;
-}
+// NOTE: query_script_result_to_json_safe was removed during the multi-statement
+// unification. All callers now go through idasql::run_sql_script (see
+// sql_script.hpp) and emit JSON via xsql::script_result_to_json. The single
+// per-statement helper query_result_to_json_safe above is retained for
+// internal callers that work with a raw QueryResult.
 
 } // namespace idasql

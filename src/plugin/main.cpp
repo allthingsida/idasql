@@ -78,7 +78,8 @@
 // HTTP server for .http REPL command
 #include "../common/http_server.hpp"
 #include "../common/json_utils.hpp"
-#include "../common/query_script.hpp"
+#include "../common/sql_script.hpp"
+#include <xsql/query_script.hpp>
 
 //=============================================================================
 // IDA execute_sync wrapper
@@ -116,7 +117,7 @@ struct query_script_request_t : public exec_request_t
 {
     idasql::QueryEngine* engine;
     std::string sql;
-    idasql::QueryScriptResult result;
+    xsql::ScriptResult result;
 
     query_script_request_t(idasql::QueryEngine* e, const std::string& s)
         : engine(e), sql(s) {}
@@ -124,8 +125,9 @@ struct query_script_request_t : public exec_request_t
     virtual ssize_t idaapi execute() override
     {
         batch_guard_t bg;
-        result = idasql::execute_query_or_script(
-            sql, [this](const std::string& stmt) { return engine->query(stmt); });
+        result = idasql::run_sql_script(
+            sql,
+            [this](const std::string& stmt) { return engine->query(stmt); });
         return result.success ? 0 : -1;
     }
 };
@@ -174,7 +176,7 @@ struct idasql_plugmod_t : public plugmod_t
         return req.result;
     }
 
-    idasql::QueryScriptResult run_query_script_sync(const std::string& sql)
+    xsql::ScriptResult run_query_script_sync(const std::string& sql)
     {
         std::lock_guard<std::mutex> exec_lock(query_exec_mutex_);
 
@@ -218,12 +220,8 @@ struct idasql_plugmod_t : public plugmod_t
 
             // SQL executor that uses execute_sync for thread safety
             auto sql_executor = [this](const std::string& sql) -> std::string {
-                idasql::QueryScriptResult result = run_query_script_sync(sql);
-                if (result.success) {
-                    return idasql::query_script_result_to_text(result);
-                } else {
-                    return "Error: " + result.error;
-                }
+                xsql::ScriptResult result = run_query_script_sync(sql);
+                return xsql::script_result_to_text(result);
             };
 
             // Create CLI with execute_sync wrapper for thread safety
@@ -293,12 +291,8 @@ struct idasql_plugmod_t : public plugmod_t
 
         // SQL executor that uses execute_sync for thread safety
         auto sql_executor = [this](const std::string& sql) -> std::string {
-            idasql::QueryScriptResult result = run_query_script_sync(sql);
-            if (result.success) {
-                return idasql::query_script_result_to_text(result);
-            } else {
-                return "Error: " + result.error;
-            }
+            xsql::ScriptResult result = run_query_script_sync(sql);
+            return xsql::script_result_to_text(result);
         };
 
         // Start MCP server
@@ -319,8 +313,8 @@ struct idasql_plugmod_t : public plugmod_t
 
         // SQL executor that uses execute_sync for thread safety and returns JSON
         idasql::HTTPQueryCallback sql_cb = [this](const std::string& sql) -> std::string {
-            idasql::QueryScriptResult result = run_query_script_sync(sql);
-            return idasql::query_script_result_to_json_safe(result);
+            xsql::ScriptResult result = run_query_script_sync(sql);
+            return xsql::script_result_to_json(result);
         };
 
         // Start HTTP server, no queue (plugin mode)

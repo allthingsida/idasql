@@ -189,7 +189,7 @@ idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
 
 | Option | Description |
 |--------|-------------|
-| `-s <file>` | IDA database file (.idb/.i64) |
+| `-s <file>` | IDA database (`.idb`/`.i64`) **or** raw binary (`.exe`/`.dll`/firmware/etc.) — raw binaries trigger fresh idalib analysis and string-list rebuild |
 | `--token <token>` | Auth token for HTTP/MCP server mode |
 | `-q <sql>` | Execute single SQL query |
 | `-f <file>` | Execute SQL from file |
@@ -1570,7 +1570,13 @@ Write address comments through the table:
 ```sql
 INSERT INTO comments(address, comment) VALUES (0x401000, 'regular comment');
 INSERT INTO comments(address, rpt_comment) VALUES (0x401000, 'repeatable comment');
+-- Replace an existing comment in place
+UPDATE comments SET comment = 'revised comment' WHERE address = 0x401000;
+-- Remove a comment
+DELETE FROM comments WHERE address = 0x401000;
 ```
+
+Note: for both `names` and `comments`, `INSERT` at an EA that already has a value **replaces** it (IDA permits one name/one comment-slot per address); `UPDATE` is equivalent. For `names`, `SN_CHECK` may auto-disambiguate globally conflicting names (`foo` → `foo_0`) — read back the row to see what was stored.
 
 ### Modification
 | Function | Description |
@@ -1706,6 +1712,7 @@ SELECT decompile(0x401000);
 
 2. Baseline mutation surfaces (must exist in all supported plugin runtimes):
 ```sql
+-- INSERT acts as upsert at the EA; UPDATE names SET name = ... WHERE address = ... is equivalent.
 INSERT INTO names(address, name) VALUES (0x401000, 'my_func');
 UPDATE ctree_lvars SET name = 'arg0' WHERE func_addr = 0x401000 AND idx = 0;
 UPDATE ctree_lvars SET comment = 'seed comment' WHERE func_addr = 0x401000 AND idx = 0;

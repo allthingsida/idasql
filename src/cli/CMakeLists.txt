@@ -11,6 +11,10 @@ target_link_libraries(idasql_cli PRIVATE xsql::xsql)
 target_link_libraries(idasql_cli PRIVATE idasql)
 target_include_directories(idasql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include)
 target_compile_definitions(idasql_cli PRIVATE USE_IDA_SDK USE_HEXRAYS)
+if(WIN32)
+    # Prevent Windows.h from defining min/max macros (collides with std::max in xsql/query_script.hpp)
+    target_compile_definitions(idasql_cli PRIVATE NOMINMAX)
+endif()
 
 # Output name: idasql (not idasql_cli), placed next to ida.exe for idalib
 set_target_properties(idasql_cli PROPERTIES

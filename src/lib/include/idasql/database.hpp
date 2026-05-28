@@ -274,7 +274,9 @@ public:
 
     /**
      * Open an IDA database
-     * @param idb_path Path to .idb/.i64 file
+     * @param idb_path Path to .idb/.i64 OR raw binary (.exe/.dll/firmware/etc.).
+     *                 Raw binaries (anything not ending in .idb/.i64) trigger
+     *                 fresh idalib auto-analysis and string-list rebuild.
      * @return true on success
      */
     bool open(const char* idb_path);

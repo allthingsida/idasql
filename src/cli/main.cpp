@@ -31,11 +31,12 @@
 #include <windows.h>
 #endif
 
+#include <xsql/query_script.hpp>
 #include <xsql/thinclient/server.hpp>
 #include "../common/http_server.hpp"
 #include "../common/idasql_commands.hpp"
 #include "../common/json_utils.hpp"
-#include "../common/query_script.hpp"
+#include "../common/sql_script.hpp"
 #include "../common/welcome_query.hpp"
 
 #include "../common/idasql_version.hpp"
@@ -164,7 +165,7 @@ static void add_query_result_rows(TablePrinter& printer, const idasql::QueryResu
 }
 
 static bool print_query_result_table(const idasql::QueryResult& result) {
-    if (!idasql::has_result_columns(result)) {
+    if (result.columns.empty()) {
         return false;
     }
 
@@ -175,16 +176,32 @@ static bool print_query_result_table(const idasql::QueryResult& result) {
     return true;
 }
 
-static void print_query_script_tables(const idasql::QueryScriptResult& script_result) {
+static void print_script_statement_table(const xsql::ScriptStatementResult& stmt) {
+    if (stmt.columns.empty()) return;
+    TablePrinter printer;
+    for (const auto& row : stmt.rows) {
+        printer.add_row(stmt.columns, row);
+    }
+    printer.print();
+}
+
+static void print_script_result_tables(const xsql::ScriptResult& script_result) {
+    if (!script_result.parse_error.empty()) {
+        std::cerr << "Error: " << script_result.parse_error << "\n";
+        return;
+    }
     bool wrote_result = false;
-    for (const auto& result : script_result.results) {
-        if (!idasql::has_result_columns(result)) {
+    for (const auto& stmt : script_result.results) {
+        if (!stmt.success) {
+            if (wrote_result) std::cout << "\n";
+            std::cerr << "Error in statement " << (stmt.statement_index + 1)
+                      << ": " << stmt.error << "\n";
+            wrote_result = true;
             continue;
         }
-        if (wrote_result) {
-            std::cout << "\n";
-        }
-        print_query_result_table(result);
+        if (stmt.columns.empty()) continue;
+        if (wrote_result) std::cout << "\n";
+        print_script_statement_table(stmt);
         wrote_result = true;
     }
 }
@@ -277,12 +294,8 @@ static void run_repl(idasql::Database& db) {
 
                 // SQL executor - will be called on main thread via wait()
                 idasql::QueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
-                    auto result = idasql::execute_query_or_script(
-                        sql, [&db](const std::string& stmt) { return db.query(stmt); });
-                    if (result.success) {
-                        return idasql::query_script_result_to_text(result);
-                    }
-                    return "Error: " + result.error;
+                    auto result = idasql::run_sql_script(db, sql);
+                    return xsql::script_result_to_text(result);
                 };
 
                 // Start with use_queue=true for CLI mode (main thread execution)
@@ -619,9 +632,8 @@ static std::string http_queue_and_wait(const std::string& sql) {
 }
 
 static std::string query_result_to_json(idasql::Database& db, const std::string& sql) {
-    auto result = idasql::execute_query_or_script(
-        sql, [&db](const std::string& stmt) { return db.query(stmt); });
-    return idasql::query_script_result_to_json_safe(result);
+    auto result = idasql::run_sql_script(db, sql);
+    return xsql::script_result_to_json(result);
 }
 
 static std::string build_cli_http_help_text() {
@@ -870,9 +882,10 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
 
 static void print_usage() {
     std::cerr << "idasql v" IDASQL_VERSION_STRING " - SQL interface to IDA databases\n\n"
-              << "Usage: idasql -s <database> [-q <query>] [-f <file>] [-i] [--export <file>]\n\n"
+              << "Usage: idasql -s <file> [-q <query>] [-f <file>] [-i] [--export <file>]\n\n"
               << "Options:\n"
-              << "  -s <file>            IDA database file (.idb/.i64) for local mode\n"
+              << "  -s <file>            IDA database (.idb/.i64) OR raw binary (.exe/.dll/firmware/etc.)\n"
+              << "                       — raw binaries trigger fresh idalib analysis and string-list rebuild\n"
               << "  --token <token>      Auth token for HTTP/MCP server mode (if server requires it)\n"
               << "  -q <sql>             Execute SQL query or semicolon-separated script\n"
               << "  -f <file>            Execute SQL from file\n"
@@ -894,6 +907,8 @@ static void print_usage() {
               << "  idasql -s test.i64 -i\n"
               << "  idasql -s test.i64 --export dump.sql\n"
               << "  idasql -s test.i64 --http 8080\n"
+              << "  idasql -s sample.exe --http 8081       # raw PE: idalib auto-analyzes, then serves SQL\n"
+              << "  idasql -s firmware.bin -q \"SELECT * FROM welcome\"\n"
 #ifdef IDASQL_HAS_MCP
               << "  idasql -s test.i64 --mcp 9000\n";
 #else
@@ -1034,12 +1049,8 @@ int main(int argc, char* argv[]) {
     if (mcp_mode) {
         // SQL executor - will be called on main thread via wait()
         idasql::QueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
-            auto result = idasql::execute_query_or_script(
-                sql, [&db](const std::string& stmt) { return db.query(stmt); });
-            if (result.success) {
-                return idasql::query_script_result_to_text(result);
-            }
-            return "Error: " + result.error;
+            auto result = idasql::run_sql_script(db, sql);
+            return xsql::script_result_to_text(result);
         };
 
         // Create and start MCP server with use_queue=true
@@ -1093,13 +1104,11 @@ int main(int argc, char* argv[]) {
             result = 1;
         }
     } else if (!query.empty()) {
-        // Query mode: preserve single-statement output and support scripts.
-        auto query_result = idasql::execute_query_or_script(
-            query, [&db](const std::string& stmt) { return db.query(stmt); });
-        if (query_result.success) {
-            print_query_script_tables(query_result);
-        } else {
-            std::cerr << "Error: " << query_result.error << "\n";
+        // Query mode: single-statement and multi-statement go through the same
+        // canonical envelope; output is table form.
+        auto query_result = idasql::run_sql_script(db, query);
+        print_script_result_tables(query_result);
+        if (!query_result.success) {
             result = 1;
         }
     } else if (!sql_file.empty()) {
