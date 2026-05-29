@@ -13,6 +13,7 @@ add_library(idasql STATIC
     src/disassembly.cpp
     src/search_bytes.cpp
     src/idapython_exec.cpp
+    src/ida90_compat.cpp
     src/metadata.cpp
     src/metadata_welcome.cpp
     src/ui_context_provider.cpp

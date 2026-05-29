@@ -24,7 +24,11 @@ bool Session::open(const char* idb_path) {
     error_.clear();
 
     // Open the database
+#if IDA_SDK_VERSION >= 920
     int rc = open_database(idb_path, true, nullptr);
+#else
+    int rc = open_database(idb_path, true);
+#endif
     if (rc != 0) {
         error_ = "Failed to open database: " + std::string(idb_path);
         return false;
