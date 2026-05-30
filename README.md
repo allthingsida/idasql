@@ -123,9 +123,9 @@ Now IDASQL and your IDA UI are connected and working together.
 
 IDASQL skills give your coding agent full control over IDA databases through natural language.
 
-- **Claude Code** -- full plugin with 14 topic-focused skills. Install via `/install-plugin` (see below).
-- **GitHub Copilot CLI** -- also supports IDASQL skills. Install the same plugin.
-- **Codex (OpenAI)** -- supports skills. Point Codex to the `Skills/` folder from the [idasql-skills](https://github.com/allthingsida/idasql-skills) repository.
+- **Claude Code** -- full plugin with 15 topic-focused skills, installed from the [`allthingsida/idasql-skills`](https://github.com/allthingsida/idasql-skills) marketplace.
+- **GitHub Copilot CLI** -- also supports IDASQL skills via the same plugin.
+- **Codex (OpenAI)** -- supports skills via the same plugin packaging. See the [idasql-skills](https://github.com/allthingsida/idasql-skills) repo for the Codex install steps.
 
 #### Prerequisites
 
@@ -133,11 +133,15 @@ IDASQL skills give your coding agent full control over IDA databases through nat
 2. **idasql** downloaded from [Releases](https://github.com/allthingsida/idasql/releases) and placed next to the IDA binary
 3. Verify setup: `idasql --version` should work from command line
 
-#### Install
+#### Install (Claude Code)
 
-```bash
-claude /install-plugin https://github.com/allthingsida/idasql-skills
+Inside Claude Code, run:
+
+```text
+/plugin marketplace add allthingsida/idasql-skills
 ```
+
+then install the `idasql` plugin from that marketplace. See the [idasql-skills README](https://github.com/allthingsida/idasql-skills#installation) for Codex and other install paths.
 
 #### Skills
 
