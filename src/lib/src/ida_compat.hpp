@@ -19,13 +19,6 @@
 
 #pragma once
 
-// This shim references bookmarks_t / lochist_entry_t / idaplace_t / tiplace_t
-// (see idasql_bookmarks_get_by_inode below), which live in <moves.hpp>. Include
-// it directly so the shim is self-contained: ida_headers.hpp pulls moves.hpp in
-// before us, but translation units that include this header directly (e.g. the
-// plugin's main.cpp) must not depend on that ordering. (allthingsida/idasql#35)
-#include <moves.hpp>
-
 // Cutoffs empirically verified against IDA SDK headers 9.0, 9.1, 9.2, 9.3.
 //
 //  9.1 added:  tinfo_t::get_edm()/get_edm_by_value() (renamed from find_edm),
@@ -35,13 +28,11 @@
 //              callcnv_t typedef, GENDSM_UNHIDE,
 //              place_t::equals() (and the idaplace_t__equals runtime export
 //              — shimmed locally in ida_compat.cpp).
-//  9.3 added:  BWN_TITREE (handled via plain `#ifdef`),
-//              bookmarks_t::get_by_inode() (see allthingsida/idasql#35).
+//  9.3 added:  BWN_TITREE (handled via plain `#ifdef`).
 #define IDASQL_HAS_PARENT_ITEM             (IDA_SDK_VERSION >= 920)
 #define IDASQL_HAS_GET_EDM                 (IDA_SDK_VERSION >= 910)
 #define IDASQL_HAS_OPEN_DATABASE_3ARG      (IDA_SDK_VERSION >= 910)
 #define IDASQL_HAS_IS_IDA_LIBRARY_NOARG    (IDA_SDK_VERSION >= 920)
-#define IDASQL_HAS_BOOKMARKS_GET_BY_INODE  (IDA_SDK_VERSION >= 930)
 
 #if IDA_SDK_VERSION < 920
 // callcnv_t was introduced in 9.2 as a distinct type for calling-convention
@@ -95,49 +86,5 @@ inline bool idasql_is_ida_library()
     return is_ida_library();
 #else
     return is_ida_library(nullptr, 0, nullptr);
-#endif
-}
-
-/**
- * bookmarks_t::get_by_inode() resolves a bookmark dirtree leaf inode to its
- * store slot, deserializing the location into out_entry and the description
- * into out_desc. It was added in IDA 9.3; older SDKs expose neither the member
- * nor the exported bookmarks_t_get_by_inode symbol, so referencing it breaks
- * both compile and link (see allthingsida/idasql#35).
- *
- * Pre-9.3 emulation: the standard bookmark dirtrees key each leaf's inode by
- * the place's primary coordinate. Verified on 9.3 that idaplace (EA) bookmarks
- * use inode == ea — the dirtree leaf is even named after the hex ea; tiplace
- * (local-type) bookmarks mirror this by ordinal. Both call sites only ever pass
- * real leaf inodes (enumerated via dirtrees::collect_inode_paths), so we scan
- * the store with the stable size()/get() API and return the slot whose
- * coordinate matches the inode, leaving out_entry/out_desc populated by get()
- * exactly as get_by_inode would. is_place_class_ea_capable() distinguishes the
- * two place classes without constructing one (idalib does not export tiplace's
- * constructor; we only read members off places get() fills for us).
- */
-inline uint32 idasql_bookmarks_get_by_inode(
-    lochist_entry_t *out_entry, qstring *out_desc, inode_t inode, void *ud)
-{
-#if IDASQL_HAS_BOOKMARKS_GET_BY_INODE
-    return bookmarks_t::get_by_inode(out_entry, out_desc, inode, ud);
-#else
-    if (out_entry == nullptr || out_entry->place() == nullptr)
-        return BOOKMARKS_BAD_INDEX;
-    const bool ea_capable = is_place_class_ea_capable(out_entry->place()->id());
-    const uint32 count = bookmarks_t::size(*out_entry, ud);
-    for (uint32 slot = 0; slot < count; ++slot)
-    {
-        uint32 idx = slot;
-        if (!bookmarks_t::get(out_entry, out_desc, &idx, ud)
-            || out_entry->place() == nullptr)
-            continue;
-        const uint64 leaf = ea_capable
-            ? uint64(static_cast<idaplace_t *>(out_entry->place())->ea)
-            : uint64(static_cast<tiplace_t *>(out_entry->place())->ordinal);
-        if (leaf == uint64(inode))
-            return idx;
-    }
-    return BOOKMARKS_BAD_INDEX;
 #endif
 }

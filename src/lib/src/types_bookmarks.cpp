@@ -65,18 +65,11 @@ void collect_local_type_bookmark_rows(std::vector<LocalTypeBookmarkRow>& rows) {
         return;  // tiplace place class unavailable in this runtime
     const uint32_t n = bookmarks_t::size(probe, nullptr);
 
-    // dirtree leaf -> bookmark slot, so we can attach folder_path/inode.
+    // dirtree leaf inode -> folder path. Standard bookmark dirtrees key each
+    // leaf by the place's primary coordinate; for tiplace that is the ordinal.
+    // So we attach folder_path/inode by looking each enumerated slot's ordinal
+    // up in this map -- no bookmarks_t::get_by_inode() (9.3-only) needed.
     auto inode_paths = dirtrees::collect_inode_paths(DIRTREE_LTYPES_BOOKMARKS);
-    std::unordered_map<uint32_t, std::pair<uint64_t, dirtrees::DirtreePathInfo>>
-        slot_folder;
-    for (const auto& ip : inode_paths) {
-        lochist_entry_t e = make_ltype_loc(0);
-        qstring d;
-        uint32_t slot = idasql_bookmarks_get_by_inode(
-            &e, &d, static_cast<inode_t>(ip.first), nullptr);
-        if (slot != BOOKMARKS_BAD_INDEX)
-            slot_folder[slot] = {ip.first, ip.second};
-    }
 
     for (uint32_t slot = 0; slot < n; ++slot) {
         lochist_entry_t entry = make_ltype_loc(0);
@@ -95,11 +88,13 @@ void collect_local_type_bookmark_rows(std::vector<LocalTypeBookmarkRow>& rows) {
                              : nullptr;
         row.type_name = tn ? tn : "";
 
-        auto it = slot_folder.find(slot);
-        if (it != slot_folder.end()) {
-            row.inode = it->second.first;  // real dirtree inode (may legitimately be 0)
-            row.folder_path = it->second.second.folder_path;
-            row.full_path = it->second.second.full_path;
+        // inode == ordinal for tiplace bookmarks (the dirtree leaf is keyed by
+        // the ordinal). Attach the folder overlay if this slot has a leaf.
+        auto it = inode_paths.find(static_cast<uint64_t>(row.ordinal));
+        if (it != inode_paths.end()) {
+            row.inode = it->first;  // real dirtree inode == ordinal
+            row.folder_path = it->second.folder_path;
+            row.full_path = it->second.full_path;
         } else {
             row.inode = kNoLeafInode;  // not linked into the dirtree yet
         }
