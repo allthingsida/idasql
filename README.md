@@ -412,6 +412,8 @@ All `/query` responses use the canonical script envelope — single statement = 
 
 Fail-fast is the default; pass `continue_on_error=true` (e.g. `?continue_on_error=1`) to run every statement regardless of earlier failures. Each `results[i].error` is canonical for per-statement failures; `first_error_index` points at the earliest failure or is `null`. On splitter failure (e.g. an unterminated quote) the response is `success:false`, `statement_count:0`, `results:[]`, plus a top-level `parse_error`.
 
+Output format: JSON by default. Pass `?format=text|csv|tsv` for terminal/pipe-friendly output (`text` = ASCII table, `csv` = RFC-4180, `tsv` = tab-separated); agents should consume the default JSON. Example: `curl -X POST "http://localhost:8080/query?format=csv" -d "SELECT name,size FROM funcs LIMIT 5"`.
+
 For multiple databases, run separate instances:
 
 ```bash
