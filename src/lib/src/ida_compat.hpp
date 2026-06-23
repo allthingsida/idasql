@@ -19,6 +19,13 @@
 
 #pragma once
 
+// This shim references bookmarks_t / lochist_entry_t / idaplace_t / tiplace_t
+// (see idasql_bookmarks_get_by_inode below), which live in <moves.hpp>. Include
+// it directly so the shim is self-contained: ida_headers.hpp pulls moves.hpp in
+// before us, but translation units that include this header directly (e.g. the
+// plugin's main.cpp) must not depend on that ordering. (allthingsida/idasql#35)
+#include <moves.hpp>
+
 // Cutoffs empirically verified against IDA SDK headers 9.0, 9.1, 9.2, 9.3.
 //
 //  9.1 added:  tinfo_t::get_edm()/get_edm_by_value() (renamed from find_edm),
