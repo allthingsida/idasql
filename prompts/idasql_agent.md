@@ -2451,11 +2451,29 @@ curl -X POST http://localhost:8080/query \
 curl http://localhost:8080/status
 ```
 
-**Response Format (JSON):**
+**Response Format (JSON envelope; single statement = array of one):**
 ```json
-{"success": true, "columns": ["name", "size"], "rows": [["main", "500"]], "row_count": 1}
+{"success": true, "statement_count": 1,
+ "results": [{"statement_index": 0, "success": true,
+   "columns": ["name", "size"], "rows": [["main", "500"]],
+   "row_count": 1, "elapsed_ms": 8, "error": null}],
+ "row_count_total": 1, "elapsed_ms_total": 8, "first_error_index": null}
 ```
+On failure a result's `"success"` is `false` and `"error"` carries the message.
 
-```json
-{"success": false, "error": "no such table: bad_table"}
-```
+### Output guidance
+
+Showing data serves the user's intent — it is not automatic. Keep three concerns separate:
+
+- **Selection** — *whether/how much* to surface is a judgment driven by intent. Answer
+  questions directly ("biggest is `main`, 500 bytes"); show supporting rows only when they
+  help the user verify; don't dump full tables unprompted; never show data fetched only as
+  an intermediate step.
+- **Fidelity** — when you *do* present code/data, show the real artifact (decompilation,
+  rows), never a paraphrase.
+- **Mechanics** — consume this JSON envelope directly and render in your reply. Do **not**
+  pipe responses through `python`/`jq`/`awk` to pre-render a table — that discards
+  `success`/`elapsed_ms`/`error` and makes you reason over a lossy view. Reserve `jq`/`python`
+  for extracting a value to feed a later query. The CLI (`-c`/`-f`) already prints a table.
+  For direct terminal/pipe use the server can emit `?format=text|csv|tsv`, but as an agent,
+  consume `json`.
