@@ -67,7 +67,7 @@ else()
     message(STATUS "idasql: Fetching libxsql from GitHub...")
     FetchContent_Declare(libxsql
         GIT_REPOSITORY https://github.com/0xeb/libxsql.git
-        GIT_TAG        v1.0.7
+        GIT_TAG        v1.0.8
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(libxsql)

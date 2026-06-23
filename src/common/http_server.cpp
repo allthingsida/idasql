@@ -43,20 +43,13 @@ static std::string build_http_help_text() {
     return out.str();
 }
 
-int IDAHTTPServer::start(int port, HTTPQueryCallback query_cb,
-                         const std::string& bind_addr, bool use_queue) {
-    if (impl_ && impl_->is_running()) {
-        return impl_->port();
-    }
-
-    bind_addr_ = bind_addr.empty() ? "127.0.0.1" : bind_addr;
-
+static xsql::thinclient::http_query_server_config make_idasql_config(
+        int port, const std::string& bind_addr, bool use_queue) {
     xsql::thinclient::http_query_server_config config;
     config.tool_name = "idasql";
     config.help_text = build_http_help_text();
     config.port = port;
-    config.bind_address = bind_addr_;
-    config.query_fn = std::move(query_cb);
+    config.bind_address = bind_addr;
     config.use_queue = use_queue;
     config.queue_admission_timeout_ms_fn = []() {
         return idasql::runtime_settings().queue_admission_timeout_ms();
@@ -74,7 +67,34 @@ int IDAHTTPServer::start(int port, HTTPQueryCallback query_cb,
             {"hints_enabled", settings.hints_enabled ? 1 : 0}
         };
     };
+    return config;
+}
 
+// Legacy: whole-script JSON callback (used by the in-process plugin).
+int IDAHTTPServer::start(int port, HTTPQueryCallback query_cb,
+                         const std::string& bind_addr, bool use_queue) {
+    if (impl_ && impl_->is_running()) {
+        return impl_->port();
+    }
+    bind_addr_ = bind_addr.empty() ? "127.0.0.1" : bind_addr;
+    auto config = make_idasql_config(port, bind_addr_, use_queue);
+    config.query_fn = std::move(query_cb);
+    impl_ = std::make_unique<xsql::thinclient::http_query_server>(config);
+    return impl_->start();
+}
+
+// Preferred: single-statement executor (CLI). Enables continue_on_error/
+// include_sql and round-trip-free format=.
+int IDAHTTPServer::start(int port, HTTPStatementExecutor executor,
+                         const std::string& bind_addr, bool use_queue,
+                         const std::string& auth_token) {
+    if (impl_ && impl_->is_running()) {
+        return impl_->port();
+    }
+    bind_addr_ = bind_addr.empty() ? "127.0.0.1" : bind_addr;
+    auto config = make_idasql_config(port, bind_addr_, use_queue);
+    config.statement_executor = std::move(executor);
+    if (!auth_token.empty()) config.auth_token = auth_token;
     impl_ = std::make_unique<xsql::thinclient::http_query_server>(config);
     return impl_->start();
 }

@@ -388,9 +388,16 @@ static void run_repl(idasql::Database& db) {
                 }
 
                 // SQL executor - called on main thread via run_until_stopped()
-                idasql::HTTPQueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
-                    return query_result_to_json(db, sql);
-                };
+                idasql::HTTPStatementExecutor sql_cb =
+                    [&db](const std::string& stmt, xsql::ScriptStatementResult& out) {
+                        idasql::QueryResult r = db.query(stmt);
+                        out.columns = r.columns;
+                        out.rows.reserve(r.rows.size());
+                        for (const auto& row : r.rows) out.rows.push_back(row.values);
+                        out.elapsed_ms = static_cast<double>(r.elapsed_ms);
+                        out.success = r.success;
+                        out.error = r.error;
+                    };
 
                 // Start with use_queue=true (CLI mode)
                 int port = g_repl_http_server->start(req_port, sql_cb, addr, true);
@@ -578,6 +585,8 @@ static void http_signal_handler(int) {
 // Command queue for main-thread execution (needed for Hex-Rays decompiler)
 struct HttpPendingCommand {
     std::string sql;
+    xsql::ScriptOptions opts;      // continue_on_error / include_sql from query string
+    std::string format = "json";  // json | text | csv | tsv
     std::string result;
     bool started = false;
     bool canceled = false;
@@ -592,13 +601,17 @@ static std::deque<std::shared_ptr<HttpPendingCommand>> g_http_pending_commands;
 static std::atomic<bool> g_http_running{false};
 
 // Queue a command and wait for main thread to execute it
-static std::string http_queue_and_wait(const std::string& sql) {
+static std::string http_queue_and_wait(const std::string& sql,
+                                       const xsql::ScriptOptions& opts = {},
+                                       const std::string& format = "json") {
     if (!g_http_running.load()) {
         return xsql::json{{"success", false}, {"error", "Server not running"}}.dump();
     }
 
     auto cmd = std::make_shared<HttpPendingCommand>();
     cmd->sql = sql;
+    cmd->opts = opts;
+    cmd->format = format;
     cmd->completed = false;
 
     {
@@ -746,8 +759,26 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                 res.set_content(xsql::json{{"success", false}, {"error", "Empty query"}}.dump(), "application/json");
                 return;
             }
-            // Queue command for main thread execution
-            res.set_content(http_queue_and_wait(req.body), "application/json");
+            // Parse query-string options (same surface as the libxsql thinclient).
+            xsql::ScriptOptions opts;
+            {
+                auto it = req.params.find("continue_on_error");
+                if (it != req.params.end() && it->second == "1") opts.continue_on_error = true;
+                auto incl = req.params.find("include_sql");
+                if (incl != req.params.end() && incl->second == "1") opts.include_sql = true;
+            }
+            std::string format = "json";
+            {
+                auto it = req.params.find("format");
+                if (it != req.params.end() && !it->second.empty()) format = it->second;
+            }
+            // Queue command for main thread execution (Hex-Rays thread affinity).
+            std::string body = http_queue_and_wait(req.body, opts, format);
+            const char* ctype = format == "text" ? "text/plain"
+                              : format == "csv"  ? "text/csv"
+                              : format == "tsv"  ? "text/tab-separated-values"
+                              : "application/json";
+            res.set_content(body, ctype);
         });
 
         // GET /status - Also needs main thread for db.query()
@@ -853,8 +884,14 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
             }
 
             if (should_execute) {
-                // Execute query on main thread - safe for Hex-Rays decompiler
-                std::string result = query_result_to_json(db, cmd->sql);
+                // Execute on main thread (safe for Hex-Rays) with the request's
+                // options, then render per the requested format.
+                xsql::ScriptResult sr = idasql::run_sql_script(db, cmd->sql, cmd->opts);
+                std::string result =
+                    cmd->format == "text" ? xsql::script_result_to_text(sr)
+                  : cmd->format == "csv"  ? xsql::script_result_to_csv(sr)
+                  : cmd->format == "tsv"  ? xsql::script_result_to_tsv(sr)
+                  : xsql::script_result_to_json(sr, cmd->opts.include_sql);
                 {
                     std::lock_guard<std::mutex> lock(cmd->done_mutex);
                     cmd->result = std::move(result);
