@@ -72,7 +72,7 @@ void collect_local_type_bookmark_rows(std::vector<LocalTypeBookmarkRow>& rows) {
     for (const auto& ip : inode_paths) {
         lochist_entry_t e = make_ltype_loc(0);
         qstring d;
-        uint32_t slot = bookmarks_t::get_by_inode(
+        uint32_t slot = idasql_bookmarks_get_by_inode(
             &e, &d, static_cast<inode_t>(ip.first), nullptr);
         if (slot != BOOKMARKS_BAD_INDEX)
             slot_folder[slot] = {ip.first, ip.second};
