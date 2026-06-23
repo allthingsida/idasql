@@ -94,6 +94,9 @@ int IDAHTTPServer::start(int port, HTTPStatementExecutor executor,
     bind_addr_ = bind_addr.empty() ? "127.0.0.1" : bind_addr;
     auto config = make_idasql_config(port, bind_addr_, use_queue);
     config.statement_executor = std::move(executor);
+    // Non-queue servers (REPL/plugin background) run the executor on the HTTP
+    // worker; serialize so the non-concurrency-safe IDA DB handle is safe.
+    config.serialize_requests = !use_queue;
     if (!auth_token.empty()) config.auth_token = auth_token;
     impl_ = std::make_unique<xsql::thinclient::http_query_server>(config);
     return impl_->start();

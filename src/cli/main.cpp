@@ -707,7 +707,58 @@ static std::string build_cli_http_help_text() {
     return out.str();
 }
 
+// CLI --http server, on the shared libxsql thinclient (use_queue=true: queries
+// run on this main thread via run_until_stopped, for Hex-Rays thread affinity).
 static int run_http_mode(idasql::Database& db, int port, const std::string& bind_addr, const std::string& auth_token) {
+    idasql::IDAHTTPServer server;
+    idasql::HTTPStatementExecutor exec =
+        [&db](const std::string& stmt, xsql::ScriptStatementResult& out) {
+            idasql::QueryResult r = db.query(stmt);
+            out.columns = r.columns;
+            out.rows.reserve(r.rows.size());
+            for (const auto& row : r.rows) out.rows.push_back(row.values);
+            out.elapsed_ms = static_cast<double>(r.elapsed_ms);
+            out.success = r.success;
+            out.error = r.error;
+        };
+
+    int actual_port = server.start(port, exec, bind_addr, /*use_queue=*/true, auth_token);
+    if (actual_port < 0) {
+        std::cerr << "Error: Failed to start HTTP server\n";
+        return 1;
+    }
+
+    g_http_stop_requested.store(false);
+    auto old_handler = std::signal(SIGINT, http_signal_handler);
+#ifdef _WIN32
+    auto old_break = std::signal(SIGBREAK, http_signal_handler);
+#else
+    auto old_term = std::signal(SIGTERM, http_signal_handler);
+#endif
+    server.set_interrupt_check([]() { return g_http_stop_requested.load(); });
+
+    std::cout << "IDASQL HTTP server: http://" << (bind_addr.empty() ? "127.0.0.1" : bind_addr)
+              << ":" << actual_port << "\n";
+    std::cout << "Database: " << db.info() << "\n";
+    std::cout << "Press Ctrl+C to stop.\n\n";
+    std::cout.flush();
+
+    server.run_until_stopped();
+    server.stop();
+
+    std::signal(SIGINT, old_handler);
+#ifdef _WIN32
+    std::signal(SIGBREAK, old_break);
+#else
+    std::signal(SIGTERM, old_term);
+#endif
+    std::cout << "\nHTTP server stopped.\n";
+    return 0;
+}
+
+// Superseded by the thinclient-based run_http_mode above; retained briefly and
+// no longer called (cleanup follow-up).
+static int run_http_mode_legacy(idasql::Database& db, int port, const std::string& bind_addr, const std::string& auth_token) {
     xsql::thinclient::server_config cfg;
     cfg.port = port;
     cfg.bind_address = bind_addr.empty() ? "127.0.0.1" : bind_addr;

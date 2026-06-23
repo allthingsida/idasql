@@ -358,14 +358,26 @@ struct idasql_plugmod_t : public plugmod_t
             }
         }
 
-        // SQL executor that uses execute_sync for thread safety and returns JSON
-        idasql::HTTPQueryCallback sql_cb = [this](const std::string& sql) -> std::string {
-            xsql::ScriptResult result = run_query_script_sync(sql);
-            return xsql::script_result_to_json(result);
-        };
+        // Single-statement executor: each statement runs on IDA's main thread
+        // via execute_sync (Hex-Rays thread affinity). The thinclient owns
+        // multi-statement orchestration, options, and formatting; non-queue +
+        // serialize_requests keeps requests one-at-a-time.
+        idasql::HTTPStatementExecutor sql_exec =
+            [this](const std::string& stmt, xsql::ScriptStatementResult& out) {
+                query_request_t req(engine_.get(), stmt);
+                execute_sync(req, MFF_WRITE);
+                const idasql::QueryResult& r = req.result;
+                out.columns = r.columns;
+                out.rows.reserve(r.rows.size());
+                for (const auto& row : r.rows) out.rows.push_back(row.values);
+                out.elapsed_ms = static_cast<double>(r.elapsed_ms);
+                out.success = r.success;
+                out.error = r.error;
+            };
 
-        // Start HTTP server, no queue (plugin mode)
-        int port = http_server_.start(req_port, sql_cb, addr);
+        // Start HTTP server, no queue (plugin mode; execute_sync marshals each
+        // statement to the main thread).
+        int port = http_server_.start(req_port, sql_exec, addr, /*use_queue=*/false);
         if (port <= 0) {
             return "Error: Failed to start HTTP server";
         }
