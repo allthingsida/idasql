@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "entities_dbg.hpp"
 
@@ -75,6 +74,17 @@ bool set_bpt_folder(bpt_t& bpt, xsql::FunctionArg value, const char* surface) {
     return ok;
 }
 
+bool set_bpt_enabled(bpt_t& bpt, bool enable) {
+    if (enable)
+        bpt.flags |= BPT_ENABLED;
+    else
+        bpt.flags &= ~BPT_ENABLED;
+    bool ok = update_bpt(&bpt);
+    if (!ok)
+        xsql::set_vtab_error("breakpoints: failed to set enabled state");
+    return ok;
+}
+
 std::string safe_bpt_loc_path(const bpt_t& bpt) {
     const bpt_location_t& loc = bpt.loc;
     if (loc.type() == BPLT_REL || loc.type() == BPLT_SRC) {
@@ -97,7 +107,7 @@ VTableDef define_breakpoints() {
     return table("breakpoints")
         .count([]() { return static_cast<size_t>(get_bpt_qty()); })
         // Column 0: address (R)
-        .column_int64("address", [](size_t i) -> int64_t {
+        .column_int64("addr", [](size_t i) -> int64_t {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return static_cast<int64_t>(bpt.ea);
@@ -115,9 +125,7 @@ VTableDef define_breakpoints() {
                     xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
                     return false;
                 }
-                bool ok = enable_bpt(bpt.loc, val != 0);
-                if (!ok) xsql::set_vtab_error("breakpoints: failed to set enabled state");
-                return ok;
+                return set_bpt_enabled(bpt, val != 0);
             })
         // Column 2: type (RW)
         .column_int_rw("type",
@@ -175,7 +183,7 @@ VTableDef define_breakpoints() {
                     return false;
                 }
                 // Preserve BPT_ENABLED from current state so flags writes
-                // don't undo enable_bpt() calls during batch vtable updates
+                // don't undo enabled-column writes during batch vtable updates
                 uint32 cur_enabled = bpt.flags & BPT_ENABLED;
                 bpt.flags = (static_cast<uint32>(val) & ~BPT_ENABLED) | cur_enabled;
                 bool ok = update_bpt(&bpt);
@@ -355,6 +363,15 @@ VTableDef define_breakpoints() {
 
             bool ok = false;
 
+            // Identity of the breakpoint we are about to insert, so the
+            // post-property loops below update *that* bpt and not an unrelated
+            // one. For the addr branch we match by ea; for the symbolic /
+            // relative / source branches the bpt list is location-ordered (not
+            // newest-last), so we must match by location.
+            bool match_by_ea = is_non_null(0);
+            ea_t target_ea = match_by_ea ? static_cast<ea_t>(get_int64(0)) : BADADDR;
+            bpt_location_t target_loc;
+
             if (is_non_null(11)) {
                 const char* sym = get_text(11);
                 if (!sym) return false;
@@ -363,6 +380,7 @@ VTableDef define_breakpoints() {
                 bpt.loc.set_sym_bpt(sym, static_cast<uval_t>(off));
                 bpt.type = static_cast<bpttype_t>(get_int(2, BPT_SOFT));
                 bpt.size = get_int(4, 0);
+                target_loc = bpt.loc;
                 ok = add_bpt(bpt);
             } else if (is_non_null(10)) {
                 const char* mod = get_text(10);
@@ -372,6 +390,7 @@ VTableDef define_breakpoints() {
                 bpt.loc.set_rel_bpt(mod, static_cast<uval_t>(off));
                 bpt.type = static_cast<bpttype_t>(get_int(2, BPT_SOFT));
                 bpt.size = get_int(4, 0);
+                target_loc = bpt.loc;
                 ok = add_bpt(bpt);
             } else if (is_non_null(13)) {
                 const char* file = get_text(13);
@@ -381,6 +400,7 @@ VTableDef define_breakpoints() {
                 bpt.loc.set_src_bpt(file, line);
                 bpt.type = static_cast<bpttype_t>(get_int(2, BPT_SOFT));
                 bpt.size = get_int(4, 0);
+                target_loc = bpt.loc;
                 ok = add_bpt(bpt);
             } else if (is_non_null(0)) {
                 ea_t ea = static_cast<ea_t>(get_int64(0));
@@ -393,78 +413,74 @@ VTableDef define_breakpoints() {
 
             if (!ok) return false;
 
-            // Apply optional properties after creation
+            // Compare two breakpoint locations without going through the
+            // UI-callback-backed operator== (which is unavailable headless):
+            // equal type, and equal string+offset (or ea for absolute).
+            auto loc_eq = [](const bpt_location_t& a, const bpt_location_t& b) -> bool {
+                if (a.type() != b.type()) return false;
+                if (a.type() == BPLT_ABS) return a.ea() == b.ea();
+                if (a.type() == BPLT_SRC) {
+                    if (a.lineno() != b.lineno()) return false;
+                } else if (a.offset() != b.offset()) {
+                    return false;
+                }
+                const char* pa = a.symbol();
+                const char* pb = b.symbol();
+                return (pa ? pa : "") == std::string(pb ? pb : "");
+            };
+
+            // Locate the just-inserted bpt into `bpt`; returns false if not found.
+            auto find_inserted = [&](bpt_t& bpt) -> bool {
+                int n = get_bpt_qty();
+                for (int j = 0; j < n; ++j) {
+                    if (!getn_bpt(j, &bpt)) continue;
+                    if (match_by_ea) {
+                        if (bpt.ea == target_ea) return true;
+                    } else if (loc_eq(bpt.loc, target_loc)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            // Apply optional properties after creation, all against the bpt we
+            // just inserted (located via find_inserted).
             if (is_non_null(7)) {
                 const char* cond = get_text(7);
                 if (cond) {
                     bpt_t bpt;
-                    int n = get_bpt_qty();
-                    for (int j = n - 1; j >= 0; --j) {
-                        if (getn_bpt(j, &bpt)) {
-                            if (is_non_null(0) && bpt.ea == static_cast<ea_t>(get_int64(0))) {
-                                bpt.cndbody = cond;
-                                update_bpt(&bpt);
-                                break;
-                            } else if (!is_non_null(0)) {
-                                bpt.cndbody = cond;
-                                update_bpt(&bpt);
-                                break;
-                            }
-                        }
+                    if (find_inserted(bpt)) {
+                        bpt.cndbody = cond;
+                        update_bpt(&bpt);
                     }
                 }
             }
 
             if (is_non_null(6)) {
                 bpt_t bpt;
-                int n = get_bpt_qty();
-                for (int j = n - 1; j >= 0; --j) {
-                    if (getn_bpt(j, &bpt)) {
-                        if (is_non_null(0) && bpt.ea == static_cast<ea_t>(get_int64(0))) {
-                            bpt.pass_count = get_int(6);
-                            update_bpt(&bpt);
-                            break;
-                        } else if (!is_non_null(0)) {
-                            bpt.pass_count = get_int(6);
-                            update_bpt(&bpt);
-                            break;
-                        }
-                    }
+                if (find_inserted(bpt)) {
+                    bpt.pass_count = get_int(6);
+                    update_bpt(&bpt);
                 }
             }
 
             if (is_non_null(5)) {
                 bpt_t bpt;
-                int n = get_bpt_qty();
-                for (int j = n - 1; j >= 0; --j) {
-                    if (getn_bpt(j, &bpt)) {
-                        if (is_non_null(0) && bpt.ea == static_cast<ea_t>(get_int64(0))) {
-                            bpt.flags = static_cast<uint32>(get_int64(5));
-                            update_bpt(&bpt);
-                            break;
-                        } else if (!is_non_null(0)) {
-                            bpt.flags = static_cast<uint32>(get_int64(5));
-                            update_bpt(&bpt);
-                            break;
-                        }
-                    }
+                if (find_inserted(bpt)) {
+                    // Preserve BPT_ENABLED from current state, matching the
+                    // UPDATE flags setter, so a raw flags write does not undo
+                    // the bpt's enabled status.
+                    uint32 cur_enabled = bpt.flags & BPT_ENABLED;
+                    bpt.flags = (static_cast<uint32>(get_int64(5)) & ~BPT_ENABLED) | cur_enabled;
+                    update_bpt(&bpt);
                 }
             }
 
             if (is_non_null(1)) {
                 bool enable = get_int(1) != 0;
                 bpt_t bpt;
-                int n = get_bpt_qty();
-                for (int j = n - 1; j >= 0; --j) {
-                    if (getn_bpt(j, &bpt)) {
-                        if (is_non_null(0) && bpt.ea == static_cast<ea_t>(get_int64(0))) {
-                            enable_bpt(bpt.loc, enable);
-                            break;
-                        } else if (!is_non_null(0)) {
-                            enable_bpt(bpt.loc, enable);
-                            break;
-                        }
-                    }
+                if (find_inserted(bpt)) {
+                    set_bpt_enabled(bpt, enable);
                 }
             }
 
@@ -474,17 +490,8 @@ VTableDef define_breakpoints() {
                 if (grp) {
                     std::string normalized = dirtrees::normalize_relative_path(grp);
                     bpt_t bpt;
-                    int n = get_bpt_qty();
-                    for (int j = n - 1; j >= 0; --j) {
-                        if (getn_bpt(j, &bpt)) {
-                            if (is_non_null(0) && bpt.ea == static_cast<ea_t>(get_int64(0))) {
-                                set_bpt_group(bpt, normalized.c_str());
-                                break;
-                            } else if (!is_non_null(0)) {
-                                set_bpt_group(bpt, normalized.c_str());
-                                break;
-                            }
-                        }
+                    if (find_inserted(bpt)) {
+                        set_bpt_group(bpt, normalized.c_str());
                     }
                 }
             }

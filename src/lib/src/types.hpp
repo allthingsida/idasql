@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * types.hpp - Umbrella header for the idasql::types SQL tables.
@@ -25,6 +24,8 @@
 #include "types_bookmarks.hpp"
 #include "types_enums.hpp"
 #include "types_func_args.hpp"
+#include "types_gaps.hpp"
+#include "types_member_xrefs.hpp"
 #include "types_members.hpp"
 
 namespace idasql {
@@ -39,6 +40,8 @@ struct TypesRegistry {
   GeneratorTableDef<AppliedTypeEntry> applied_types;
   CachedTableDef<LocalTypeBookmarkRow> local_type_bookmarks;
   CachedTableDef<MemberEntry> types_members;
+  CachedTableDef<MemberXrefRow> struct_member_xrefs;
+  CachedTableDef<GapRow> type_gaps;
   CachedTableDef<EnumValueEntry> types_enum_values;
   CachedTableDef<FuncArgEntry> types_func_args;
 

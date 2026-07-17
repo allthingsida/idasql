@@ -1,3 +1,11 @@
+#
+# Copyright (c) 2024-2026 Elias Bachaalany
+# SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
+#
+# This file is licensed under the Human-Origin Source License v1.0.
+# See LICENSE.
+#
+
 # idasql CLI - Command-line SQL interface to IDA databases
 # Built as part of the main idasql project
 
@@ -75,7 +83,7 @@ endif()
 # HTTP server support
 target_sources(idasql_cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/http_server.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/welcome_query.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/binary_query.cpp
 )
 target_compile_definitions(idasql_cli PRIVATE XSQL_HAS_THINCLIENT)
 

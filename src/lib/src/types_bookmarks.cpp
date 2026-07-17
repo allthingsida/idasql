@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "types_bookmarks.hpp"
 
@@ -19,29 +18,33 @@ namespace types {
 // (a real dirtree inode can legitimately be 0, so 0 cannot mean "none").
 static constexpr uint64_t kNoLeafInode = ~uint64_t(0);
 
+static lochist_entry_t& owned_ltype_place_template() {
+    static lochist_entry_t owned;
+    return owned;
+}
+
+void reset_local_type_bookmark_place_cache() {
+    owned_ltype_place_template() = lochist_entry_t();
+}
+
 static lochist_entry_t make_ltype_loc(uint32_t ordinal) {
-    // Keep a long-lived, OWNED clone of the place-class template -- do NOT cache
-    // the raw template pointer. get_place_class_template(TCCPT_TIPLACE) can
-    // return nullptr after the Hex-Rays/pseudocode subsystem reshuffles and
-    // FREES the registry template (e.g. after a decompile + cache invalidation);
-    // a cached raw pointer would then dangle, and cloning it dereferences freed
-    // memory once that block is reused (observed as a vtable call on garbage).
-    // lochist_entry_t owns its place (deep-clones on construction, frees on
-    // destruction) and the clone's vtable points at stable module code, so an
-    // owned clone survives such reshuffles. Capture it once, the first time the
-    // template is available, then clone from the owned copy thereafter.
-    static lochist_entry_t s_owned;
-    if (s_owned.place() == nullptr) {
+    // Keep a long-lived OWNED clone of the place-class template -- never cache the raw
+    // template pointer. get_place_class_template(TCCPT_TIPLACE) can free the registry
+    // template after a decompile + cache invalidation, so a cached raw pointer would
+    // dangle; lochist_entry_t deep-clones and owns its place, surviving such reshuffles.
+    // Safe as a function-local static: queries run serialized on the main thread.
+    lochist_entry_t& owned = owned_ltype_place_template();
+    if (owned.place() == nullptr) {
         const place_t* tmpl = get_place_class_template(TCCPT_TIPLACE);
         if (tmpl != nullptr) {
             renderer_info_t rinfo;
-            s_owned = lochist_entry_t(tmpl, rinfo);  // deep clone, owned
+            owned = lochist_entry_t(tmpl, rinfo);  // deep clone, owned
         }
     }
 
     renderer_info_t rinfo;
     // Clone from the owned template (stable) or stay empty if never captured.
-    lochist_entry_t loc(s_owned.place(), rinfo);
+    lochist_entry_t loc(owned.place(), rinfo);
     if (loc.place() != nullptr) {
         tiplace_t* tp = static_cast<tiplace_t*>(loc.place());
         tp->ordinal = ordinal;
@@ -65,11 +68,18 @@ void collect_local_type_bookmark_rows(std::vector<LocalTypeBookmarkRow>& rows) {
         return;  // tiplace place class unavailable in this runtime
     const uint32_t n = bookmarks_t::size(probe, nullptr);
 
-    // dirtree leaf inode -> folder path. Standard bookmark dirtrees key each
-    // leaf by the place's primary coordinate; for tiplace that is the ordinal.
-    // So we attach folder_path/inode by looking each enumerated slot's ordinal
-    // up in this map -- no bookmarks_t::get_by_inode() (9.3-only) needed.
+    // dirtree leaf -> bookmark slot, so we can attach folder_path/inode.
     auto inode_paths = dirtrees::collect_inode_paths(DIRTREE_LTYPES_BOOKMARKS);
+    std::unordered_map<uint32_t, std::pair<uint64_t, dirtrees::DirtreePathInfo>>
+        slot_folder;
+    for (const auto& ip : inode_paths) {
+        lochist_entry_t e = make_ltype_loc(0);
+        qstring d;
+        uint32_t slot = bookmarks_t::get_by_inode(
+            &e, &d, static_cast<inode_t>(ip.first), nullptr);
+        if (slot != BOOKMARKS_BAD_INDEX)
+            slot_folder[slot] = {ip.first, ip.second};
+    }
 
     for (uint32_t slot = 0; slot < n; ++slot) {
         lochist_entry_t entry = make_ltype_loc(0);
@@ -88,13 +98,11 @@ void collect_local_type_bookmark_rows(std::vector<LocalTypeBookmarkRow>& rows) {
                              : nullptr;
         row.type_name = tn ? tn : "";
 
-        // inode == ordinal for tiplace bookmarks (the dirtree leaf is keyed by
-        // the ordinal). Attach the folder overlay if this slot has a leaf.
-        auto it = inode_paths.find(static_cast<uint64_t>(row.ordinal));
-        if (it != inode_paths.end()) {
-            row.inode = it->first;  // real dirtree inode == ordinal
-            row.folder_path = it->second.folder_path;
-            row.full_path = it->second.full_path;
+        auto it = slot_folder.find(slot);
+        if (it != slot_folder.end()) {
+            row.inode = it->second.first;  // real dirtree inode (may legitimately be 0)
+            row.folder_path = it->second.second.folder_path;
+            row.full_path = it->second.second.full_path;
         } else {
             row.inode = kNoLeafInode;  // not linked into the dirtree yet
         }

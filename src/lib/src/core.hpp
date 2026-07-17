@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * core.hpp - Master umbrella for the core SQL table domains.
@@ -66,17 +65,7 @@ struct CoreRegistry {
   GeneratorTableDef<dirtrees::DirtreeEntryRow> dirtree_entries;
   GeneratorTableDef<dirtrees::DirtreeFolderRow> dirtree_folders;
 
-  // Global pointer for cache invalidation from SQL functions
-  static inline CoreRegistry *g_instance = nullptr;
-
   CoreRegistry();
-  ~CoreRegistry();
-
-  // Invalidate the strings cache (call after rebuild_strings)
-  void invalidate_strings_cache();
-
-  // Static method for SQL functions to invalidate strings cache
-  static void invalidate_strings_cache_global();
 
   void register_all(xsql::Database &db);
 

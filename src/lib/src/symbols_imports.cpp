@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "symbols_imports.hpp"
 
@@ -61,7 +60,7 @@ CachedTableDef<ImportInfo> define_imports() {
               &ctx);
         }
       })
-      .column_int64("address",
+      .column_int64("addr",
                     [](const ImportInfo &r) -> int64_t {
                       return static_cast<int64_t>(r.ea);
                     })
@@ -104,7 +103,7 @@ CachedTableDef<ImportInfo> define_imports() {
       .column_text("full_path", [](const ImportInfo &r) -> std::string {
         return r.full_path;
       })
-      .index_on("address", [](const ImportInfo &r) -> int64_t {
+      .index_on("addr", [](const ImportInfo &r) -> int64_t {
         return static_cast<int64_t>(r.ea);
       })
       .build();

@@ -1,5 +1,5 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 
 #include "address_resolution.hpp"
 
@@ -16,6 +16,12 @@ namespace idasql {
 bool parse_numeric_ea_text(const std::string& text, ea_t& out_ea) {
     const std::string token = trim_copy(text);
     if (token.empty()) {
+        return false;
+    }
+    // strtoull silently WRAPS a leading '-' (e.g. "-1" -> 0xFFFF...FFFF) without
+    // setting ERANGE, which would masquerade as a valid high address. A negative
+    // address is never valid — reject it up front.
+    if (token[0] == '-') {
         return false;
     }
 
@@ -40,7 +46,7 @@ bool resolve_address_value(
         ea_t& out_ea,
         std::string* error) {
     out_ea = BADADDR;
-    const char* name = (arg_name && *arg_name) ? arg_name : "address";
+    const char* name = (arg_name && *arg_name) ? arg_name : "addr";
     const int sqlite_type = arg.type();
 
     auto set_error = [error](std::string message) {

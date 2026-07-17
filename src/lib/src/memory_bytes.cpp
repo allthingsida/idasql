@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "memory_bytes.hpp"
 
@@ -212,23 +211,41 @@ public:
 
 void apply_byte_constraint(ByteBounds &bounds,
                            const xsql::GeneratorConstraintArg &arg) {
-  const ea_t ea = normalize_sql_ea(arg.value.as_int64());
   switch (arg.op) {
   case xsql::ConstraintOp::Eq:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_byte_lower_bound(bounds, ea, true);
     tighten_byte_upper_bound(bounds, ea, true);
     break;
+  }
   case xsql::ConstraintOp::Gt:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_byte_lower_bound(bounds, ea, false);
     break;
+  }
   case xsql::ConstraintOp::Ge:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_byte_lower_bound(bounds, ea, true);
     break;
+  }
   case xsql::ConstraintOp::Lt:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_byte_upper_bound(bounds, ea, false);
     break;
+  }
   case xsql::ConstraintOp::Le:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_byte_upper_bound(bounds, ea, true);
+    break;
+  }
+  case xsql::ConstraintOp::Like:
+    xsql::set_vtab_error(
+        "bytes: internal error: LIKE constraint routed to numeric addr bounds");
     break;
   }
 }
@@ -316,7 +333,7 @@ enum BytesColumn {
   kBytesN = 9,
 };
 
-// Generator backing `bytes WHERE start_ea = X AND n = N`. Yields exactly N
+// Generator backing `bytes WHERE start_addr = X AND n = N`. Yields exactly N
 // consecutive ea values starting at X in ascending order. Does not skip
 // unmapped addresses; the `value` column delegates to get_byte(), which
 // returns whatever the SDK yields at unmapped positions. Stops early if
@@ -378,7 +395,7 @@ GeneratorTableDef<ByteRow> define_bytes() {
       .generator([]() -> std::unique_ptr<xsql::Generator<ByteRow>> {
         return std::make_unique<BytesGenerator>(ByteOrder::Asc, ByteBounds{});
       })
-      .column_int64("ea",
+      .column_int64("addr",
                     [](const ByteRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
                     })
@@ -390,6 +407,16 @@ GeneratorTableDef<ByteRow> define_bytes() {
                                    idasql::format_ea_hex(row.ea));
               return false;
             }
+            if (val < 0 || val > 0xFF) {
+              xsql::set_vtab_error("bytes.value: out of range (0..0xFF): " +
+                                   std::to_string(val));
+              return false;
+            }
+            // patch_byte returns false when the byte already holds this value;
+            // treat "already equal" as success so re-runs / bulk NOP-outs don't
+            // abort mid-range.
+            if (get_byte(row.ea) == static_cast<uchar>(val))
+              return true;
             bool ok = patch_byte(row.ea, static_cast<uint64>(val));
             if (!ok)
               xsql::set_vtab_error("bytes: failed to patch byte at " +
@@ -404,6 +431,15 @@ GeneratorTableDef<ByteRow> define_bytes() {
                                    idasql::format_ea_hex(row.ea));
               return false;
             }
+            if (val < 0 || val > 0xFFFF) {
+              xsql::set_vtab_error("bytes.word: out of range (0..0xFFFF): " +
+                                   std::to_string(val));
+              return false;
+            }
+            // patch_word returns false when the word already holds this value;
+            // treat "already equal" as success (idempotent re-runs).
+            if (get_word(row.ea) == static_cast<ushort>(val))
+              return true;
             bool ok = patch_word(row.ea, static_cast<uint64>(val));
             if (!ok)
               xsql::set_vtab_error("bytes: failed to patch word at " +
@@ -421,6 +457,16 @@ GeneratorTableDef<ByteRow> define_bytes() {
                                    idasql::format_ea_hex(row.ea));
               return false;
             }
+            if (val < 0 || val > 0xFFFFFFFFLL) {
+              xsql::set_vtab_error(
+                  "bytes.dword: out of range (0..0xFFFFFFFF): " +
+                  std::to_string(val));
+              return false;
+            }
+            // patch_dword returns false when the dword already holds this value;
+            // treat "already equal" as success (idempotent re-runs).
+            if (get_dword(row.ea) == static_cast<uint32>(val))
+              return true;
             bool ok = patch_dword(row.ea, static_cast<uint64>(val));
             if (!ok)
               xsql::set_vtab_error("bytes: failed to patch dword at " +
@@ -438,6 +484,12 @@ GeneratorTableDef<ByteRow> define_bytes() {
                                    idasql::format_ea_hex(row.ea));
               return false;
             }
+            // qword spans the full 64-bit column width, so any int64 bit
+            // pattern is in range. patch_qword returns false when the qword
+            // already holds this value; treat "already equal" as success
+            // (idempotent re-runs).
+            if (get_qword(row.ea) == static_cast<uint64>(val))
+              return true;
             bool ok = patch_qword(row.ea, static_cast<uint64>(val));
             if (!ok)
               xsql::set_vtab_error("bytes: failed to patch qword at " +
@@ -463,14 +515,14 @@ GeneratorTableDef<ByteRow> define_bytes() {
                 else
                   ctx.result_int64(static_cast<int64_t>(fpos));
       })
-      // Hidden input columns for the bounded read: `WHERE start_ea = X AND
+      // Hidden input columns for the bounded read: `WHERE start_addr = X AND
       // n = N` requests exactly N consecutive bytes beginning at X. Both
       // columns are HIDDEN (input-only, not in `SELECT *`). Using a dedicated
       // `start_ea` rather than consuming the visible `ea` keeps any user
       // predicate on `ea` enforceable by SQLite, so joins like
       // `ON b.ea = t.target AND b.start_ea = t.target AND b.n = 4` stay
       // correct.
-      .hidden_column_int64("start_ea")
+      .hidden_column_int64("start_addr")
       .hidden_column_int("n")
       .row_lookup([](ByteRow &row, int64_t ea_val) -> bool {
         const ea_t ea = normalize_sql_ea(ea_val);
@@ -479,39 +531,39 @@ GeneratorTableDef<ByteRow> define_bytes() {
         row.ea = ea;
         return true;
       })
-      // Bounded read: `WHERE start_ea = X AND n = N` yields N consecutive
+      // Bounded read: `WHERE start_addr = X AND n = N` yields N consecutive
       // bytes starting at X. The generator yields in ascending ea order, so
       // ORDER BY ea is free.
       .constraint_filter(
-          {xsql::required_eq("start_ea", ""), xsql::required_eq("n", "")},
+          {xsql::required_eq("start_addr", ""), xsql::required_eq("n", "")},
           make_bytes_n_generator,
           1.0, 1.0)
-      .order_by_consumed("ea")
+      .order_by_consumed("addr")
       .constraint_filter(
-          {xsql::required_eq("ea", "")},
+          {xsql::required_eq("addr", "")},
           [](const std::vector<xsql::GeneratorConstraintArg> &args)
               -> std::unique_ptr<xsql::Generator<ByteRow>> {
             return make_bytes_generator(ByteOrder::Asc, args);
           },
           1.0, 1.0)
       .constraint_filter(
-          {xsql::optional_ge("ea"), xsql::optional_gt("ea"),
-           xsql::optional_lt("ea"), xsql::optional_le("ea")},
+          {xsql::optional_ge("addr"), xsql::optional_gt("addr"),
+           xsql::optional_lt("addr"), xsql::optional_le("addr")},
           [](const std::vector<xsql::GeneratorConstraintArg> &args)
               -> std::unique_ptr<xsql::Generator<ByteRow>> {
             return make_bytes_generator(ByteOrder::Asc, args);
           },
           10.0, 100.0)
-      .order_by_consumed("ea")
+      .order_by_consumed("addr")
       .constraint_filter(
-          {xsql::optional_ge("ea"), xsql::optional_gt("ea"),
-           xsql::optional_lt("ea"), xsql::optional_le("ea")},
+          {xsql::optional_ge("addr"), xsql::optional_gt("addr"),
+           xsql::optional_lt("addr"), xsql::optional_le("addr")},
           [](const std::vector<xsql::GeneratorConstraintArg> &args)
               -> std::unique_ptr<xsql::Generator<ByteRow>> {
             return make_bytes_generator(ByteOrder::Desc, args);
           },
           10.0, 100.0)
-      .order_by_consumed("ea", true)
+      .order_by_consumed("addr", true)
       // Fast patch enumeration: `WHERE is_patched = 1` walks the patch list via
       // visit_patched_bytes() (O(#patches)) instead of scanning every mapped
       // byte. Replaces the former standalone patched_bytes table.

@@ -1,3 +1,11 @@
+#
+# Copyright (c) 2024-2026 Elias Bachaalany
+# SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
+#
+# This file is licensed under the Human-Origin Source License v1.0.
+# See LICENSE.
+#
+
 cmake_minimum_required(VERSION 3.20)
 project(idasql LANGUAGES C CXX)
 
@@ -34,6 +42,14 @@ FetchContent_Populate(ida_cmake)
 include(${ida_cmake_SOURCE_DIR}/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
+if(TARGET ida_compiler_settings)
+    target_compile_options(ida_compiler_settings INTERFACE
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-class-memaccess>"
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wno-format>"
+        "$<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-Wno-dynamic-class-memaccess>"
+    )
+endif()
+
 # Make imported IDA SDK targets globally visible so sibling directories
 # (e.g. additional test or example targets) can link against them.
 foreach(_idasdk_imported_target idasdk::plugin idasdk::loader idasdk::procmod idasdk::idalib)
@@ -67,7 +83,7 @@ else()
     message(STATUS "idasql: Fetching libxsql from GitHub...")
     FetchContent_Declare(libxsql
         GIT_REPOSITORY https://github.com/0xeb/libxsql.git
-        GIT_TAG        v1.0.10
+        GIT_TAG        main
         GIT_SHALLOW    TRUE
     )
     FetchContent_MakeAvailable(libxsql)
@@ -96,9 +112,11 @@ if(IDASQL_WITH_MCP)
         set(FASTMCPP_FETCH_CURL OFF CACHE BOOL "" FORCE)
 
         message(STATUS "idasql: Fetching fastmcpp from GitHub...")
+        # fastmcpp is a first-party dep we own — track main so idasql builds
+        # against the latest (only third-party deps are pinned to a fixed tag).
         FetchContent_Declare(fastmcpp
             GIT_REPOSITORY https://github.com/0xeb/fastmcpp.git
-            GIT_TAG        4837e8e0a27d0011b73643fe02b3553cd3935c34
+            GIT_TAG        main
         )
         FetchContent_MakeAvailable(fastmcpp)
     endif()

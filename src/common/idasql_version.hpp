@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * idasql_version.hpp - Version constants for IDASQL
@@ -13,5 +12,7 @@
 
 #define IDASQL_VERSION_MAJOR 0
 #define IDASQL_VERSION_MINOR 0
-#define IDASQL_VERSION_PATCH 17
-#define IDASQL_VERSION_STRING "0.0.17"
+#define IDASQL_VERSION_PATCH 18
+#define IDASQL_VERSION_STRING "0.0.18"
+
+#define IDASQL_COPYRIGHT_STRING "Copyright (c) 2024-2026 Elias Bachaalany"

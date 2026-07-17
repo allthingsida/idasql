@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "code_cfg.hpp"
 
@@ -167,7 +166,7 @@ public:
 
 GeneratorTableDef<CfgEdgeInfo> define_cfg_edges() {
   return xsql::generator_table<CfgEdgeInfo>("cfg_edges")
-      .column_int64("func_ea",
+      .column_int64("func_addr",
                     [](const CfgEdgeInfo &r) -> int64_t {
                       return static_cast<int64_t>(r.func_ea);
                     })
@@ -183,7 +182,7 @@ GeneratorTableDef<CfgEdgeInfo> define_cfg_edges() {
           "edge_type",
           [](const CfgEdgeInfo &r) -> std::string { return r.edge_type; })
       .filter_eq(
-          "func_ea",
+          "func_addr",
           [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<CfgEdgesInFuncIterator>(
                 static_cast<ea_t>(func_addr));
@@ -199,10 +198,10 @@ GeneratorTableDef<CfgEdgeInfo> define_cfg_edges() {
 bool register_disasm_views(xsql::Database &db) {
   const char *v_leaf_funcs = R"(
         CREATE VIEW IF NOT EXISTS disasm_v_leaf_funcs AS
-        SELECT f.address, f.name
+        SELECT f.addr, f.name
         FROM funcs f
-        LEFT JOIN disasm_calls c ON c.func_addr = f.address
-        GROUP BY f.address
+        LEFT JOIN disasm_calls c ON c.func_addr = f.addr
+        GROUP BY f.addr
         HAVING COUNT(c.callee_addr) = 0
     )";
   db.exec(v_leaf_funcs);
@@ -239,28 +238,28 @@ bool register_disasm_views(xsql::Database &db) {
         CREATE VIEW IF NOT EXISTS disasm_v_calls_in_loops AS
         SELECT
             c.func_addr,
-            c.ea,
+            c.addr,
             c.callee_addr,
             c.callee_name,
             l.loop_id,
-            l.header_ea as loop_header,
-            l.back_edge_block_ea,
+            l.header_addr as loop_header,
+            l.back_edge_block_addr,
             l.back_edge_block_end
         FROM disasm_calls c
         JOIN disasm_loops l ON l.func_addr = c.func_addr
-        WHERE c.ea >= l.header_ea AND c.ea < l.back_edge_block_end
+        WHERE c.addr >= l.header_addr AND c.addr < l.back_edge_block_end
     )";
   db.exec(v_calls_in_loops);
 
   const char *v_funcs_with_loops = R"(
         CREATE VIEW IF NOT EXISTS disasm_v_funcs_with_loops AS
         SELECT
-            f.address,
+            f.addr,
             f.name,
             COUNT(DISTINCT l.loop_id) as loop_count
         FROM funcs f
-        JOIN disasm_loops l ON l.func_addr = f.address
-        GROUP BY f.address
+        JOIN disasm_loops l ON l.func_addr = f.addr
+        GROUP BY f.addr
     )";
   db.exec(v_funcs_with_loops);
 

@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * example_plugin_style.cpp - IDASQL usage when IDA is already running
@@ -44,7 +43,7 @@ void plugin_main() {
     std::cout << "\nTotal functions: " << count << "\n";
 
     // Execute without results (for comments_live UPDATE, etc.)
-    // idasql::execute("UPDATE comments_live SET comment = 'test' WHERE address = 0x401000");
+    // idasql::execute("UPDATE comments_live SET comment = 'test' WHERE addr = 0x401000");
 
     // =========================================================================
     // OPTION 2: QueryEngine instance (for multiple related queries)

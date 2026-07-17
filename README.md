@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="docs/logo.jpg" alt="IDASQL logo" width="360">
-</p>
-
 # IDASQL
 
 **Give any AI agent the ability to understand compiled binaries.**
@@ -42,15 +38,15 @@ $ idasql -s WerFaultTool.exe.i64 -q "SELECT * FROM funcs LIMIT 5"
 Opening: WerFaultTool.exe.i64...
 Database opened successfully.
 
-+---------+------------------------------------------------+------+--------+-------+
-| address | name                                           | size | end_ea | flags |
-+---------+------------------------------------------------+------+--------+-------+
-| 16      | WerFaultTool.AboutForm::.ctor                  | 13   | 29     | 4096  |
-| 32      | WerFaultTool.AboutForm::Dispose                | 30   | 62     | 4096  |
-| 64      | WerFaultTool.AboutForm::InitializeComponent    | 295  | 359    | 4096  |
-| 400     | WerFaultTool.WerFaultGUI::.ctor                | 936  | 1336   | 4096  |
-| 1344    | WerFaultTool.WerFaultGUI::CreateDynamicControls | 231  | 1575   | 4096  |
-+---------+------------------------------------------------+------+--------+-------+
++------+-------------------------------------------------+------+----------+-------+
+| addr | name                                            | size | end_addr | flags |
++------+-------------------------------------------------+------+----------+-------+
+| 16   | WerFaultTool.AboutForm::.ctor                   | 13   | 29       | 4096  |
+| 32   | WerFaultTool.AboutForm::Dispose                 | 30   | 62       | 4096  |
+| 64   | WerFaultTool.AboutForm::InitializeComponent     | 295  | 359      | 4096  |
+| 400  | WerFaultTool.WerFaultGUI::.ctor                 | 936  | 1336     | 4096  |
+| 1344 | WerFaultTool.WerFaultGUI::CreateDynamicControls | 231  | 1575     | 4096  |
++------+-------------------------------------------------+------+----------+-------+
 5 row(s)
 ```
 *One command. Instant results. No scripting required.*
@@ -184,7 +180,7 @@ then install the `idasql` plugin from that marketplace. See the [idasql-skills R
 $ idasql
 Error: Database path required (-s)
 
-idasql v0.0.17 - SQL interface to IDA databases
+idasql v0.0.18 - SQL interface to IDA databases
 
 Usage: idasql -s <file> [-q <query>] [-f <file>] [-i] [--export <file>]
 
@@ -201,18 +197,21 @@ Options:
   --export-tables=X    Tables to export: * (all, default) or table1,table2,...
   --http [port]        Start HTTP REST server (default: 8080, local mode only)
   --bind <addr>        Bind address for HTTP/MCP server (default: 127.0.0.1)
+  --mcp [port]         Start MCP server (default: random port, use in -i mode)
+                       Or use .mcp start in interactive mode
   -h, --help           Show this help
   --version            Show version
 
 Examples:
-  idasql -s test.i64 -q "SELECT name, address FROM funcs LIMIT 10"
-  idasql -s test.i64 -q "SELECT * FROM welcome; SELECT COUNT(*) FROM funcs;"
+  idasql -s test.i64 -q "SELECT name, size FROM funcs LIMIT 10"
+  idasql -s test.i64 -q "SELECT * FROM binary; SELECT COUNT(*) FROM funcs;"
   idasql -s test.i64 -f queries.sql
   idasql -s test.i64 -i
   idasql -s test.i64 --export dump.sql
   idasql -s test.i64 --http 8080
   idasql -s sample.exe --http            # raw PE: idalib auto-analyzes, then serves SQL (default port 8080)
-  idasql -s firmware.bin -q "SELECT * FROM welcome"
+  idasql -s firmware.bin -q "SELECT * FROM binary"
+  idasql -s test.i64 --mcp 9000
 
 Thank you for using IDA. Have a nice day!
 ```
@@ -262,23 +261,23 @@ Notes:
 
 | Table | Description |
 |-------|-------------|
-| `funcs` | Functions - name, address, size, end address, flags (INSERT/UPDATE/DELETE) |
-| `segments` | Segments - name, start/end address, permissions, class (UPDATE/DELETE) |
-| `names` | Named locations - address, name, flags (INSERT/UPDATE/DELETE) |
-| `entries` | Entry points - export/program/tls callbacks (ordinal, address, name) |
-| `imports` | Imports - module, name, address, ordinal |
-| `xrefs` | Cross-references - from/to address, type, is_code |
-| `blocks` | Basic blocks - start/end address, func_ea, size |
+| `funcs` | Functions - name, addr, size, end addr, flags (INSERT/UPDATE/DELETE) |
+| `segments` | Segments - name, start/end addr, permissions, class (INSERT/UPDATE/DELETE) |
+| `names` | Named locations - addr, name, flags (INSERT/UPDATE/DELETE) |
+| `entries` | Entry points - export/program/tls callbacks (ordinal, addr, name) |
+| `imports` | Imports - module, name, addr, ordinal |
+| `xrefs` | Cross-references - from/to addr, type, is_code |
+| `blocks` | Basic blocks - start/end addr, func_addr, size |
 | `fchunks` | Function chunks - split/tail chunks with owner |
-| `instructions` | Disassembly - address, mnemonic, operands, itype, func_addr (DELETE) |
-| `instruction_operands` | Normalized instruction operands - opnum, text, type, value; optimized by `address` and `func_addr` |
+| `instructions` | Disassembly - addr, mnemonic, operands, itype, func_addr (UPDATE operand format_spec / DELETE) |
+| `instruction_operands` | Normalized instruction operands - opnum, text, type, value; optimized by `addr` and `func_addr` |
 | `heads` | All head items (code + data) - optimized address lookup/range navigation |
 
 ### Strings & Bytes
 
 | Table | Description |
 |-------|-------------|
-| `strings` | Strings - address, content, length, type |
+| `strings` | Strings - addr, content, length, type |
 | `bytes` | Raw bytes - `value`/`word`/`dword`/`qword` writable (UPDATE patches, DELETE reverts), `original_value`, `is_patched` (fast patch enumeration via `WHERE is_patched = 1`) |
 
 ### Decompiler
@@ -305,22 +304,22 @@ Notes:
 
 | Table | Description |
 |-------|-------------|
-| `comments` | Comments - address, regular and repeatable comments (INSERT/UPDATE/DELETE) |
-| `bookmarks` | Bookmarks - slot, address, description (INSERT/UPDATE/DELETE) |
-| `breakpoints` | Breakpoints - address, type, enabled, condition (full CRUD) |
+| `comments` | Comments - addr, regular and repeatable comments (INSERT/UPDATE/DELETE) |
+| `bookmarks` | Bookmarks - slot, addr, description (INSERT/UPDATE/DELETE) |
+| `breakpoints` | Breakpoints - addr, type, enabled, condition (full CRUD) |
 | `hidden_ranges` | Collapsed/hidden ranges - start/end, description, header, footer |
 
 ### Search
 
 | Table | Description |
 |-------|-------------|
-| `grep` | Unified entity search table (pattern, name, kind, address, ordinal, parent_name, full_name) |
+| `grep` | Unified entity search table (pattern, name, kind, addr, ordinal, parent_name, full_name) |
 
 ### Database Info
 
 | Table | Description |
 |-------|-------------|
-| `welcome` | Database summary/overview - processor, bitness, address range, counts |
+| `binary` | Database summary/overview - processor, bitness, address range, counts |
 | `db_info` | Database metadata key-value pairs |
 | `ida_info` | IDA analysis info key-value pairs |
 | `problems` | IDA analysis problems/warnings |
@@ -356,7 +355,7 @@ segments, types, and members.
 
 ```sql
 -- Search anything starting with "Create"
-SELECT name, kind, printf('0x%X', address) as addr
+SELECT name, kind, printf('0x%X', addr) as addr
 FROM grep
 WHERE pattern = 'Create%'
 LIMIT 20;
@@ -395,7 +394,7 @@ idasql -s database.i64 --http 8080
 ```bash
 curl http://localhost:8080/status
 curl -X POST http://localhost:8080/query -d "SELECT name FROM funcs LIMIT 5"
-curl -X POST http://localhost:8080/query -d "SELECT * FROM welcome; SELECT COUNT(*) FROM funcs;"
+curl -X POST http://localhost:8080/query -d "SELECT * FROM binary; SELECT COUNT(*) FROM funcs;"
 ```
 
 All `/query` responses use the canonical script envelope — single statement = array of one entry:
@@ -415,8 +414,6 @@ All `/query` responses use the canonical script envelope — single statement = 
 ```
 
 Fail-fast is the default; pass `continue_on_error=true` (e.g. `?continue_on_error=1`) to run every statement regardless of earlier failures. Each `results[i].error` is canonical for per-statement failures; `first_error_index` points at the earliest failure or is `null`. On splitter failure (e.g. an unterminated quote) the response is `success:false`, `statement_count:0`, `results:[]`, plus a top-level `parse_error`.
-
-Output format: JSON by default. Pass `?format=text|csv|tsv` for terminal/pipe-friendly output (`text` = ASCII table, `csv` = RFC-4180, `tsv` = tab-separated); agents should consume the default JSON. Example: `curl -X POST "http://localhost:8080/query?format=csv" -d "SELECT name,size FROM funcs LIMIT 5"`.
 
 For multiple databases, run separate instances:
 
@@ -458,7 +455,7 @@ handy for multi-instance setups where each database keeps a stable, known port.
 
 ```
 idasql> .pin set http 8080        # pin HTTP at 127.0.0.1:8080 (autostart on)
-idasql> .pin set mcp 0.0.0.0 9500 # bind override + port (port is required)
+idasql> .pin set mcp 0.0.0.0 9500 # bind override + port (port optional; omit or 0 = fresh random port each launch)
 idasql> .pin list                 # show pinned config
 idasql> .pin off http             # disable autostart but keep host/port
 idasql> .pin clear all            # remove all pins
@@ -468,7 +465,7 @@ After pinning, reopening the database auto-starts the server — you'll see this
 in the IDA output window on load:
 
 ```
-IDASQL v0.0.17: Query engine initialized
+IDASQL v0.0.18: Query engine initialized
 IDASQL CLI: Installed
 IDASQL: autostart -> IDASQL HTTP server: http://127.0.0.1:8099
 Type '.http stop' to stop the server.
@@ -544,6 +541,14 @@ same `SELECT name, size FROM funcs ORDER BY size DESC LIMIT 10` runs everywhere.
 
 - **[fastmcpp](https://github.com/0xeb/fastmcpp)** - Optional MCP server implementation used when building with `-DIDASQL_WITH_MCP=ON`.
 
-## License
+## License and Terms of Use
 
-This project is licensed under the [Mozilla Public License 2.0](LICENSE).
+In short: you may read, build, evaluate, benchmark, package, and use unmodified idasql, including commercially, if you preserve notices and follow the license terms. You may fork or patch it to prepare bug fixes, optimizations, features, tests, or documentation improvements for contribution back within the license's contribution-purpose rules.
+
+You may not maintain a divergent private fork, port, rebrand, clone, API-compatible replacement, competing implementation, or use idasql as AI input to recreate or improve a derivative implementation without prior written permission from Elias Bachaalany. Independent implementations that are not copied from, materially derived from, or substantially informed by idasql in the license's defined sense are not prohibited.
+
+Permission requests: open a GitHub issue at [allthingsida/idasql/issues](https://github.com/allthingsida/idasql/issues).
+
+If idasql materially informs a distributed project, preserve the human origin: credit idasql and Elias Bachaalany visibly in your README/docs and in About/credits UI when applicable. The license includes an examples/FAQ section for common allowed and permission-required uses. Third-party dependencies (libxsql, the IDA SDK, and their transitive dependencies) remain under their own licenses.
+
+See the full [Human-Origin Source License v1.0](LICENSE).

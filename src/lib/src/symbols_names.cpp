@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "symbols_names.hpp"
 
@@ -60,6 +59,11 @@ bool lookup_name_row(NameRow &row, ea_t ea) {
 CachedTableDef<NameRow> define_names() {
   return cached_table<NameRow>("names")
       .no_shared_cache()
+      // A full-scan UPDATE rowid is a cache position, but row_lookup() resolves
+      // by ea, so it cannot reconstruct the row by rowid. Reconstruct from the
+      // real argv column values instead (and keep NOCHANGE disabled so the
+      // unchanged ea/name carry real values).
+      .update_from_column_values()
       .estimate_rows([]() -> size_t { return get_nlist_size(); })
       .cache_builder([](std::vector<NameRow> &rows) { collect_name_rows(rows); })
       .row_populator([](NameRow &row, int argc, xsql::FunctionArg *argv) {
@@ -74,10 +78,20 @@ CachedTableDef<NameRow> define_names() {
           row.full_path = full ? full : "";
         }
       })
+      // Stable rowid = the address, matching the `addr` column and the addr
+      // index. The full-scan (and index) rowid is therefore an ea that
+      // round-trips through the ea-keyed row_lookup below, so a multi-row
+      // full-scan DELETE resolves each row by its own address instead of by a
+      // cache position that shifts as earlier rows are removed. (This also
+      // removes the low-based-image aliasing where distinct rows collided on a
+      // positional rowid.)
+      .rowid([](const NameRow &row) -> int64_t {
+        return static_cast<int64_t>(row.ea);
+      })
       .row_lookup([](NameRow &row, int64_t rowid) -> bool {
         return lookup_name_row(row, static_cast<ea_t>(rowid));
       })
-      .column_int64("address",
+      .column_int64("addr",
                     [](const NameRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
                     })
@@ -100,7 +114,9 @@ CachedTableDef<NameRow> define_names() {
               return ok;
             }
             idasql_auto_wait();
-            const std::string old_name = row.name;
+            // row.name holds the NEW name from argv (update_from_column_values),
+            // so re-read the TRUE pre-rename name from IDA for rollback.
+            const std::string old_name = get_name(row.ea).c_str();
             auto old_path = dirtrees::find_inode_path(
                 DIRTREE_NAMES, static_cast<uint64_t>(row.ea));
             const std::string old_folder =
@@ -172,13 +188,15 @@ CachedTableDef<NameRow> define_names() {
       .column_text("full_path", [](const NameRow &row) -> std::string {
         return row.full_path;
       })
-      .index_on("address", [](const NameRow &row) -> int64_t {
+      .index_on("addr", [](const NameRow &row) -> int64_t {
         return static_cast<int64_t>(row.ea);
       })
       // DELETE via set_name(ea, "") - removes the name
       .deletable([](NameRow &row) -> bool {
         idasql_auto_wait();
         bool ok = set_name(row.ea, "", SN_NOWARN) != 0;
+        if (ok)
+          decompiler::invalidate_decompiler_cache(row.ea);
         idasql_auto_wait();
         return ok;
       })
@@ -219,7 +237,7 @@ VTableDef define_entries() {
                     [](size_t i) -> int64_t {
                       return static_cast<int64_t>(get_entry_ordinal(i));
                     })
-      .column_int64("address",
+      .column_int64("addr",
                     [](size_t i) -> int64_t {
                       uval_t ord = get_entry_ordinal(i);
                       return static_cast<int64_t>(get_entry(ord));

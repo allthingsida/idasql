@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "code_calls.hpp"
 
@@ -224,7 +223,7 @@ GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
       .column_int64(
           "func_addr",
           [](const DisasmCallInfo &r) -> int64_t { return r.func_addr; })
-      .column_int64("ea",
+      .column_int64("addr",
                     [](const DisasmCallInfo &r) -> int64_t { return r.ea; })
       .column_int64("callee_addr",
                     [](const DisasmCallInfo &r) -> int64_t {
@@ -266,12 +265,13 @@ GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
               return true;
             }
             tinfo_t tif;
+            qstring callee_name;
             const std::string decl = val.as_text();
-            if (!decompiler::parse_callee_decl(decl.c_str(), tif)) {
+            if (!decompiler::parse_callee_decl(decl.c_str(), tif, &callee_name)) {
               xsql::set_vtab_error("disasm_calls: failed to parse callee_type declaration");
               return false;
             }
-            if (!decompiler::apply_callee_tinfo_at(row.ea, tif)) {
+            if (!decompiler::apply_callee_tinfo_at(row.ea, tif, callee_name.c_str())) {
               xsql::set_vtab_error("disasm_calls: failed to apply callee_type");
               return false;
             }
@@ -293,13 +293,13 @@ GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
           },
           10.0)
       .constraint_filter(
-          {xsql::required_eq("ea", "")},
+          {xsql::required_eq("addr", "")},
           [](const std::vector<xsql::GeneratorConstraintArg> &args)
               -> std::unique_ptr<xsql::Generator<DisasmCallInfo>> {
             ea_t ea = BADADDR;
             std::string error;
             if (args.empty() ||
-                !resolve_address_value(args.front().value, "ea", ea, &error)) {
+                !resolve_address_value(args.front().value, "addr", ea, &error)) {
               xsql::set_vtab_error(error.empty() ? "disasm_calls: missing ea constraint" : error);
               return nullptr;
             }

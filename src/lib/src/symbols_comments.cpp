@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "symbols_comments.hpp"
 
@@ -50,7 +49,7 @@ CachedTableDef<CommentRow> define_comments() {
       .cache_builder(
           [](std::vector<CommentRow> &rows) { collect_comment_rows(rows); })
       .row_populator([](CommentRow &row, int argc, xsql::FunctionArg *argv) {
-        // argv[2]=address, argv[3]=comment, argv[4]=rpt_comment
+        // argv[2]=addr, argv[3]=comment, argv[4]=rpt_comment
         if (argc > 2)
           row.ea = static_cast<ea_t>(argv[2].as_int64());
         if (argc > 3 && !argv[3].is_null()) {
@@ -62,7 +61,7 @@ CachedTableDef<CommentRow> define_comments() {
           row.rpt_comment = c ? c : "";
         }
       })
-      .column_int64("address",
+      .column_int64("addr",
                     [](const CommentRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
                     })
@@ -106,10 +105,13 @@ CachedTableDef<CommentRow> define_comments() {
           })
       .deletable([](CommentRow &row) -> bool {
         idasql_auto_wait();
-        set_cmt(row.ea, "", false);
-        set_cmt(row.ea, "", true);
+        bool ok = set_cmt(row.ea, "", false);
+        ok = set_cmt(row.ea, "", true) && ok;
+        if (!ok)
+          xsql::set_vtab_error("comments: failed to clear comment at " +
+                               idasql::format_ea_hex(row.ea));
         idasql_auto_wait();
-        return true;
+        return ok;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
         if (argc < 1 || argv[0].is_null())
@@ -121,14 +123,25 @@ CachedTableDef<CommentRow> define_comments() {
         if (argc > 1 && !argv[1].is_null()) {
           const char *cmt = argv[1].as_c_str();
           if (cmt) {
-            set_cmt(ea, cmt, false);
+            if (!set_cmt(ea, cmt, false)) {
+              xsql::set_vtab_error("comments: failed to set comment at " +
+                                   idasql::format_ea_hex(ea));
+              idasql_auto_wait();
+              return false;
+            }
             did_something = true;
           }
         }
         if (argc > 2 && !argv[2].is_null()) {
           const char *rpt = argv[2].as_c_str();
           if (rpt) {
-            set_cmt(ea, rpt, true);
+            if (!set_cmt(ea, rpt, true)) {
+              xsql::set_vtab_error(
+                  "comments: failed to set repeatable comment at " +
+                  idasql::format_ea_hex(ea));
+              idasql_auto_wait();
+              return false;
+            }
             did_something = true;
           }
         }

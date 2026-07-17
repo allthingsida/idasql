@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "search_bytes.hpp"
 
@@ -206,7 +205,7 @@ size_t find_byte_pattern(
 
 xsql::GeneratorTableDef<ByteSearchResult> define_byte_search() {
     return xsql::generator_table<ByteSearchResult>("byte_search")
-        .column_int64("address", [](const ByteSearchResult& row) {
+        .column_int64("addr", [](const ByteSearchResult& row) {
             return static_cast<int64_t>(row.address);
         })
         .column_text("matched_hex", [](const ByteSearchResult& row) {
@@ -219,8 +218,8 @@ xsql::GeneratorTableDef<ByteSearchResult> define_byte_search() {
             return static_cast<int>(row.matched_bytes.size());
         })
         .hidden_column_text("pattern")
-        .hidden_column_int64("start_ea")
-        .hidden_column_int64("end_ea")
+        .hidden_column_int64("start_addr")
+        .hidden_column_int64("end_addr")
         .hidden_column_int("max_results")
         .full_scan_error(
             "byte_search requires WHERE pattern = '<IDA byte pattern>'; "
@@ -228,18 +227,18 @@ xsql::GeneratorTableDef<ByteSearchResult> define_byte_search() {
         .constraint_filter(
             {
                 xsql::required_eq("pattern", "byte_search requires WHERE pattern = '<IDA byte pattern>'"),
-                xsql::optional_eq("start_ea"),
-                xsql::optional_eq("end_ea"),
+                xsql::optional_eq("start_addr"),
+                xsql::optional_eq("end_addr"),
                 xsql::optional_eq("max_results"),
-                xsql::optional_ge("address"),
-                xsql::optional_gt("address"),
-                xsql::optional_lt("address"),
-                xsql::optional_le("address"),
+                xsql::optional_ge("addr"),
+                xsql::optional_gt("addr"),
+                xsql::optional_lt("addr"),
+                xsql::optional_le("addr"),
             },
             make_byte_search_generator,
             1.0,
             100.0)
-        .order_by_consumed("address")
+        .order_by_consumed("addr")
         .build();
 }
 

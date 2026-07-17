@@ -1,17 +1,20 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "decompiler.hpp"
+
+#include "types_members.hpp" // idasql::types::parse_type_declarator (array-aware)
 
 #include <idasql/string_utils.hpp>
 
 #include <xsql/json.hpp>
 
 #include <cctype>
+#include <climits>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 
@@ -177,7 +180,7 @@ std::string build_orphan_comments_json(const std::vector<OrphanCommentInfo>& row
 
     for (const auto& row : rows) {
         arr.push_back({
-            {"ea", row.ea != BADADDR ? static_cast<int64_t>(row.ea) : 0},
+            {"addr", row.ea != BADADDR ? static_cast<int64_t>(row.ea) : 0},
             {"comment_placement", itp_to_name(row.comment_placement)},
             {"comment", row.orphan_comment}
         });
@@ -210,8 +213,9 @@ void invalidate_decompiler_cache(ea_t ea) {
     }
 }
 
-bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif) {
+bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif, qstring* out_name) {
     out_tif.clear();
+    if (out_name != nullptr) out_name->clear();
     if (decl_text == nullptr || *decl_text == '\0') {
         return false;
     }
@@ -252,10 +256,15 @@ bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif) {
         }
     }
 
+    // Hand back the parsed function name (skip the placeholder the fallback inserts) so
+    // the caller can give the user-defined call a non-empty display name.
+    if (out_name != nullptr && parsed_name != "__idasql_callee") {
+        *out_name = parsed_name;
+    }
     return out_tif.is_func();
 }
 
-bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif) {
+bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif, const char* name) {
     if (!hexrays_available()) return false;
     if (call_ea == BADADDR || call_ea == 0) return false;
     func_t* f = get_func(call_ea);
@@ -268,6 +277,34 @@ bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif) {
 
         udcall_t& udc = udcalls[call_ea];
         udc.tif = tif;
+        // The udcall both STORES the applied callee type (the callee_type getter
+        // reads it back from here) AND supplies the name Hex-Rays renders for the
+        // call. For a genuinely INDIRECT call (`call rax`) there is no callee
+        // symbol, so the caller-supplied name (parsed from the callee_type decl,
+        // else "callee") is the right display name. But for a DIRECT call
+        // (immediate o_near/o_far target, e.g. `call sub_401000`) that same name
+        // would OVERRIDE the real callee symbol in the pseudocode -- so name the
+        // udcall after the real callee, preserving the symbol while still applying
+        // the type. (Removing the udcall for direct calls is NOT an option: it is
+        // the storage the callee_type read-back depends on.)
+        qstring direct_name;
+        insn_t insn;
+        if (decode_insn(&insn, call_ea) > 0) {
+            for (int i = 0; i < UA_MAXOP; ++i) {
+                const op_t& op = insn.ops[i];
+                if (op.type == o_void) break;
+                if (op.type == o_near || op.type == o_far) {
+                    const ea_t target = get_first_fcref_from(call_ea);
+                    if (target != BADADDR) get_name(&direct_name, target);
+                    break;
+                }
+            }
+        }
+        if (!direct_name.empty()) {
+            udc.name = direct_name.c_str();
+        } else {
+            udc.name = (name != nullptr && name[0] != '\0') ? name : "callee";
+        }
         save_user_defined_calls(f->start_ea, udcalls);
 
         invalidate_decompiler_cache(call_ea);
@@ -431,10 +468,10 @@ bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_addr) {
 
     const strvec_t& sv = cfunc->get_pseudocode();
 
-    for (int i = 0; i < sv.size(); i++) {
+    for (size_t i = 0; i < sv.size(); i++) {
         PseudocodeLine pl;
         pl.func_addr = func_addr;
-        pl.line_num = i;
+        pl.line_num = static_cast<int>(i);
 
         // Extract ea from COLOR_ADDR anchor BEFORE stripping tags
         pl.ea = extract_line_ea(&*cfunc, sv[i].line);
@@ -482,6 +519,14 @@ void collect_all_pseudocode(std::vector<PseudocodeLine>& lines) {
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
+        // Cooperative cancellation -- decompiling every function is the
+        // single most expensive whole-program build; poll the query deadline so a
+        // timeout interrupts it cleanly (the progress handler cannot).
+        if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
+            xsql::set_vtab_error(
+                "query interrupted: timeout while decompiling all functions");
+            return;
+        }
         func_t* f = getn_func(i);
         if (!f) continue;
 
@@ -529,6 +574,13 @@ void collect_all_orphan_comments(std::vector<OrphanCommentInfo>& rows) {
     rows.reserve(get_func_qty());
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
+        // Cooperative cancellation -- decompiling every function is expensive;
+        // poll the query deadline so a timeout interrupts it cleanly.
+        if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
+            xsql::set_vtab_error(
+                "query interrupted: timeout while decompiling all functions");
+            return;
+        }
         func_t* f = getn_func(i);
         if (!f) continue;
 
@@ -568,6 +620,13 @@ void collect_all_orphan_comment_groups(std::vector<OrphanCommentGroupInfo>& rows
     rows.reserve(get_func_qty() / 4 + 1);
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
+        // Cooperative cancellation -- decompiling every function is expensive;
+        // poll the query deadline so a timeout interrupts it cleanly.
+        if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
+            xsql::set_vtab_error(
+                "query interrupted: timeout while decompiling all functions");
+            return;
+        }
         func_t* f = getn_func(i);
         if (!f) continue;
 
@@ -597,12 +656,12 @@ bool collect_lvars(std::vector<LvarInfo>& vars, ea_t func_addr) {
     lvars_t* lvars = cfunc->get_lvars();
     if (!lvars) return false;
 
-    for (int i = 0; i < lvars->size(); i++) {
+    for (size_t i = 0; i < lvars->size(); i++) {
         const lvar_t& lv = (*lvars)[i];
 
         LvarInfo vi;
         vi.func_addr = func_addr;
-        vi.idx = i;
+        vi.idx = static_cast<int>(i);
         vi.name = lv.name.c_str();
 
         qstring type_str;
@@ -631,6 +690,13 @@ void collect_all_lvars(std::vector<LvarInfo>& vars) {
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
+        // Cooperative cancellation -- decompiling every function is expensive;
+        // poll the query deadline so a timeout interrupts it cleanly.
+        if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
+            xsql::set_vtab_error(
+                "query interrupted: timeout while decompiling all functions");
+            return;
+        }
         func_t* f = getn_func(i);
         if (!f) continue;
 
@@ -707,8 +773,9 @@ int idaapi ctree_collector_t::visit_expr(cexpr_t* expr) {
     switch (expr->op) {
         case cot_var:
             ci.var_idx = expr->v.idx;
-            if (cfunc && ci.var_idx >= 0 && ci.var_idx < cfunc->get_lvars()->size()) {
-                const lvar_t& lv = (*cfunc->get_lvars())[ci.var_idx];
+            if (cfunc && ci.var_idx >= 0
+                    && static_cast<size_t>(ci.var_idx) < cfunc->get_lvars()->size()) {
+                const lvar_t& lv = (*cfunc->get_lvars())[static_cast<size_t>(ci.var_idx)];
                 ci.var_name = lv.name.c_str();
                 ci.var_is_stk = lv.is_stk_var();
                 ci.var_is_reg = lv.is_reg_var();
@@ -746,16 +813,20 @@ int idaapi ctree_collector_t::visit_expr(cexpr_t* expr) {
 }
 
 void ctree_collector_t::resolve_child_ids() {
-    for (auto& ci : items) {
-        if (ci.item_id < 0) continue;
-
-        citem_t* item = nullptr;
-        for (auto& kv : item_ids) {
-            if (kv.second == ci.item_id) {
-                item = kv.first;
-                break;
-            }
+    // Build a reverse id -> citem_t* map once so each row's child ids resolve in
+    // O(1) instead of scanning the whole item_ids map per row (was O(n^2) per
+    // function). Ids are dense (0..next_id-1 assigned during the visit).
+    std::vector<citem_t*> items_by_id(static_cast<size_t>(next_id), nullptr);
+    for (const auto& kv : item_ids) {
+        if (kv.second >= 0 && kv.second < next_id) {
+            items_by_id[static_cast<size_t>(kv.second)] = kv.first;
         }
+    }
+
+    for (auto& ci : items) {
+        if (ci.item_id < 0 || ci.item_id >= next_id) continue;
+
+        citem_t* item = items_by_id[static_cast<size_t>(ci.item_id)];
         if (!item) continue;
 
         if (ci.is_expr) {
@@ -867,23 +938,6 @@ bool collect_ctree(std::vector<CtreeItem>& items, ea_t func_addr) {
     return true;
 }
 
-void collect_all_ctree(std::vector<CtreeItem>& items) {
-    items.clear();
-
-    if (!hexrays_available()) return;
-
-    size_t func_qty = get_func_qty();
-    for (size_t i = 0; i < func_qty; i++) {
-        func_t* f = getn_func(i);
-        if (!f) continue;
-
-        std::vector<CtreeItem> func_items;
-        if (collect_ctree(func_items, f->start_ea)) {
-            items.insert(items.end(), func_items.begin(), func_items.end());
-        }
-    }
-}
-
 static std::string default_label_name(int label_num) {
     return "LABEL_" + std::to_string(label_num);
 }
@@ -971,6 +1025,13 @@ void collect_all_ctree_labels(std::vector<CtreeLabelInfo>& rows) {
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
+        // Cooperative cancellation -- decompiling every function is expensive;
+        // poll the query deadline so a timeout interrupts it cleanly.
+        if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
+            xsql::set_vtab_error(
+                "query interrupted: timeout while decompiling all functions");
+            return;
+        }
         func_t* f = getn_func(i);
         if (!f) continue;
 
@@ -989,54 +1050,78 @@ call_args_collector_t::call_args_collector_t(std::vector<CallArgInfo>& args_, cf
     : ctree_parentee_t(false), args(args_), cfunc(cfunc_), func_addr(func_addr_), next_id(0) {}
 
 int idaapi call_args_collector_t::visit_insn(cinsn_t* insn) {
+    // Number every item at visit time, mirroring ctree_collector_t so the
+    // resulting ids match the ctree table's item_id.
     item_ids[insn] = next_id++;
     return 0;
 }
 
 int idaapi call_args_collector_t::visit_expr(cexpr_t* expr) {
-    int my_id = next_id++;
-    item_ids[expr] = my_id;
+    // Assign this item's id at visit time ONLY -- never pre-assign an arg's id
+    // from inside its parent cot_call. Each arg's own cexpr_t is visited (and
+    // numbered) after the call, so its id is resolved later in finalize().
+    item_ids[expr] = next_id++;
 
     if (expr->op == cot_call && expr->a) {
-        std::string call_obj_name;
-        std::string call_helper_name;
+        PendingCall pc;
+        pc.call = expr;
+        pc.call_ea = expr->ea;
         if (expr->x != nullptr) {
             if (expr->x->op == cot_obj) {
                 qstring name;
                 if (get_name(&name, expr->x->obj_ea) > 0) {
-                    call_obj_name = name.c_str();
+                    pc.call_obj_name = name.c_str();
                 }
             } else if (expr->x->op == cot_helper && expr->x->helper != nullptr) {
-                call_helper_name = expr->x->helper;
+                pc.call_helper_name = expr->x->helper;
             }
         }
 
-        carglist_t& arglist = *expr->a;
+        const carglist_t& arglist = *expr->a;
+        pc.arg_ptrs.reserve(arglist.size());
         for (size_t i = 0; i < arglist.size(); i++) {
-            const carg_t& arg = arglist[i];
+            pc.arg_ptrs.push_back(&arglist[i]);
+        }
+
+        pending_calls.push_back(std::move(pc));
+    }
+
+    return 0;
+}
+
+void call_args_collector_t::finalize() {
+    for (const PendingCall& pc : pending_calls) {
+        // Resolve the call expr's id from the completed map. If it is somehow
+        // absent (defensive), skip the whole call site.
+        auto call_it = item_ids.find(pc.call);
+        if (call_it == item_ids.end()) continue;
+        const int call_id = call_it->second;
+
+        for (size_t i = 0; i < pc.arg_ptrs.size(); i++) {
+            const carg_t& arg = *pc.arg_ptrs[i];
+
+            // Resolve the arg expr's real id. If it is not in the map (defensive),
+            // skip this arg rather than inventing an id.
+            auto arg_it = item_ids.find((citem_t*)&arg);
+            if (arg_it == item_ids.end()) continue;
 
             CallArgInfo ai;
             ai.func_addr = func_addr;
-            ai.call_item_id = my_id;
-            ai.call_ea = expr->ea;
-            ai.call_obj_name = call_obj_name;
-            ai.call_helper_name = call_helper_name;
+            ai.call_item_id = call_id;
+            ai.call_ea = pc.call_ea;
+            ai.call_obj_name = pc.call_obj_name;
+            ai.call_helper_name = pc.call_helper_name;
             ai.arg_idx = static_cast<int>(i);
+            ai.arg_item_id = arg_it->second;
             ai.arg_op = get_full_ctype_name(arg.op);
-
-            auto it = item_ids.find((citem_t*)&arg);
-            if (it != item_ids.end()) {
-                ai.arg_item_id = it->second;
-            } else {
-                ai.arg_item_id = next_id++;
-                item_ids[(citem_t*)&arg] = ai.arg_item_id;
-            }
 
             switch (arg.op) {
                 case cot_var:
                     ai.arg_var_idx = arg.v.idx;
-                    if (cfunc && ai.arg_var_idx >= 0 && ai.arg_var_idx < cfunc->get_lvars()->size()) {
-                        const lvar_t& lv = (*cfunc->get_lvars())[ai.arg_var_idx];
+                    if (cfunc && ai.arg_var_idx >= 0
+                            && static_cast<size_t>(ai.arg_var_idx) < cfunc->get_lvars()->size()) {
+                        const lvar_t& lv =
+                            (*cfunc->get_lvars())[static_cast<size_t>(ai.arg_var_idx)];
                         ai.arg_var_name = lv.name.c_str();
                         ai.arg_var_is_stk = lv.is_stk_var();
                         ai.arg_var_is_arg = lv.is_arg_var();
@@ -1064,8 +1149,6 @@ int idaapi call_args_collector_t::visit_expr(cexpr_t* expr) {
             args.push_back(ai);
         }
     }
-
-    return 0;
 }
 
 bool collect_call_args(std::vector<CallArgInfo>& args, ea_t func_addr) {
@@ -1082,25 +1165,9 @@ bool collect_call_args(std::vector<CallArgInfo>& args, ea_t func_addr) {
 
     call_args_collector_t collector(args, &*cfunc, func_addr);
     collector.apply_to(&cfunc->body, nullptr);
+    collector.finalize();
 
     return true;
-}
-
-void collect_all_call_args(std::vector<CallArgInfo>& args) {
-    args.clear();
-
-    if (!hexrays_available()) return;
-
-    size_t func_qty = get_func_qty();
-    for (size_t i = 0; i < func_qty; i++) {
-        func_t* f = getn_func(i);
-        if (!f) continue;
-
-        std::vector<CallArgInfo> func_args;
-        if (collect_call_args(func_args, f->start_ea)) {
-            args.insert(args.end(), func_args.begin(), func_args.end());
-        }
-    }
 }
 
 // ============================================================================
@@ -1206,6 +1273,13 @@ PseudocodeLineNumIterator::PseudocodeLineNumIterator(int line_num) {
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; ++i) {
+        // Cooperative cancellation -- this decompiles every function inside
+        // xFilter; poll the query deadline so a timeout interrupts it cleanly.
+        if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
+            xsql::set_vtab_error(
+                "query interrupted: timeout while decompiling all functions");
+            return;
+        }
         func_t* f = getn_func(i);
         if (!f) continue;
 
@@ -1425,6 +1499,22 @@ int64_t LvarsInFuncIterator::rowid() const { return static_cast<int64_t>(idx_); 
 
 // --- CtreeLabelsInFuncIterator ---
 
+// ctree_labels stable rowid: pack the function INDEX (get_func_num/getn_func --
+// cheap lookups, no decompilation) with the per-function label number (unique
+// within a function). Both are computable from a single function's data, so the
+// func_addr pushdown stays fast -- a global-index rowid would force decompiling
+// every function on a filtered query. The full-scan cursor, the func iterator,
+// and row_lookup all use these two helpers so their rowids agree.
+static constexpr int kCtreeLabelBits = 24;
+static constexpr int64_t kCtreeLabelMask = (int64_t(1) << kCtreeLabelBits) - 1;
+
+static int64_t pack_ctree_label_rowid(ea_t func_addr, int label_num) {
+    const int fnum = get_func_num(func_addr);
+    if (fnum < 0) return -1;  // not inside a function -> unaddressable
+    return (static_cast<int64_t>(fnum) << kCtreeLabelBits)
+         | (static_cast<int64_t>(label_num) & kCtreeLabelMask);
+}
+
 CtreeLabelsInFuncIterator::CtreeLabelsInFuncIterator(ea_t func_addr) {
     collect_ctree_labels(labels_, func_addr);
 }
@@ -1466,7 +1556,8 @@ void CtreeLabelsInFuncIterator::column(xsql::FunctionContext& ctx, int col) {
 }
 
 int64_t CtreeLabelsInFuncIterator::rowid() const {
-    return static_cast<int64_t>(idx_);
+    if (idx_ >= labels_.size()) return -1;
+    return pack_ctree_label_rowid(labels_[idx_].func_addr, labels_[idx_].label_num);
 }
 
 // --- CtreeInFuncIterator ---
@@ -2204,19 +2295,18 @@ bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
     lv.type().print(&current_type_str);
     if (type_str && current_type_str == type_str) return true;
 
-    // Parse type string - try named type first, then parse as declaration
+    // Parse the requested type via the shared array-aware declarator parser so
+    // array types (e.g. WCHAR[6], _BYTE[392]) and other declarator-bearing
+    // declarations are accepted -- matching the GUI 'Y' / IDAPython parse_decl
+    // path.  The previous "%s __x;" format produced invalid C for arrays
+    // ("WCHAR[6] __x;") and rejected every array type.
     tinfo_t tif;
-    if (!tif.get_named_type(nullptr, type_str)) {
-        // Use parse_decl for C declaration parsing
-        qstring decl;
-        decl.sprnt("%s __x;", type_str);
-        qstring out_name;
-        if (!parse_decl(&tif, &out_name, nullptr, decl.c_str(), PT_SIL)) {
-            xsql::set_vtab_error(
-                "cannot set lvar type: failed to parse type '" +
-                std::string(type_str ? type_str : "") + "' (" + ctx + ")");
-            return false;
-        }
+    std::string parse_error;
+    if (!idasql::types::parse_type_declarator(type_str ? type_str : "", tif, parse_error)) {
+        xsql::set_vtab_error(
+            "cannot set lvar type: " + parse_error + " (type '" +
+            std::string(type_str ? type_str : "") + "', " + ctx + ")");
+        return false;
     }
 
     // Use modify_user_lvar_info to persist the type change
@@ -2305,11 +2395,17 @@ CachedTableDef<PseudocodeLine> define_pseudocode() {
         .column_int64("func_addr", [](const PseudocodeLine& r) -> int64_t { return r.func_addr; })
         .column_int("line_num", [](const PseudocodeLine& r) -> int { return r.line_num; })
         .column_text("line", [](const PseudocodeLine& r) -> std::string { return r.text; })
-        .column_int64("ea", [](const PseudocodeLine& r) -> int64_t {
+        .column_int64("addr", [](const PseudocodeLine& r) -> int64_t {
             return r.ea != BADADDR ? r.ea : 0;
         })
-        .column_text_rw("comment",
-            [](const PseudocodeLine& r) -> std::string { return r.comment; },
+        // comment reads back NULL when empty, matching the pseudocode iterators
+        // (PseudocodeInFuncIterator/AtEa/LineNum col 4 emit NULL for an empty
+        // comment). Nullable RW keeps the existing write path.
+        .column_text_nullable_rw("comment",
+            [](const PseudocodeLine& r) -> std::optional<std::string> {
+                if (r.comment.empty()) return std::nullopt;
+                return r.comment;
+            },
             [](PseudocodeLine& row, xsql::FunctionArg val) -> bool {
                 const char* text = nullptr;
                 if (!val.is_null()) {
@@ -2376,7 +2472,7 @@ CachedTableDef<PseudocodeLine> define_pseudocode() {
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<PseudocodeInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 50.0)
-        .filter_eq("ea", [](int64_t ea) -> std::unique_ptr<xsql::RowIterator> {
+        .filter_eq("addr", [](int64_t ea) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<PseudocodeAtEaIterator>(static_cast<ea_t>(ea));
         }, 20.0, 5.0)
         .filter_eq("line_num", [](int64_t line_num) -> std::unique_ptr<xsql::RowIterator> {
@@ -2408,9 +2504,15 @@ CachedTableDef<OrphanCommentInfo> define_pseudocode_orphan_comments() {
             }
         })
         .column_int64("func_addr", [](const OrphanCommentInfo& row) -> int64_t { return row.func_addr; })
-        .column_text("func_name", [](const OrphanCommentInfo& row) -> std::string { return row.func_name; })
-        .column_int64("ea", [](const OrphanCommentInfo& row) -> int64_t {
-            return row.ea != BADADDR ? static_cast<int64_t>(row.ea) : 0;
+        // func_name/addr read back NULL under the SAME conditions the orphan
+        // iterators use (empty name / ea == BADADDR), so full-scan and
+        // func_addr/addr pushdown agree.
+        .column_text_nullable("func_name", [](const OrphanCommentInfo& row) -> std::optional<std::string> {
+            if (row.func_name.empty()) return std::nullopt;
+            return row.func_name;
+        })
+        .column("addr", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const OrphanCommentInfo& row) {
+            row.ea != BADADDR ? ctx.result_int64(row.ea) : ctx.result_null();
         })
         .column_text("comment_placement", [](const OrphanCommentInfo& row) -> std::string {
             return itp_to_name(row.comment_placement);
@@ -2438,7 +2540,7 @@ CachedTableDef<OrphanCommentInfo> define_pseudocode_orphan_comments() {
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<OrphanCommentsInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 10.0)
-        .filter_eq("ea", [](int64_t ea) -> std::unique_ptr<xsql::RowIterator> {
+        .filter_eq("addr", [](int64_t ea) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<OrphanCommentsAtEaIterator>(static_cast<ea_t>(ea));
         }, 20.0, 10.0)
         .build();
@@ -2540,8 +2642,18 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
         .column_int("is_result", [](const LvarInfo& row) -> int { return row.is_result ? 1 : 0; })
         .column_int("is_stk_var", [](const LvarInfo& row) -> int { return row.is_stk_var ? 1 : 0; })
         .column_int("is_reg_var", [](const LvarInfo& row) -> int { return row.is_reg_var ? 1 : 0; })
-        .column_int64("stkoff", [](const LvarInfo& row) -> int64_t { return row.stkoff; })
-        .column_int("mreg", [](const LvarInfo& row) -> int { return row.mreg; })
+        // stkoff/mreg emit NULL under the SAME condition LvarsInFuncIterator uses
+        // (!is_stk_var / !is_reg_var), so full-scan and func_addr-pushdown agree.
+        // stkoff is 64-bit (sval_t) so it uses the generic column() form (there is
+        // no column_int64_nullable); mreg is 32-bit and uses column_int_nullable.
+        .column("stkoff", xsql::ColumnType::Integer,
+            [](xsql::FunctionContext& ctx, const LvarInfo& row) {
+                row.is_stk_var ? ctx.result_int64(row.stkoff) : ctx.result_null();
+            })
+        .column_int_nullable("mreg", [](const LvarInfo& row) -> std::optional<int> {
+            if (!row.is_reg_var) return std::nullopt;
+            return static_cast<int>(row.mreg);
+        })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<LvarsInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 10.0)
@@ -2551,18 +2663,40 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
 CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
     return cached_table<CtreeLabelInfo>("ctree_labels")
         .no_shared_cache()
+        // Globally-stable rowid = pack_ctree_label_rowid(func_addr, label_num).
+        // The full-scan cursor, the func_addr pushdown iterator, and row_lookup
+        // all compute the same value from (function index, label number), so a
+        // rowid-addressed UPDATE/DELETE resolves the correct label -- no
+        // update_from_column_values() workaround needed. row_lookup decompiles
+        // only the one target function (cheap), preserving the pushdown.
+        .rowid([](const CtreeLabelInfo& row) -> int64_t {
+            return pack_ctree_label_rowid(row.func_addr, row.label_num);
+        })
         .estimate_rows([]() -> size_t { return get_func_qty() * 8; })
         .cache_builder([](std::vector<CtreeLabelInfo>& rows) {
             collect_all_ctree_labels(rows);
         })
-        .row_lookup([](CtreeLabelInfo& row, int64_t raw_rowid) -> bool {
-            if (raw_rowid < 0) return false;
+        .row_lookup([](CtreeLabelInfo& row, int64_t rowid) -> bool {
+            if (rowid < 0) return false;
+            // The high component is the function index, narrowed to int. Reject a
+            // rowid whose high part exceeds INT_MAX BEFORE casting, so an
+            // out-of-range/crafted rowid (e.g. real_rowid + (1<<56)) cannot wrap
+            // onto a real function index and alias a real label.
+            const int64_t hi = rowid >> kCtreeLabelBits;
+            if (hi > static_cast<int64_t>(INT_MAX)) return false;
+            const int fnum = static_cast<int>(hi);
+            const int label_num = static_cast<int>(rowid & kCtreeLabelMask);
+            func_t* f = getn_func(static_cast<size_t>(fnum));
+            if (!f) return false;
             std::vector<CtreeLabelInfo> rows;
-            collect_all_ctree_labels(rows);
-            const size_t idx = static_cast<size_t>(raw_rowid);
-            if (idx >= rows.size()) return false;
-            row = rows[idx];
-            return true;
+            if (!collect_ctree_labels(rows, f->start_ea)) return false;
+            for (const auto& r : rows) {
+                if (r.label_num == label_num) {
+                    row = r;
+                    return true;
+                }
+            }
+            return false;
         })
         .row_populator([](CtreeLabelInfo& row, int argc, xsql::FunctionArg* argv) {
             // argv[2]=func_addr, argv[3]=label_num, argv[4]=name, argv[5]=item_id,
@@ -2604,7 +2738,7 @@ CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
         .column_int("item_id", [](const CtreeLabelInfo& row) -> int {
             return row.item_id;
         })
-        .column_int64("item_ea", [](const CtreeLabelInfo& row) -> int64_t {
+        .column_int64("item_addr", [](const CtreeLabelInfo& row) -> int64_t {
             return row.item_ea != BADADDR ? static_cast<int64_t>(row.item_ea) : 0;
         })
         .column_int("is_user_defined", [](const CtreeLabelInfo& row) -> int {
@@ -2627,36 +2761,89 @@ GeneratorTableDef<CtreeItem> define_ctree() {
         .generator([]() -> std::unique_ptr<xsql::Generator<CtreeItem>> {
             return std::make_unique<CtreeGenerator>();
         })
+        // Nullable columns below emit NULL under the EXACT condition
+        // CtreeInFuncIterator::column() uses, so a full scan and a
+        // WHERE func_addr=... pushdown return identical values (both NULL or
+        // both the same value). The generator builder has no nullable helpers,
+        // so these use the generic column(name, type, getter) form.
         .column_int64("func_addr", [](const CtreeItem& r) -> int64_t { return r.func_addr; })
         .column_int("item_id", [](const CtreeItem& r) -> int { return r.item_id; })
         .column_int("is_expr", [](const CtreeItem& r) -> int { return r.is_expr ? 1 : 0; })
         .column_int("op", [](const CtreeItem& r) -> int { return r.op; })
         .column_text("op_name", [](const CtreeItem& r) -> std::string { return r.op_name; })
-        .column_int64("ea", [](const CtreeItem& r) -> int64_t { return r.ea != BADADDR ? r.ea : 0; })
-        .column_int("parent_id", [](const CtreeItem& r) -> int { return r.parent_id; })
+        .column("addr", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.ea != BADADDR ? ctx.result_int64(r.ea) : ctx.result_null();
+        })
+        .column("parent_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.parent_id >= 0 ? ctx.result_int(r.parent_id) : ctx.result_null();
+        })
         .column_int("depth", [](const CtreeItem& r) -> int { return r.depth; })
-        .column_int("x_id", [](const CtreeItem& r) -> int { return r.x_id; })
-        .column_int("y_id", [](const CtreeItem& r) -> int { return r.y_id; })
-        .column_int("z_id", [](const CtreeItem& r) -> int { return r.z_id; })
-        .column_int("cond_id", [](const CtreeItem& r) -> int { return r.cond_id; })
-        .column_int("then_id", [](const CtreeItem& r) -> int { return r.then_id; })
-        .column_int("else_id", [](const CtreeItem& r) -> int { return r.else_id; })
-        .column_int("body_id", [](const CtreeItem& r) -> int { return r.body_id; })
-        .column_int("init_id", [](const CtreeItem& r) -> int { return r.init_id; })
-        .column_int("step_id", [](const CtreeItem& r) -> int { return r.step_id; })
-        .column_int("var_idx", [](const CtreeItem& r) -> int { return r.var_idx; })
-        .column_int64("obj_ea", [](const CtreeItem& r) -> int64_t { return r.obj_ea != BADADDR ? r.obj_ea : 0; })
-        .column_int64("num_value", [](const CtreeItem& r) -> int64_t { return r.num_value; })
-        .column_text("str_value", [](const CtreeItem& r) -> std::string { return r.str_value; })
-        .column_text("helper_name", [](const CtreeItem& r) -> std::string { return r.helper_name; })
-        .column_int("member_offset", [](const CtreeItem& r) -> int { return r.member_offset; })
-        .column_text("var_name", [](const CtreeItem& r) -> std::string { return r.var_name; })
-        .column_int("var_is_stk", [](const CtreeItem& r) -> int { return r.var_is_stk ? 1 : 0; })
-        .column_int("var_is_reg", [](const CtreeItem& r) -> int { return r.var_is_reg ? 1 : 0; })
-        .column_int("var_is_arg", [](const CtreeItem& r) -> int { return r.var_is_arg ? 1 : 0; })
-        .column_text("obj_name", [](const CtreeItem& r) -> std::string { return r.obj_name; })
-        .column_int("label_num", [](const CtreeItem& r) -> int { return r.label_num; })
-        .column_int("goto_label_num", [](const CtreeItem& r) -> int { return r.goto_label_num; })
+        .column("x_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.x_id >= 0 ? ctx.result_int(r.x_id) : ctx.result_null();
+        })
+        .column("y_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.y_id >= 0 ? ctx.result_int(r.y_id) : ctx.result_null();
+        })
+        .column("z_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.z_id >= 0 ? ctx.result_int(r.z_id) : ctx.result_null();
+        })
+        .column("cond_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.cond_id >= 0 ? ctx.result_int(r.cond_id) : ctx.result_null();
+        })
+        .column("then_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.then_id >= 0 ? ctx.result_int(r.then_id) : ctx.result_null();
+        })
+        .column("else_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.else_id >= 0 ? ctx.result_int(r.else_id) : ctx.result_null();
+        })
+        .column("body_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.body_id >= 0 ? ctx.result_int(r.body_id) : ctx.result_null();
+        })
+        .column("init_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.init_id >= 0 ? ctx.result_int(r.init_id) : ctx.result_null();
+        })
+        .column("step_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.step_id >= 0 ? ctx.result_int(r.step_id) : ctx.result_null();
+        })
+        .column("var_idx", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.var_idx >= 0 ? ctx.result_int(r.var_idx) : ctx.result_null();
+        })
+        .column("obj_addr", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.obj_ea != BADADDR ? ctx.result_int64(r.obj_ea) : ctx.result_null();
+        })
+        .column("num_value", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.op == cot_num ? ctx.result_int64(r.num_value) : ctx.result_null();
+        })
+        .column("str_value", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            !r.str_value.empty() ? ctx.result_text(r.str_value.c_str()) : ctx.result_null();
+        })
+        .column("helper_name", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            !r.helper_name.empty() ? ctx.result_text(r.helper_name.c_str()) : ctx.result_null();
+        })
+        .column("member_offset", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            (r.op == cot_memref || r.op == cot_memptr) ? ctx.result_int(r.member_offset) : ctx.result_null();
+        })
+        .column("var_name", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            !r.var_name.empty() ? ctx.result_text(r.var_name.c_str()) : ctx.result_null();
+        })
+        .column("var_is_stk", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.op == cot_var ? ctx.result_int(r.var_is_stk ? 1 : 0) : ctx.result_null();
+        })
+        .column("var_is_reg", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.op == cot_var ? ctx.result_int(r.var_is_reg ? 1 : 0) : ctx.result_null();
+        })
+        .column("var_is_arg", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.op == cot_var ? ctx.result_int(r.var_is_arg ? 1 : 0) : ctx.result_null();
+        })
+        .column("obj_name", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            !r.obj_name.empty() ? ctx.result_text(r.obj_name.c_str()) : ctx.result_null();
+        })
+        .column("label_num", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.label_num >= 0 ? ctx.result_int(r.label_num) : ctx.result_null();
+        })
+        .column("goto_label_num", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
+            r.goto_label_num >= 0 ? ctx.result_int(r.goto_label_num) : ctx.result_null();
+        })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<CtreeInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 100.0, 100.0)
@@ -2674,24 +2861,51 @@ GeneratorTableDef<CallArgInfo> define_ctree_call_args() {
         .generator([]() -> std::unique_ptr<xsql::Generator<CallArgInfo>> {
             return std::make_unique<CallArgsGenerator>();
         })
+        // Nullable columns below emit NULL under the EXACT condition
+        // CallArgsInFuncIterator::column() uses, so a full scan and a
+        // WHERE func_addr=... pushdown return identical values. The generator
+        // builder has no nullable helpers, so these use the generic
+        // column(name, type, getter) form.
         .column_int64("func_addr", [](const CallArgInfo& r) -> int64_t { return r.func_addr; })
         .column_int("call_item_id", [](const CallArgInfo& r) -> int { return r.call_item_id; })
-        .column_int64("call_ea", [](const CallArgInfo& r) -> int64_t {
-            return r.call_ea != BADADDR ? static_cast<int64_t>(r.call_ea) : 0;
+        .column("call_addr", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            r.call_ea != BADADDR ? ctx.result_int64(r.call_ea) : ctx.result_null();
         })
-        .column_text("call_obj_name", [](const CallArgInfo& r) -> std::string { return r.call_obj_name; })
-        .column_text("call_helper_name", [](const CallArgInfo& r) -> std::string { return r.call_helper_name; })
+        .column("call_obj_name", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            !r.call_obj_name.empty() ? ctx.result_text(r.call_obj_name.c_str()) : ctx.result_null();
+        })
+        .column("call_helper_name", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            !r.call_helper_name.empty() ? ctx.result_text(r.call_helper_name.c_str()) : ctx.result_null();
+        })
         .column_int("arg_idx", [](const CallArgInfo& r) -> int { return r.arg_idx; })
-        .column_int("arg_item_id", [](const CallArgInfo& r) -> int { return r.arg_item_id; })
+        .column("arg_item_id", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            r.arg_item_id >= 0 ? ctx.result_int(r.arg_item_id) : ctx.result_null();
+        })
         .column_text("arg_op", [](const CallArgInfo& r) -> std::string { return r.arg_op; })
-        .column_int("arg_var_idx", [](const CallArgInfo& r) -> int { return r.arg_var_idx; })
-        .column_text("arg_var_name", [](const CallArgInfo& r) -> std::string { return r.arg_var_name; })
-        .column_int("arg_var_is_stk", [](const CallArgInfo& r) -> int { return r.arg_var_is_stk ? 1 : 0; })
-        .column_int("arg_var_is_arg", [](const CallArgInfo& r) -> int { return r.arg_var_is_arg ? 1 : 0; })
-        .column_int64("arg_obj_ea", [](const CallArgInfo& r) -> int64_t { return r.arg_obj_ea != BADADDR ? r.arg_obj_ea : 0; })
-        .column_text("arg_obj_name", [](const CallArgInfo& r) -> std::string { return r.arg_obj_name; })
-        .column_int64("arg_num_value", [](const CallArgInfo& r) -> int64_t { return r.arg_num_value; })
-        .column_text("arg_str_value", [](const CallArgInfo& r) -> std::string { return r.arg_str_value; })
+        .column("arg_var_idx", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            r.arg_var_idx >= 0 ? ctx.result_int(r.arg_var_idx) : ctx.result_null();
+        })
+        .column("arg_var_name", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            !r.arg_var_name.empty() ? ctx.result_text(r.arg_var_name.c_str()) : ctx.result_null();
+        })
+        .column("arg_var_is_stk", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            r.arg_var_idx >= 0 ? ctx.result_int(r.arg_var_is_stk ? 1 : 0) : ctx.result_null();
+        })
+        .column("arg_var_is_arg", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            r.arg_var_idx >= 0 ? ctx.result_int(r.arg_var_is_arg ? 1 : 0) : ctx.result_null();
+        })
+        .column("arg_obj_addr", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            r.arg_obj_ea != BADADDR ? ctx.result_int64(r.arg_obj_ea) : ctx.result_null();
+        })
+        .column("arg_obj_name", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            !r.arg_obj_name.empty() ? ctx.result_text(r.arg_obj_name.c_str()) : ctx.result_null();
+        })
+        .column("arg_num_value", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            r.arg_op == "cot_num" ? ctx.result_int64(r.arg_num_value) : ctx.result_null();
+        })
+        .column("arg_str_value", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
+            !r.arg_str_value.empty() ? ctx.result_text(r.arg_str_value.c_str()) : ctx.result_null();
+        })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<CallArgsInFuncIterator>(static_cast<ea_t>(func_addr));
         }, 100.0, 100.0)
@@ -2707,9 +2921,9 @@ bool register_ctree_views(xsql::Database& db) {
     const char* v_calls = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_calls AS
         SELECT
-            c.func_addr, c.item_id, c.ea,
+            c.func_addr, c.item_id, c.addr,
             x.op_name AS callee_op,
-            NULLIF(x.obj_ea, 0) AS callee_addr,
+            NULLIF(x.obj_addr, 0) AS callee_addr,
             x.obj_name AS callee_name,
             x.helper_name,
             (SELECT COUNT(*) FROM ctree_call_args a
@@ -2725,7 +2939,7 @@ bool register_ctree_views(xsql::Database& db) {
         SELECT
             c.func_addr,
             c.item_id AS call_item_id,
-            c.ea AS call_ea,
+            c.addr AS call_addr,
             x.item_id AS target_item_id,
             x.op_name AS target_op,
             x.var_idx AS target_var_idx,
@@ -2767,7 +2981,7 @@ bool register_ctree_views(xsql::Database& db) {
     const char* v_cmp = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_comparisons AS
         SELECT
-            c.func_addr, c.item_id, c.ea, c.op_name,
+            c.func_addr, c.item_id, c.addr, c.op_name,
             lhs.op_name AS lhs_op, lhs.var_idx AS lhs_var_idx, lhs.num_value AS lhs_num,
             rhs.op_name AS rhs_op, rhs.var_idx AS rhs_var_idx, rhs.num_value AS rhs_num
         FROM ctree c
@@ -2784,9 +2998,9 @@ bool register_ctree_views(xsql::Database& db) {
     const char* v_asg = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_assignments AS
         SELECT
-            c.func_addr, c.item_id, c.ea, c.op_name,
+            c.func_addr, c.item_id, c.addr, c.op_name,
             lhs.op_name AS lhs_op, lhs.var_idx AS lhs_var_idx,
-            lhs.var_is_stk AS lhs_is_stk, lhs.obj_ea AS lhs_obj,
+            lhs.var_is_stk AS lhs_is_stk, lhs.obj_addr AS lhs_obj,
             rhs.op_name AS rhs_op, rhs.var_idx AS rhs_var_idx, rhs.num_value AS rhs_num
         FROM ctree c
         LEFT JOIN ctree lhs ON lhs.func_addr = c.func_addr AND lhs.item_id = c.x_id
@@ -2798,7 +3012,7 @@ bool register_ctree_views(xsql::Database& db) {
     const char* v_deref = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_derefs AS
         SELECT
-            c.func_addr, c.item_id, c.ea,
+            c.func_addr, c.item_id, c.addr,
             x.op_name AS ptr_op, x.var_idx AS ptr_var_idx,
             x.var_is_stk AS ptr_is_stk, x.var_is_arg AS ptr_is_arg
         FROM ctree c
@@ -2820,9 +3034,9 @@ bool register_ctree_views(xsql::Database& db) {
             WHERE lc.depth < 50
         )
         SELECT DISTINCT
-            c.func_addr, c.item_id, c.ea, c.depth AS call_depth,
+            c.func_addr, c.item_id, c.addr, c.depth AS call_depth,
             lc.loop_id, lc.loop_op,
-            NULLIF(x.obj_ea, 0) AS callee_addr, x.obj_name AS callee_name, x.helper_name
+            NULLIF(x.obj_addr, 0) AS callee_addr, x.obj_name AS callee_name, x.helper_name
         FROM loop_contents lc
         JOIN ctree c ON c.func_addr = lc.func_addr AND c.item_id = lc.item_id
         LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
@@ -2849,9 +3063,9 @@ bool register_ctree_views(xsql::Database& db) {
             WHERE ic.depth < 50
         )
         SELECT DISTINCT
-            c.func_addr, c.item_id, c.ea, c.depth AS call_depth,
+            c.func_addr, c.item_id, c.addr, c.depth AS call_depth,
             ic.if_id, ic.branch,
-            NULLIF(x.obj_ea, 0) AS callee_addr, x.obj_name AS callee_name, x.helper_name
+            NULLIF(x.obj_addr, 0) AS callee_addr, x.obj_name AS callee_name, x.helper_name
         FROM if_contents ic
         JOIN ctree c ON c.func_addr = ic.func_addr AND c.item_id = ic.item_id
         LEFT JOIN ctree x ON x.func_addr = c.func_addr AND x.item_id = c.x_id
@@ -2861,19 +3075,19 @@ bool register_ctree_views(xsql::Database& db) {
 
     const char* v_leaf_funcs = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_leaf_funcs AS
-        SELECT f.address, f.name
+        SELECT f.addr, f.name
         FROM funcs f
         WHERE
             -- Only consider functions that Hex-Rays can decompile (avoid false "leaf" results
             -- when decompilation fails and the ctree tables return empty rows).
             EXISTS (
                 SELECT 1 FROM ctree t
-                WHERE t.func_addr = f.address
+                WHERE t.func_addr = f.addr
                 LIMIT 1
             )
             AND NOT EXISTS (
                 SELECT 1 FROM ctree_v_calls c
-                WHERE c.func_addr = f.address AND c.callee_addr IS NOT NULL
+                WHERE c.func_addr = f.addr AND c.callee_addr IS NOT NULL
                 LIMIT 1
             )
     )";
@@ -2901,7 +3115,7 @@ bool register_ctree_views(xsql::Database& db) {
         SELECT
             ret.func_addr,
             ret.item_id,
-            ret.ea,
+            ret.addr,
             val.op_name AS return_op,
             val.item_id AS return_item_id,
             -- Numeric return (cot_num)
@@ -2915,7 +3129,7 @@ bool register_ctree_views(xsql::Database& db) {
             CASE WHEN val.op_name = 'cot_var' THEN val.var_is_stk ELSE NULL END AS returns_stk_var,
             -- Object/symbol return (cot_obj)
             CASE WHEN val.op_name = 'cot_obj' THEN val.obj_name ELSE NULL END AS return_obj,
-            CASE WHEN val.op_name = 'cot_obj' THEN val.obj_ea ELSE NULL END AS return_obj_ea,
+            CASE WHEN val.op_name = 'cot_obj' THEN val.obj_addr ELSE NULL END AS return_obj_addr,
             -- Call result return (cot_call) - returning result of another call
             CASE WHEN val.op_name = 'cot_call' THEN 1 ELSE 0 END AS returns_call_result
         FROM ctree ret

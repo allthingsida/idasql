@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * types_base.hpp - `types` table (all local types: structs, unions, enums,
@@ -34,6 +33,8 @@ struct TypeEntry {
   std::string resolved; // For typedefs: what it resolves to
   std::string folder_path;
   std::string full_path;
+  bool is_fixed;        // struct has fixed (frozen) member offsets (TAUDT_FIXED)
+  bool is_bitmask;      // enum is a bitmask/bitfield enum (BTE_BITMASK)
 };
 
 void collect_types(std::vector<TypeEntry> &rows);

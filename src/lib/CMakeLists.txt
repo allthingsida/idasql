@@ -1,3 +1,11 @@
+#
+# Copyright (c) 2024-2026 Elias Bachaalany
+# SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
+#
+# This file is licensed under the Human-Origin Source License v1.0.
+# See LICENSE.
+#
+
 # libidasql - SQL interface to IDA databases
 
 add_library(idasql STATIC
@@ -34,6 +42,8 @@ add_library(idasql STATIC
     src/types_applied.cpp
     src/types_bookmarks.cpp
     src/types_members.cpp
+    src/types_member_xrefs.cpp
+    src/types_gaps.cpp
     src/types_enums.cpp
     src/types_func_args.cpp
     src/types_registry.cpp
@@ -42,7 +52,9 @@ add_library(idasql STATIC
     src/search_bytes.cpp
     src/idapython_exec.cpp
     src/metadata.cpp
-    src/metadata_welcome.cpp
+    src/metadata_binary.cpp
+    src/metadata_runtime_settings.cpp
+    src/true_believers.cpp
     src/ui_context_provider.cpp
     src/ida_compat.cpp
 )
@@ -74,6 +86,10 @@ endif()
 set_target_properties(idasql PROPERTIES OUTPUT_NAME "libidasql")
 
 target_precompile_headers(idasql PRIVATE src/ida_headers.hpp)
+
+# The vendored true_believers decoder is engine-agnostic — keep the IDA SDK PCH
+# out of it so it compiles standalone.
+set_source_files_properties(src/true_believers.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 # SDK compilation requirements only — no library linkage.
 # Consumers bring their own SDK target (idasdk::plugin or idasdk::idalib).

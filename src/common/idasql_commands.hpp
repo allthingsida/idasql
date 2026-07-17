@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * idasql_commands.hpp - Dot-command parser for interactive sessions
@@ -17,9 +16,31 @@
 #include <string>
 
 #include <xsql/thinclient/clipboard.hpp>
-#include "welcome_query.hpp"
+#include "binary_query.hpp"
 
 namespace idasql {
+
+// Checked port parse: digits-only, in [0, 65535]. Returns true and sets `out` on
+// success; false (leaving `out` untouched) on empty/non-numeric/out-of-range
+// input. Used everywhere user input becomes a port so a bad ".http start
+// 99999999999999" / "--http abc" is a clean error instead of an std::stoi throw
+// unwinding through IDA's C execute_line (crash/UB) or aborting the CLI.
+inline bool parse_port(const std::string& s, int& out) {
+    if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos) {
+        return false;
+    }
+    // Bound the length before conversion so a very long all-digit string can't
+    // overflow; 5 digits covers the full 0..65535 range.
+    if (s.size() > 5) {
+        return false;
+    }
+    const int value = std::stoi(s);  // safe: <= 99999, digits-only
+    if (value < 0 || value > 65535) {
+        return false;
+    }
+    out = value;
+    return true;
+}
 
 enum class CommandResult {
     NOT_HANDLED,  // Not a command, process as query
@@ -37,9 +58,10 @@ struct CommandCallbacks {
     std::function<std::string(int, const std::string&)> mcp_start;
     std::function<std::string()> mcp_stop;
 
-    // HTTP server callbacks (optional)
+    // HTTP server callbacks (optional). http_start receives (port, bind, token);
+    // an empty token means no authentication.
     std::function<std::string()> http_status;
-    std::function<std::string(int, const std::string&)> http_start;
+    std::function<std::string(int, const std::string&, const std::string&)> http_start;
     std::function<std::string()> http_stop;
 
     // Autostart pin callbacks (optional). Wired by both the CLI and the plugin
@@ -48,19 +70,24 @@ struct CommandCallbacks {
     // may also be "all".
     std::function<std::string()> pin_list;
     std::function<std::string(const std::string& service,
-                              const std::string& bind, int port)> pin_set;
+                              const std::string& bind, int port,
+                              const std::string& token)> pin_set;
     std::function<std::string(const std::string& service, bool enable)> pin_enable;
     std::function<std::string(const std::string& service)> pin_clear;
 };
 
-inline void parse_bind_and_port(const std::string& raw, std::string& bind_addr, int& port) {
+// Parse "[bindinterface] [port]" into bind_addr/port. Returns false (leaving
+// outputs at their defaults) when a token that must be a port fails the checked
+// parse (non-numeric or out of range) — callers turn that into a usage error
+// instead of throwing out of std::stoi on bad user input.
+inline bool parse_bind_and_port(const std::string& raw, std::string& bind_addr, int& port) {
     bind_addr = "127.0.0.1";
     port = 0;
 
     std::string rest = raw;
     size_t rs = rest.find_first_not_of(" \t");
     if (rs == std::string::npos) {
-        return;
+        return true;
     }
     rest = rest.substr(rs);
 
@@ -79,13 +106,51 @@ inline void parse_bind_and_port(const std::string& raw, std::string& bind_addr, 
 
     const bool tok1_numeric = !tok1.empty() && tok1.find_first_not_of("0123456789") == std::string::npos;
     if (tok1_numeric) {
-        port = std::stoi(tok1);
+        return parse_port(tok1, port);
     } else {
         bind_addr = tok1;
         if (!tok2.empty()) {
-            port = std::stoi(tok2);
+            return parse_port(tok2, port);
         }
     }
+    return true;
+}
+
+// Parse "[bindinterface] [port] [--token SECRET]". Extracts and removes a
+// `--token <value>` pair (if present) into `token`, then parses the remaining
+// "[bind] [port]" via parse_bind_and_port. `--token` with no following value is a
+// usage error (returns false). Same numeric-port validation semantics as above.
+inline bool parse_bind_port_token(const std::string& raw, std::string& bind_addr,
+                                  int& port, std::string& token) {
+    token.clear();
+    std::string cleaned;
+    cleaned.reserve(raw.size());
+
+    // Tokenize on whitespace, pulling out `--token <value>`; keep the rest verbatim.
+    size_t i = 0;
+    bool expect_token_value = false;
+    while (i < raw.size()) {
+        size_t start = raw.find_first_not_of(" \t", i);
+        if (start == std::string::npos) break;
+        size_t end = raw.find_first_of(" \t", start);
+        if (end == std::string::npos) end = raw.size();
+        std::string word = raw.substr(start, end - start);
+        i = end;
+
+        if (expect_token_value) {
+            token = word;
+            expect_token_value = false;
+        } else if (word == "--token") {
+            expect_token_value = true;
+        } else {
+            if (!cleaned.empty()) cleaned.push_back(' ');
+            cleaned += word;
+        }
+    }
+    if (expect_token_value) {
+        return false; // "--token" with no value
+    }
+    return parse_bind_and_port(cleaned, bind_addr, port);
 }
 
 inline CommandResult handle_command(
@@ -124,24 +189,24 @@ inline CommandResult handle_command(
 #ifdef IDASQL_HAS_MCP
                  "\n"
                  "MCP Server:\n"
-                 "  .mcp                     Show status or start if not running\n"
-                 "  .mcp start [bind] [port] Start MCP server\n"
-                 "  .mcp stop                Stop MCP server\n"
-                 "  .mcp help                Show MCP help\n"
+                 "  .mcp                              Show status or start if not running\n"
+                 "  .mcp start [bindinterface] [port] Start MCP server\n"
+                 "  .mcp stop                         Stop MCP server\n"
+                 "  .mcp help                         Show MCP help\n"
 #endif
                  "\n"
                  "HTTP Server:\n"
-                 "  .http                    Show status or start if not running\n"
-                 "  .http start [bind] [port] Start HTTP server\n"
-                 "  .http stop               Stop HTTP server\n"
-                 "  .http help               Show HTTP help\n"
+                 "  .http                              Show status or start if not running\n"
+                 "  .http start [bindinterface] [port] Start HTTP server\n"
+                 "  .http stop                         Stop HTTP server\n"
+                 "  .http help                         Show HTTP help\n"
                  "\n"
                  "Autostart Pins:\n"
-                 "  .pin                     Show pinned autostart config\n"
-                 "  .pin set http|mcp [bind] <port>  Pin a server (plugin auto-starts on load)\n"
-                 "  .pin on|off http|mcp     Enable/disable autostart-on-load\n"
-                 "  .pin clear [http|mcp|all] Remove pinned config\n"
-                 "  .pin help                Show pin help\n"
+                 "  .pin                              Show pinned autostart config\n"
+                 "  .pin http|mcp [bindinterface] [port]  Pin a server; omit port for a random port each launch\n"
+                 "  .pin on|off http|mcp              Enable/disable autostart-on-load\n"
+                 "  .pin clear [http|mcp|all]         Remove pinned config\n"
+                 "  .pin help                         Show pin help\n"
                  "\n"
                  "SQL:\n"
                  "  SELECT * FROM funcs LIMIT 10;\n"
@@ -167,22 +232,18 @@ inline CommandResult handle_command(
             int port = 0;
             std::string bind_addr = "127.0.0.1";
             std::string rest = subargs.length() > 5 ? subargs.substr(5) : "";
-            parse_bind_and_port(rest, bind_addr, port);
+            if (!parse_bind_and_port(rest, bind_addr, port)) {
+                output = "Error: invalid port (must be a number 0-65535).\n"
+                         "Usage: .mcp start [bindinterface] [port]";
+                return CommandResult::HANDLED;
+            }
 
             if (callbacks.mcp_start) {
+                // The clipboard config is copied by the start callback itself at
+                // bind time (it knows the real host/port and, in the CLI, the call
+                // blocks until Ctrl+C so nothing could be copied here after it
+                // returns). See start_mcp_server / the CLI mcp_start callback.
                 output = callbacks.mcp_start(port, bind_addr);
-                // Only copy to clipboard on fresh start (output reports a port).
-                // Copy the MCP server JSON config (paste-ready into a client
-                // such as Claude Desktop), not the human-readable status line.
-                int started_port = 0;
-                std::string started_host;
-                if (xsql::thinclient::extract_mcp_start_endpoint(
-                        output, started_host, started_port)) {
-                    const std::string payload =
-                        xsql::thinclient::build_mcp_clipboard_payload(
-                            "idasql", started_host, started_port);
-                    (void)xsql::thinclient::try_copy_text_to_clipboard_windows(payload);
-                }
             } else {
                 output = "MCP server not available";
             }
@@ -194,10 +255,10 @@ inline CommandResult handle_command(
             }
         } else if (subargs == "help") {
             output = "MCP Server Commands:\n"
-                     "  .mcp                     Show status, start if not running\n"
-                     "  .mcp start [bind] [port] Start MCP server (default: 127.0.0.1, random port)\n"
-                     "  .mcp stop                Stop MCP server\n"
-                     "  .mcp help                Show this help\n"
+                     "  .mcp                              Show status, start if not running\n"
+                     "  .mcp start [bindinterface] [port] Start MCP server (default: 127.0.0.1, random port)\n"
+                     "  .mcp stop                         Stop MCP server\n"
+                     "  .mcp help                         Show this help\n"
                      "\n"
                      "The MCP server exposes one tool:\n"
                      "  idasql_query  - Execute SQL query directly\n"
@@ -229,17 +290,20 @@ inline CommandResult handle_command(
         } else if (subargs.rfind("start", 0) == 0) {
             int port = 0;
             std::string bind_addr = "127.0.0.1";
+            std::string token;
             std::string rest = subargs.length() > 5 ? subargs.substr(5) : "";
-            parse_bind_and_port(rest, bind_addr, port);
+            if (!parse_bind_port_token(rest, bind_addr, port, token)) {
+                output = "Error: invalid port (must be a number 0-65535) or missing --token value.\n"
+                         "Usage: .http start [bindinterface] [port] [--token SECRET]";
+                return CommandResult::HANDLED;
+            }
 
             if (callbacks.http_start) {
-                output = callbacks.http_start(port, bind_addr);
-                // Only copy to clipboard on fresh start (multi-line output with URL)
-                auto nl = output.find('\n');
-                if (nl != std::string::npos) {
-                    const std::string clipboard_text = output.substr(0, nl);
-                    (void)xsql::thinclient::try_copy_text_to_clipboard_windows(clipboard_text);
-                }
+                // The clipboard payload is copied by the start callback at bind time
+                // (see the CLI http_start / start_http_server) -- in the CLI the call
+                // blocks until Ctrl+C, so the returned string is the post-stop message
+                // and copying it here would copy the wrong text.
+                output = callbacks.http_start(port, bind_addr, token);
             } else {
                 output = "HTTP server not available";
             }
@@ -252,10 +316,12 @@ inline CommandResult handle_command(
         } else if (subargs == "help") {
             const std::string example = idasql::format_query_curl_example("http://127.0.0.1:<port>");
             output = "HTTP Server Commands:\n"
-                     "  .http                     Show status, start if not running\n"
-                     "  .http start [bind] [port] Start HTTP server (default: 127.0.0.1, random port)\n"
-                     "  .http stop                Stop HTTP server\n"
-                     "  .http help                Show this help\n"
+                     "  .http                              Show status, start if not running\n"
+                     "  .http start [bindinterface] [port] [--token SECRET]  Start HTTP server\n"
+                     "                                     (default: 127.0.0.1, random port, no auth;\n"
+                     "                                      --token requires Authorization: Bearer SECRET)\n"
+                     "  .http stop                         Stop HTTP server\n"
+                     "  .http help                         Show this help\n"
                      "\n"
                      "Endpoints:\n"
                      "  GET  /help       API documentation\n"
@@ -294,21 +360,23 @@ inline CommandResult handle_command(
             return tok;
         };
 
-        if (subargs.empty() || subargs == "list") {
+        if (subargs.empty() || subargs == "list" || subargs == "status") {
             output = callbacks.pin_list ? callbacks.pin_list() : kPinUnavailable;
         } else if (subargs == "help") {
             output =
                 "Autostart pin commands:\n"
                 "  .pin                      Show pinned config (alias of .pin list)\n"
-                "  .pin list                 Show pinned config\n"
+                "  .pin list | .pin status   Show pinned config\n"
 #ifdef IDASQL_HAS_MCP
-                "  .pin set http [bind] <port>  Pin HTTP host/port; enables autostart\n"
-                "  .pin set mcp  [bind] <port>  Pin MCP host/port; enables autostart\n"
+                "  .pin http [bindinterface] [port]  Pin HTTP; enables autostart\n"
+                "  .pin mcp  [bindinterface] [port]  Pin MCP; enables autostart\n"
+                "  .pin set http|mcp [bindinterface] [port]  Same, explicit form\n"
                 "  .pin on  http|mcp         Enable autostart-on-load for a service\n"
                 "  .pin off http|mcp         Disable autostart (keeps host/port)\n"
                 "  .pin clear [http|mcp|all] Remove pinned config (default: all)\n"
 #else
-                "  .pin set http [bind] <port>  Pin HTTP host/port; enables autostart\n"
+                "  .pin http [bindinterface] [port]  Pin HTTP; enables autostart\n"
+                "  .pin set http [bindinterface] [port]  Same, explicit form\n"
                 "  .pin on  http             Enable autostart-on-load for HTTP\n"
                 "  .pin off http             Disable autostart (keeps host/port)\n"
                 "  .pin clear [http|all]     Remove pinned config (default: all)\n"
@@ -318,33 +386,46 @@ inline CommandResult handle_command(
 #ifdef IDASQL_HAS_MCP
                 "Pins are stored in the IDB. The plugin auto-starts enabled\n"
                 "services when the database is opened; '.http start' / '.mcp start'\n"
-                "with no explicit port reuse the pinned host/port. The port is\n"
-                "required on '.pin set'; bind defaults to 127.0.0.1.\n";
+                "with no explicit port reuse the pinned host/port. Omit the port\n"
+                "to autostart on a fresh random port each launch; bindinterface\n"
+                "defaults to 127.0.0.1.\n";
 #else
                 "Pins are stored in the IDB. The plugin auto-starts the enabled\n"
                 "service when the database is opened; '.http start' with no\n"
-                "explicit port reuses the pinned host/port. The port is\n"
-                "required on '.pin set'; bind defaults to 127.0.0.1.\n";
+                "explicit port reuses the pinned host/port. Omit the port to\n"
+                "autostart on a fresh random port each launch; bindinterface\n"
+                "defaults to 127.0.0.1.\n";
 #endif
         } else {
             std::string verb = next_token(subargs);
-            if (verb == "set") {
-                std::string service = next_token(subargs);
+            // Shared "pin a service" handler. The port is optional: when omitted
+            // (or 0) the pin is stored with port 0 = "autostart with a fresh
+            // random port each launch". bind defaults to 127.0.0.1.
+            auto do_pin_set = [&](const std::string& service) {
                 if (service != "http" && service != "mcp") {
-                    output = "Usage: .pin set http|mcp [bind] <port>";
-                } else {
-                    std::string bind_addr;
-                    int port = 0;
-                    parse_bind_and_port(subargs, bind_addr, port);
-                    if (port <= 0) {
-                        output = "Error: .pin set requires an explicit port (e.g. '.pin set "
-                                 + service + " 8080').";
-                    } else if (callbacks.pin_set) {
-                        output = callbacks.pin_set(service, bind_addr, port);
-                    } else {
-                        output = kPinUnavailable;
-                    }
+                    output = "Usage: .pin set http|mcp [bindinterface] [port] [--token SECRET]";
+                    return;
                 }
+                std::string bind_addr;
+                int port = 0;
+                std::string token;
+                if (!parse_bind_port_token(subargs, bind_addr, port, token)) {
+                    output = "Error: invalid port (must be a number 0-65535; "
+                             "0 = random port each launch) or missing --token value.";
+                } else if (service == "mcp" && !token.empty()) {
+                    output = "Error: --token is only supported for the HTTP server "
+                             "(MCP has no auth).";
+                } else if (callbacks.pin_set) {
+                    output = callbacks.pin_set(service, bind_addr, port, token);
+                } else {
+                    output = kPinUnavailable;
+                }
+            };
+            if (verb == "set") {
+                do_pin_set(next_token(subargs));
+            } else if (verb == "http" || verb == "mcp") {
+                // Shorthand: ".pin http [bindinterface] [port]".
+                do_pin_set(verb);
             } else if (verb == "on" || verb == "off") {
                 std::string service = next_token(subargs);
                 if (service != "http" && service != "mcp") {

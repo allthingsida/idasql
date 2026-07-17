@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "mcp_server.hpp"
 #include "idasql_version.hpp"
@@ -28,6 +27,12 @@ using Json = nlohmann::json;
 
 static bool starts_with_text(const std::string& value, const char* prefix) {
     return value.rfind(prefix, 0) == 0;
+}
+
+static bool is_error_result_text(const std::string& value) {
+    return starts_with_text(value, "Error: ") ||
+           starts_with_text(value, "ERROR:") ||
+           value.find("\nERROR:") != std::string::npos;
 }
 
 class IDAMCPServer::Impl {
@@ -111,8 +116,8 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
         return {false, "Error: MCP request timed out in queue (raise PRAGMA idasql.queue_admission_timeout_ms)"};
     }
 
-    // Convention: query callbacks return "Error: ..." on failure
-    bool ok = !starts_with_text(cmd->result, "Error: ");
+    // Convention: query callbacks return textual error markers on failure.
+    bool ok = !is_error_result_text(cmd->result);
     return {ok, cmd->result};
 }
 
@@ -181,8 +186,8 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
                     };
                 }
                 result = query_cb_(query);
-                // Convention: query callbacks return "Error: ..." on failure
-                if (starts_with_text(result, "Error: ")) {
+                // Convention: query callbacks return textual error markers on failure.
+                if (is_error_result_text(result)) {
                     success = false;
                 }
             }
@@ -224,6 +229,7 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
     if (!impl_->server->start()) {
         running_.store(false);
         impl_.reset();
+        port_ = 0;  // no stale endpoint after a failed bind
         return -1;
     }
 
@@ -308,6 +314,7 @@ void IDAMCPServer::stop() {
     }
 
     impl_.reset();
+    port_ = 0;  // no stale endpoint after stop; next start() assigns a fresh one
 }
 
 void IDAMCPServer::complete_pending_commands(const std::string& result) {

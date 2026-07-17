@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * example_basic.cpp - Basic IDASQL usage with Session
@@ -71,7 +70,7 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Top 5 Largest Functions ===\n";
 
     auto result = session.query(
-        "SELECT printf('0x%08X', address) as addr, name, size "
+        "SELECT printf('0x%08X', addr) as addr, name, size "
         "FROM funcs ORDER BY size DESC LIMIT 5"
     );
 
@@ -98,8 +97,8 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Segments ===\n";
 
     auto segments = session.query(
-        "SELECT name, printf('0x%X', start_ea) as start, "
-        "       printf('0x%X', end_ea) as end, perm "
+        "SELECT name, printf('0x%X', start_addr) as start, "
+        "       printf('0x%X', end_addr) as end, perm "
         "FROM segments"
     );
 
@@ -116,7 +115,7 @@ int main(int argc, char* argv[]) {
 
     // Get function at specific index
     auto first_func = session.query(
-        "SELECT printf('0x%X', address) as addr, name "
+        "SELECT printf('0x%X', addr) as addr, name "
         "FROM funcs WHERE rowid = 0"
     );
     if (!first_func.empty()) {

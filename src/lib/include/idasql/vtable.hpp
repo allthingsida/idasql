@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * vtable.hpp - SQLite Virtual Table framework for IDA
@@ -17,7 +16,7 @@
  *
  *   auto funcs_table = idasql::table("funcs")
  *       .count([]() { return get_func_qty(); })
- *       .column_int64("address", [](size_t i) { return getn_func(i)->start_ea; })
+ *       .column_int64("addr", [](size_t i) { return getn_func(i)->start_ea; })
  *       .build();
  *
  * 2. Cached tables (for enumeration-based data, cache freed after query):
@@ -26,7 +25,7 @@
  *       .estimate_rows([]() { return get_func_qty() * 10; })
  *       .count([]() { return get_xref_qty(); })  // Optional COUNT(*) fast path
  *       .cache_builder([](auto& cache) { ... populate ... })
- *       .column_int64("from_ea", [](const XrefInfo& r) { return r.from_ea; })
+ *       .column_int64("from_addr", [](const XrefInfo& r) { return r.from_ea; })
  *       .build();
  *
  * 3. Generator tables (for expensive full scans that must be lazy):

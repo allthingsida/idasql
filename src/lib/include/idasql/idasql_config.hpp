@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * idasql_config.hpp - Layout of the generic idasql per-database config netnode.
@@ -36,7 +35,7 @@ namespace config {
 inline constexpr const char *NODE_NAME = "$ idasql config";
 
 // Bumped when the on-disk layout below changes in an incompatible way.
-inline constexpr uint32_t SCHEMA_VERSION = 1;
+inline constexpr uint32_t SCHEMA_VERSION = 3;
 
 // altval (integer) index map.
 namespace alt {
@@ -57,6 +56,10 @@ namespace sup {
 inline constexpr uint32_t AUTOSTART_BASE = 0x10;
 inline constexpr uint32_t AUTOSTART_HTTP_HOST = AUTOSTART_BASE + 0; // 0x10
 inline constexpr uint32_t AUTOSTART_MCP_HOST = AUTOSTART_BASE + 1;  // 0x11
+// Per-service auth token (v3+). Empty/absent == no authentication required.
+// Only the HTTP server enforces a token; MCP has no auth path.
+inline constexpr uint32_t AUTOSTART_HTTP_TOKEN = AUTOSTART_BASE + 2; // 0x12
+inline constexpr uint32_t AUTOSTART_MCP_TOKEN = AUTOSTART_BASE + 3;  // 0x13
 // 0x20.. reserved for the next feature.
 } // namespace sup
 
@@ -64,6 +67,12 @@ inline constexpr uint32_t AUTOSTART_MCP_HOST = AUTOSTART_BASE + 1;  // 0x11
 namespace autostart_flags {
 inline constexpr uint64_t HTTP_ENABLED = 1ull << 0;
 inline constexpr uint64_t MCP_ENABLED = 1ull << 1;
+// CONFIGURED marks that a pin record exists for the service. It is independent
+// of the stored port value, so port 0 ("autostart with a fresh random port")
+// is a real pin rather than "unset". (Pre-v2 IDBs lack these bits; load() treats
+// a nonzero stored port as configured for back-compat.)
+inline constexpr uint64_t HTTP_CONFIGURED = 1ull << 2;
+inline constexpr uint64_t MCP_CONFIGURED = 1ull << 3;
 } // namespace autostart_flags
 
 } // namespace config

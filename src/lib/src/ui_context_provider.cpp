@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include <idasql/platform.hpp>
 
@@ -263,27 +262,40 @@ static void merge_from_active_widget(ContextSourceData& source, TWidget* viewer)
     }
 
     source.viewer = viewer;
-    source.widget_type = get_widget_type(viewer);
-    source.has_widget = true;
 
-    qstring title;
-    if (get_widget_title(&title, viewer)) {
-        source.widget_title = title.c_str();
-        source.have_title = !source.widget_title.empty();
-    } else {
-        source.widget_title.clear();
-        source.have_title = false;
+    // The action snapshot's focused widget is authoritative. Only adopt the current
+    // main viewer's identity when the snapshot captured NO widget (the fallback
+    // path). Otherwise get_current_viewer() would clobber a focused chooser with the
+    // underlying listing view, gating off the chooser-selection paths and
+    // misreporting focused_widget.
+    if (!source.has_widget) {
+        source.widget_type = get_widget_type(viewer);
+        source.has_widget = true;
+
+        qstring title;
+        if (get_widget_title(&title, viewer)) {
+            source.widget_title = title.c_str();
+            source.have_title = !source.widget_title.empty();
+        } else {
+            source.widget_title.clear();
+            source.have_title = false;
+        }
     }
 
-    if (!source.has_widget || !is_address_widget_type(source.widget_type)) {
-        // Do not keep stale action-context addresses for non-address widgets.
+    if (source.has_widget && !is_address_widget_type(source.widget_type)) {
+        // Non-address focused widget (e.g. a chooser): no code anchor. Drop any
+        // stale action-context address rather than attributing the main viewer's ea.
         source.current_ea = BADADDR;
         return;
     }
 
-    const ea_t candidate_ea = get_screen_ea();
-    if (candidate_ea != BADADDR) {
-        source.current_ea = candidate_ea;
+    // Address-type focused widget: fill the code anchor from the viewer only when
+    // the snapshot did not already provide one (don't overwrite a captured ea).
+    if (source.current_ea == BADADDR) {
+        const ea_t candidate_ea = get_screen_ea();
+        if (candidate_ea != BADADDR) {
+            source.current_ea = candidate_ea;
+        }
     }
 }
 
@@ -721,9 +733,13 @@ static void resolve_viewer_fallback_source(ContextSourceData& source) {
 
 static void populate_code_context_json(const ContextSourceData& source, xsql::json& out_code_context) {
     if (source.current_ea != BADADDR) {
+        // `has_address` is the documented boolean guard (ui-context skill concept:
+        // a concrete code anchor is present); `addr` is the canonical address value
+        // key. The guard keys (`has_address`/`is_address`) are conceptual field names
+        // and are intentionally not renamed to match the `addr` value key.
         xsql::json code_context = {
             {"has_address", true},
-            {"address", format_ea_hex(source.current_ea)}
+            {"addr", format_ea_hex(source.current_ea)}
         };
 
         if (func_t* current_func = get_func(source.current_ea); current_func != nullptr) {
@@ -783,7 +799,29 @@ static xsql::json build_ui_context_json(const ContextSourceData& source, const C
         category = widget_category_name(widget_category(source.widget_type));
     }
 
+    // The main (address) viewer is distinct from the focused widget: a focused
+    // chooser sits on top of an underlying listing view. Describe the viewer from
+    // source.viewer so main_viewer is not merely a copy of focused_widget.
+    xsql::json mv_type_id = type_id;
+    std::string mv_type_name = type_name;
+    std::string mv_canonical_name = canonical_name;
+    std::string mv_category = category;
+    bool mv_is_custom_view = is_custom_view;
+    bool mv_is_address = is_address;
+    if (source.viewer != nullptr) {
+        const twidget_type_t vt = get_widget_type(source.viewer);
+        mv_type_id = static_cast<int>(vt);
+        mv_type_name = widget_type_name_or_unknown(vt);
+        mv_canonical_name = widget_canonical_name(vt);
+        mv_category = widget_category_name(widget_category(vt));
+        mv_is_custom_view = is_custom_view_widget_type(vt);
+        mv_is_address = is_address_widget_type(vt);
+    }
+
     xsql::json result = {
+        // Mirror the CLI stub's top-level shape (which carries available=false), so a
+        // client can key on `available` in both GUI and CLI/idalib mode.
+        {"available", true},
         {"capture", {
             {"source", capture.source},
             {"fresh", capture.fresh},
@@ -802,13 +840,13 @@ static xsql::json build_ui_context_json(const ContextSourceData& source, const C
             {"is_address", is_address}
         }},
         {"main_viewer", {
-            {"type_id", type_id},
-            {"type_name", type_name},
-            {"canonical_name", canonical_name},
-            {"category", category},
+            {"type_id", mv_type_id},
+            {"type_name", mv_type_name},
+            {"canonical_name", mv_canonical_name},
+            {"category", mv_category},
             {"title", source.have_title ? source.widget_title : std::string()},
-            {"is_custom_view", is_custom_view},
-            {"is_address", is_address}
+            {"is_custom_view", mv_is_custom_view},
+            {"is_address", mv_is_address}
         }},
         {"code_context", xsql::json::object()},
         {"selection", nullptr}
@@ -915,10 +953,17 @@ void sql_get_ui_context_json(xsql::FunctionContext& ctx, int argc, xsql::Functio
     // No UI under idalib/CLI — return the friendly stub instead of touching the
     // GUI-only capture path.
     if (idasql_is_ida_library()) {
-        ctx.result_text(cli_unavailable_context_json().dump());
+        ctx.result_text(cli_unavailable_context_json().dump(
+            -1, ' ', false, xsql::json::error_handler_t::replace));
         return;
     }
-    ctx.result_text(get_ui_context_json().dump());
+    // error_handler_t::replace: the live context carries binary-derived strings
+    // (disasm previews, widget titles, function/chooser names) that may hold
+    // non-UTF-8 bytes. Default dump() THROWS on those, and this runs inside a SQLite
+    // scalar callback with no try/catch — the exception would unwind through SQLite's
+    // C frames (UB/terminate in IDA). Replace substitutes U+FFFD so dump never throws.
+    ctx.result_text(get_ui_context_json().dump(
+        -1, ' ', false, xsql::json::error_handler_t::replace));
 }
 
 } // namespace

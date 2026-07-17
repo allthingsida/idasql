@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "entities_search.hpp"
 
@@ -93,7 +92,7 @@ bool EntityGenerator::next() {
         }
         current_source_ = static_cast<EntitySource>(static_cast<int>(current_source_) + 1);
         current_index_ = 0;
-        type_ordinal_ = 0;
+        type_ordinal_ = 1;  // valid local-type ordinals are 1..get_ordinal_limit()-1
         member_index_ = 0;
     }
     return false;
@@ -194,8 +193,8 @@ bool EntityGenerator::advance_segments() {
 }
 
 bool EntityGenerator::advance_types_of_kind(const char* kind, bool want_struct, bool want_union, bool want_enum) {
-    uint32 count = get_ordinal_count(nullptr);
-    while (type_ordinal_ < count) {
+    uint32 limit = get_ordinal_limit(nullptr);  // valid ordinals are 1..limit-1
+    while (type_ordinal_ < limit) {
         uint32 ord = type_ordinal_++;
         tinfo_t tif;
         if (!tif.get_numbered_type(nullptr, ord)) continue;
@@ -231,9 +230,9 @@ bool EntityGenerator::advance_unions()  { return advance_types_of_kind("union", 
 bool EntityGenerator::advance_enums()   { return advance_types_of_kind("enum", false, false, true); }
 
 bool EntityGenerator::advance_members() {
-    uint32 count = get_ordinal_count(nullptr);
+    uint32 limit = get_ordinal_limit(nullptr);  // valid ordinals are 1..limit-1
 
-    while (type_ordinal_ < count) {
+    while (type_ordinal_ < limit) {
         if (!current_type_.get_numbered_type(nullptr, type_ordinal_)) {
             type_ordinal_++;
             member_index_ = 0;
@@ -279,9 +278,9 @@ bool EntityGenerator::advance_members() {
 }
 
 bool EntityGenerator::advance_enum_members() {
-    uint32 count = get_ordinal_count(nullptr);
+    uint32 limit = get_ordinal_limit(nullptr);  // valid ordinals are 1..limit-1
 
-    while (type_ordinal_ < count) {
+    while (type_ordinal_ < limit) {
         if (!current_type_.get_numbered_type(nullptr, type_ordinal_)) {
             type_ordinal_++;
             member_index_ = 0;
@@ -400,7 +399,7 @@ VTableDef define_grep() {
         .column_text("pattern", [](size_t) -> std::string { return ""; })
         .column_text("name", [](size_t) -> std::string { return ""; })
         .column_text("kind", [](size_t) -> std::string { return ""; })
-        .column_int64("address", [](size_t) -> int64_t { return 0; })
+        .column_int64("addr", [](size_t) -> int64_t { return 0; })
         .column_int64("ordinal", [](size_t) -> int64_t { return 0; })
         .column_text("parent_name", [](size_t) -> std::string { return ""; })
         .column_text("full_name", [](size_t) -> std::string { return ""; })

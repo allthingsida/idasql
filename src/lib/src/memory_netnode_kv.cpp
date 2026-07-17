@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "memory_netnode_kv.hpp"
 
@@ -112,6 +111,7 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
 
           NetnodeKvRow row;
           row.key = key_buf.c_str();
+          row.entry_id = entry_id;
 
           netnode entry(entry_id);
           qstring blob;
@@ -160,6 +160,15 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
               xsql::set_vtab_error("netnode_kv: failed to update key '" + row.key + "'");
             return ok;
           })
+      // Stable rowid = the entry netnode index. This is the SAME id the keyed
+      // filter iterator (NetnodeKvKeyIterator::rowid) and row_lookup use, so the
+      // full-scan rowid round-trips through the entry_id-keyed row_lookup below.
+      // A full-scan multi-row DELETE (e.g. WHERE key LIKE 'tag:%') therefore
+      // resolves each row by its own entry_id instead of a cache position that
+      // shifts as earlier rows are removed.
+      .rowid([](const NetnodeKvRow &row) -> int64_t {
+        return static_cast<int64_t>(row.entry_id);
+      })
       .row_lookup([](NetnodeKvRow &row, int64_t raw_rowid) -> bool {
         netnode master = get_netnode_kv_master(false);
         if (master == BADNODE)
@@ -169,6 +178,7 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
         if (master.supstr(&key_buf, entry_id) <= 0)
           return false;
         row.key = key_buf.c_str();
+        row.entry_id = entry_id;
         netnode entry(entry_id);
         qstring blob;
         if (entry.getblob(&blob, 0, stag) >= 0)
@@ -199,6 +209,16 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
         if (!key || !key[0])
           return false;
 
+        // The key is stored both as a hash index and (verbatim) as a supval
+        // value in the reverse index; supval objects are capped at MAXSPECSIZE.
+        // An oversized key would make the store silently fail, so reject it.
+        if (strlen(key) >= static_cast<size_t>(MAXSPECSIZE)) {
+          xsql::set_vtab_error(
+              "netnode_kv: key too long (max " + std::to_string(MAXSPECSIZE - 1) +
+              " bytes)");
+          return false;
+        }
+
         const char *val = "";
         if (argc > 1 && !argv[1].is_null()) {
           val = argv[1].as_c_str();
@@ -215,7 +235,12 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
         nodeidx_t existing = master.hashval_long(key);
         if (existing != 0) {
           netnode entry(existing);
-          entry.setblob(val, len, 0, stag);
+          if (!entry.setblob(val, len, 0, stag)) {
+            xsql::set_vtab_error(
+                "netnode_kv: failed to store value for key '" +
+                std::string(key) + "'");
+            return false;
+          }
           return true;
         }
 
@@ -224,10 +249,19 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
         if (!entry.create())
           return false;
 
-        entry.setblob(val, len, 0, stag);
         nodeidx_t entry_id = static_cast<nodeidx_t>(entry);
-        master.hashset(key, entry_id);
-        master.supset(entry_id, key); // reverse index for O(1) row_lookup
+        // Roll back the freshly-created entry netnode on any storage-write
+        // failure so we never leak a dangling entry or a half-wired index.
+        if (!entry.setblob(val, len, 0, stag) || !master.hashset(key, entry_id) ||
+            !master.supset(entry_id, key)) {
+          entry.kill();
+          master.hashdel(key);
+          master.supdel(entry_id);
+          xsql::set_vtab_error(
+              "netnode_kv: failed to store entry for key '" + std::string(key) +
+              "'");
+          return false;
+        }
         return true;
       })
       .filter_eq_text(

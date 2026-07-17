@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * idasql_plugin - IDA plugin providing SQL interface to IDA databases
@@ -105,17 +104,27 @@ struct batch_guard_t {
     ~batch_guard_t() { batch = prev; }
 };
 
+// The engine-serialization mutex is acquired INSIDE execute() (which always runs
+// on the main thread via execute_sync), never around the execute_sync round-trip.
+// Holding it across execute_sync would deadlock: an HTTP worker would keep the
+// lock while blocked waiting for the main thread, and if the main thread (CLI
+// Enter -> process_line) then tries the same path it blocks on the lock and never
+// pumps the worker's queued request -> permanent IDA freeze. Taking it here keeps
+// the two HTTP workers serialized (both funnel through the main thread) without
+// ever holding it off the main thread.
 struct query_request_t : public exec_request_t
 {
     idasql::QueryEngine* engine;
+    std::mutex* exec_mutex;
     std::string sql;
     idasql::QueryResult result;
 
-    query_request_t(idasql::QueryEngine* e, const std::string& s)
-        : engine(e), sql(s) {}
+    query_request_t(idasql::QueryEngine* e, std::mutex* m, const std::string& s)
+        : engine(e), exec_mutex(m), sql(s) {}
 
     virtual ssize_t idaapi execute() override
     {
+        std::lock_guard<std::mutex> exec_lock(*exec_mutex);
         batch_guard_t bg;
         result = engine->query(sql);
         return result.success ? 0 : -1;
@@ -125,14 +134,16 @@ struct query_request_t : public exec_request_t
 struct query_script_request_t : public exec_request_t
 {
     idasql::QueryEngine* engine;
+    std::mutex* exec_mutex;
     std::string sql;
     xsql::ScriptResult result;
 
-    query_script_request_t(idasql::QueryEngine* e, const std::string& s)
-        : engine(e), sql(s) {}
+    query_script_request_t(idasql::QueryEngine* e, std::mutex* m, const std::string& s)
+        : engine(e), exec_mutex(m), sql(s) {}
 
     virtual ssize_t idaapi execute() override
     {
+        std::lock_guard<std::mutex> exec_lock(*exec_mutex);
         batch_guard_t bg;
         result = idasql::run_sql_script(
             sql,
@@ -165,15 +176,16 @@ struct idasql_plugmod_t : public plugmod_t
 
     idasql::QueryResult run_query_sync(const std::string& sql)
     {
-        std::lock_guard<std::mutex> exec_lock(query_exec_mutex_);
-
+        // query_exec_mutex_ is taken inside the request's execute() (on the main
+        // thread), NOT around execute_sync — see the request structs above for
+        // why holding it across the main-thread round-trip deadlocks.
         {
             std::lock_guard<std::mutex> lock(query_meta_mutex_);
             active_query_ = sql;
             active_query_started_ = std::chrono::steady_clock::now();
         }
 
-        query_request_t req(engine_.get(), sql);
+        query_request_t req(engine_.get(), &query_exec_mutex_, sql);
         execute_sync(req, MFF_WRITE);
 
         {
@@ -187,15 +199,16 @@ struct idasql_plugmod_t : public plugmod_t
 
     xsql::ScriptResult run_query_script_sync(const std::string& sql)
     {
-        std::lock_guard<std::mutex> exec_lock(query_exec_mutex_);
-
+        // query_exec_mutex_ is taken inside the request's execute() (on the main
+        // thread), NOT around execute_sync — see the request structs above for
+        // why holding it across the main-thread round-trip deadlocks.
         {
             std::lock_guard<std::mutex> lock(query_meta_mutex_);
             active_query_ = sql;
             active_query_started_ = std::chrono::steady_clock::now();
         }
 
-        query_script_request_t req(engine_.get(), sql);
+        query_script_request_t req(engine_.get(), &query_exec_mutex_, sql);
         execute_sync(req, MFF_WRITE);
 
         {
@@ -269,8 +282,9 @@ struct idasql_plugmod_t : public plugmod_t
                 }
             };
 
-            cli_->session().callbacks().http_start = [this](int port, const std::string& bind_addr) -> std::string {
-                return start_http_server(port, bind_addr);
+            cli_->session().callbacks().http_start = [this](int port, const std::string& bind_addr,
+                                                            const std::string& token) -> std::string {
+                return start_http_server(port, bind_addr, token);
             };
 
             cli_->session().callbacks().http_stop = [this]() -> std::string {
@@ -294,12 +308,14 @@ struct idasql_plugmod_t : public plugmod_t
             // on open. start_*_server() is non-blocking here and no-ops if a
             // server is already running.
             idasql::autostart::PinConfig pin = idasql::autostart::load();
-            if (pin.http.enabled && pin.http.port) {
+            if (pin.http.enabled) {
+                // port may be 0 -> start_http_server allocates a fresh random
+                // port through the normal start path.
                 msg("IDASQL: autostart -> %s\n",
-                    start_http_server(pin.http.port, pin.http.host).c_str());
+                    start_http_server(pin.http.port, pin.http.host, pin.http.token).c_str());
             }
 #ifdef IDASQL_HAS_MCP
-            if (pin.mcp.enabled && pin.mcp.port) {
+            if (pin.mcp.enabled) {
                 msg("IDASQL: autostart -> %s\n",
                     start_mcp_server(pin.mcp.port, pin.mcp.host).c_str());
             }
@@ -316,15 +332,11 @@ struct idasql_plugmod_t : public plugmod_t
             return idasql::format_mcp_status(mcp_server_.port(), true, mcp_server_.bind_addr());
         }
 
-        // With no explicit port, fall back to the pinned host/port if one is set.
+        // With no explicit port, fall back to the pinned host/port (shared
+        // rule; see autostart::apply_pin_fallback).
         std::string addr = bind_addr;
-        if (req_port == 0) {
-            idasql::autostart::PinConfig pin = idasql::autostart::load();
-            if (pin.mcp.port != 0) {
-                req_port = pin.mcp.port;
-                addr = pin.mcp.host;
-            }
-        }
+        idasql::autostart::apply_pin_fallback(
+            idasql::autostart::load().mcp, req_port, addr);
 
         // SQL executor that uses execute_sync for thread safety
         auto sql_executor = [this](const std::string& sql) -> std::string {
@@ -335,52 +347,52 @@ struct idasql_plugmod_t : public plugmod_t
         // Start MCP server
         int port = mcp_server_.start(req_port, sql_executor, addr);
         if (port <= 0) {
-            return "Error: Failed to start MCP server";
+            return "Error: Failed to start MCP server on " + addr + ":"
+                   + std::to_string(req_port)
+                   + " (port may be in use; try a different port or interface).";
         }
+
+        // Copy the paste-ready MCP client config to the clipboard on a fresh start.
+        (void)xsql::thinclient::try_copy_text_to_clipboard_windows(
+            xsql::thinclient::build_mcp_clipboard_payload(
+                "idasql", mcp_server_.bind_addr(), port));
 
         return idasql::format_mcp_info(port, mcp_server_.bind_addr());
     }
 #endif
 
-    std::string start_http_server(int req_port = 0, const std::string& bind_addr = "127.0.0.1")
+    std::string start_http_server(int req_port = 0, const std::string& bind_addr = "127.0.0.1",
+                                  const std::string& token = "")
     {
         if (http_server_.is_running()) {
             return idasql::format_http_status(http_server_.port(), true, http_server_.bind_addr());
         }
 
-        // With no explicit port, fall back to the pinned host/port if one is set.
+        // With no explicit port, fall back to the pinned host/port/token (shared
+        // rule; see autostart::apply_pin_fallback).
         std::string addr = bind_addr;
-        if (req_port == 0) {
-            idasql::autostart::PinConfig pin = idasql::autostart::load();
-            if (pin.http.port != 0) {
-                req_port = pin.http.port;
-                addr = pin.http.host;
-            }
-        }
+        std::string auth_token = token;
+        idasql::autostart::apply_pin_fallback(
+            idasql::autostart::load().http, req_port, addr, &auth_token);
 
-        // Single-statement executor: each statement runs on IDA's main thread
-        // via execute_sync (Hex-Rays thread affinity). The thinclient owns
-        // multi-statement orchestration, options, and formatting; non-queue +
-        // serialize_requests keeps requests one-at-a-time.
-        idasql::HTTPStatementExecutor sql_exec =
-            [this](const std::string& stmt, xsql::ScriptStatementResult& out) {
-                query_request_t req(engine_.get(), stmt);
-                execute_sync(req, MFF_WRITE);
-                const idasql::QueryResult& r = req.result;
-                out.columns = r.columns;
-                out.rows.reserve(r.rows.size());
-                for (const auto& row : r.rows) out.rows.push_back(row.values);
-                out.elapsed_ms = static_cast<double>(r.elapsed_ms);
-                out.success = r.success;
-                out.error = r.error;
-            };
+        // SQL executor that uses execute_sync for thread safety and returns JSON
+        idasql::HTTPQueryCallback sql_cb = [this](const std::string& sql) -> std::string {
+            xsql::ScriptResult result = run_query_script_sync(sql);
+            return xsql::script_result_to_json(result);
+        };
 
-        // Start HTTP server, no queue (plugin mode; execute_sync marshals each
-        // statement to the main thread).
-        int port = http_server_.start(req_port, sql_exec, addr, /*use_queue=*/false);
+        // Start HTTP server, no queue (plugin mode)
+        int port = http_server_.start(req_port, sql_cb, addr, /*use_queue=*/false, auth_token);
         if (port <= 0) {
-            return "Error: Failed to start HTTP server";
+            return "Error: Failed to start HTTP server on " + addr + ":"
+                   + std::to_string(req_port)
+                   + " (port may be in use; try a different port or interface).";
         }
+
+        // Copy the paste-ready connection payload to the clipboard on a fresh start.
+        (void)xsql::thinclient::try_copy_text_to_clipboard_windows(
+            xsql::thinclient::build_http_clipboard_payload(
+                "idasql", http_server_.bind_addr(), port));
 
         return idasql::format_http_info(
             port, http_server_.bind_addr(), "Type '.http stop' to stop the server.");

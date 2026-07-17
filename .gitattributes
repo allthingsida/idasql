@@ -29,5 +29,5 @@ CMakeLists.txt text eol=lf
 *.gif binary
 *.ico binary
 # Excluded from `git archive` (and thus from /publish to the public repo):
-# AGENTS.md is private agent guidance, kept in the monorepo source only.
+# AGENTS.md is private agent guidance, kept in source only; export-ignored from releases.
 AGENTS.md export-ignore

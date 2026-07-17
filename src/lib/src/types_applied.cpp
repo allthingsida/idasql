@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "types_applied.hpp"
 
@@ -147,27 +146,48 @@ bool apply_applied_type_constraint(
         AppliedTypeBounds& bounds,
         const xsql::GeneratorConstraintArg& arg,
         std::string* error) {
-    ea_t ea = BADADDR;
-    if (!resolve_address_value(arg.value, "address", ea, error)) {
-        return false;
-    }
     switch (arg.op) {
     case xsql::ConstraintOp::Eq:
+    {
+        ea_t ea = BADADDR;
+        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
         tighten_applied_lower(bounds, ea, true);
         tighten_applied_upper(bounds, ea, true);
         break;
+    }
     case xsql::ConstraintOp::Gt:
+    {
+        ea_t ea = BADADDR;
+        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
         tighten_applied_lower(bounds, ea, false);
         break;
+    }
     case xsql::ConstraintOp::Ge:
+    {
+        ea_t ea = BADADDR;
+        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
         tighten_applied_lower(bounds, ea, true);
         break;
+    }
     case xsql::ConstraintOp::Lt:
+    {
+        ea_t ea = BADADDR;
+        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
         tighten_applied_upper(bounds, ea, false);
         break;
+    }
     case xsql::ConstraintOp::Le:
+    {
+        ea_t ea = BADADDR;
+        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
         tighten_applied_upper(bounds, ea, true);
         break;
+    }
+    case xsql::ConstraintOp::Like:
+        if (error) {
+            *error = "applied_types: internal error: LIKE constraint routed to numeric addr bounds";
+        }
+        return false;
     }
     return true;
 }
@@ -244,7 +264,7 @@ GeneratorTableDef<AppliedTypeEntry> define_applied_types() {
             return std::make_unique<AppliedTypesGenerator>(
                 AppliedTypeOrder::Asc, AppliedTypeBounds{}, false);
         })
-        .column_int64("address", [](const AppliedTypeEntry& row) -> int64_t {
+        .column_int64("addr", [](const AppliedTypeEntry& row) -> int64_t {
             return static_cast<int64_t>(row.ea);
         })
         .column_rw("decl", xsql::ColumnType::Text,
@@ -285,30 +305,30 @@ GeneratorTableDef<AppliedTypeEntry> define_applied_types() {
             return true;
         })
         .constraint_filter(
-            {xsql::required_eq("address", "")},
+            {xsql::required_eq("addr", "")},
             [](const std::vector<xsql::GeneratorConstraintArg>& args)
                 -> std::unique_ptr<xsql::Generator<AppliedTypeEntry>> {
                 return make_applied_types_generator(AppliedTypeOrder::Asc, args, true);
             },
             1.0, 1.0)
         .constraint_filter(
-            {xsql::optional_ge("address"), xsql::optional_gt("address"),
-             xsql::optional_lt("address"), xsql::optional_le("address")},
+            {xsql::optional_ge("addr"), xsql::optional_gt("addr"),
+             xsql::optional_lt("addr"), xsql::optional_le("addr")},
             [](const std::vector<xsql::GeneratorConstraintArg>& args)
                 -> std::unique_ptr<xsql::Generator<AppliedTypeEntry>> {
                 return make_applied_types_generator(AppliedTypeOrder::Asc, args, false);
             },
             10.0, 100.0)
-        .order_by_consumed("address")
+        .order_by_consumed("addr")
         .constraint_filter(
-            {xsql::optional_ge("address"), xsql::optional_gt("address"),
-             xsql::optional_lt("address"), xsql::optional_le("address")},
+            {xsql::optional_ge("addr"), xsql::optional_gt("addr"),
+             xsql::optional_lt("addr"), xsql::optional_le("addr")},
             [](const std::vector<xsql::GeneratorConstraintArg>& args)
                 -> std::unique_ptr<xsql::Generator<AppliedTypeEntry>> {
                 return make_applied_types_generator(AppliedTypeOrder::Desc, args, false);
             },
             10.0, 100.0)
-        .order_by_consumed("address", true)
+        .order_by_consumed("addr", true)
         .deletable([](AppliedTypeEntry& row) -> bool {
             if (!is_mapped_address(row.ea)) {
                 xsql::set_vtab_error("applied_types: address is not mapped: " +
@@ -326,7 +346,7 @@ GeneratorTableDef<AppliedTypeEntry> define_applied_types() {
             }
             ea_t ea = BADADDR;
             std::string error;
-            if (!resolve_address_value(argv[0], "address", ea, &error)) {
+            if (!resolve_address_value(argv[0], "addr", ea, &error)) {
                 xsql::set_vtab_error(error);
                 return false;
             }

@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * decompiler.hpp - Hex-Rays decompiler virtual tables (pseudocode, ctree, lvars, call args)
@@ -59,8 +58,9 @@ bool init_hexrays();
 // Safe to call even if Hex-Rays is unavailable or ea is not in a function.
 void invalidate_decompiler_cache(ea_t ea);
 
-// Apply an explicit callee type to one call site.
-bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif);
+// Apply an explicit callee type to one call site. `name` is the user-defined call's
+// display name (must be non-empty; defaults to a safe placeholder when not supplied).
+bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif, const char* name = nullptr);
 
 // Clear an explicit callee type at one call site.
 bool clear_callee_tinfo_at(ea_t call_ea);
@@ -68,8 +68,9 @@ bool clear_callee_tinfo_at(ea_t call_ea);
 // Read explicit operand/call-site type info from a call instruction.
 bool get_callee_tinfo_at(ea_t call_ea, tinfo_t& out_tif);
 
-// Parse a callee declaration into a function tinfo.
-bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif);
+// Parse a callee declaration into a function tinfo. If `out_name` is non-null it
+// receives the parsed function name (used as the user-defined call's display name).
+bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif, qstring* out_name = nullptr);
 
 // Read stored argument-loader addresses for a call site.
 bool get_call_arg_addrs(ea_t call_ea, eavec_t& out_addrs);
@@ -266,9 +267,6 @@ void collect_all_lvars(std::vector<LvarInfo>& vars);
 // Collect ctree items for a single function
 bool collect_ctree(std::vector<CtreeItem>& items, ea_t func_addr);
 
-// Collect ctree for all functions
-void collect_all_ctree(std::vector<CtreeItem>& items);
-
 // Collect ctree labels for a single function
 bool collect_ctree_labels(std::vector<CtreeLabelInfo>& rows, ea_t func_addr);
 
@@ -277,9 +275,6 @@ void collect_all_ctree_labels(std::vector<CtreeLabelInfo>& rows);
 
 // Collect call args for a single function
 bool collect_call_args(std::vector<CallArgInfo>& args, ea_t func_addr);
-
-// Collect call args for all functions
-void collect_all_call_args(std::vector<CallArgInfo>& args);
 
 // ============================================================================
 // Collector Visitors
@@ -300,10 +295,28 @@ struct ctree_collector_t : public ctree_parentee_t {
     void resolve_child_ids();
 };
 
-// Call args collector visitor
+// Call args collector visitor.
+//
+// Two-pass: ids are assigned ONLY at visit time (single pass over the ctree,
+// identical to ctree_collector_t's scheme), so call_item_id / arg_item_id match
+// the corresponding ctree.item_id. During the walk we record each call site and
+// its argument expr pointers WITHOUT resolving ids (an arg's cexpr_t is visited
+// -- and numbered -- only after its parent cot_call). After apply_to() completes,
+// finalize() emits the CallArgInfo rows, resolving ids from the completed
+// item_ids map.
 struct call_args_collector_t : public ctree_parentee_t {
+    // One captured call site awaiting id resolution in finalize().
+    struct PendingCall {
+        cexpr_t* call = nullptr;        // the cot_call expr (its id -> call_item_id)
+        ea_t call_ea = BADADDR;
+        std::string call_obj_name;
+        std::string call_helper_name;
+        std::vector<const carg_t*> arg_ptrs;  // per-arg expr pointer (its id -> arg_item_id)
+    };
+
     std::vector<CallArgInfo>& args;
     std::map<citem_t*, int> item_ids;
+    std::vector<PendingCall> pending_calls;
     cfunc_t* cfunc;
     ea_t func_addr;
     int next_id;
@@ -312,6 +325,9 @@ struct call_args_collector_t : public ctree_parentee_t {
 
     int idaapi visit_insn(cinsn_t* insn) override;
     int idaapi visit_expr(cexpr_t* expr) override;
+
+    // Resolve captured call sites into CallArgInfo rows. Call after apply_to().
+    void finalize();
 };
 
 // ============================================================================

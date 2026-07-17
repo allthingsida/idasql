@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "memory_heads.hpp"
 
@@ -162,23 +161,41 @@ public:
 
 void apply_head_constraint(HeadBounds &bounds,
                            const xsql::GeneratorConstraintArg &arg) {
-  const ea_t ea = normalize_sql_ea(arg.value.as_int64());
   switch (arg.op) {
   case xsql::ConstraintOp::Eq:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_lower_bound(bounds, ea, true);
     tighten_upper_bound(bounds, ea, true);
     break;
+  }
   case xsql::ConstraintOp::Gt:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_lower_bound(bounds, ea, false);
     break;
+  }
   case xsql::ConstraintOp::Ge:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_lower_bound(bounds, ea, true);
     break;
+  }
   case xsql::ConstraintOp::Lt:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_upper_bound(bounds, ea, false);
     break;
+  }
   case xsql::ConstraintOp::Le:
+  {
+    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
     tighten_upper_bound(bounds, ea, true);
+    break;
+  }
+  case xsql::ConstraintOp::Like:
+    xsql::set_vtab_error(
+        "heads: internal error: LIKE constraint routed to numeric addr bounds");
     break;
   }
 }
@@ -202,7 +219,7 @@ GeneratorTableDef<HeadRow> define_heads() {
       .generator([]() -> std::unique_ptr<xsql::Generator<HeadRow>> {
         return std::make_unique<HeadsGenerator>(HeadOrder::Asc, HeadBounds{});
       })
-      .column_int64("address",
+      .column_int64("addr",
                     [](const HeadRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
                     })
@@ -226,30 +243,30 @@ GeneratorTableDef<HeadRow> define_heads() {
                      return line.c_str();
                    })
       .constraint_filter(
-          {xsql::required_eq("address", "")},
+          {xsql::required_eq("addr", "")},
           [](const std::vector<xsql::GeneratorConstraintArg> &args)
               -> std::unique_ptr<xsql::Generator<HeadRow>> {
             return make_heads_generator(HeadOrder::Asc, args);
           },
           1.0, 1.0)
       .constraint_filter(
-          {xsql::optional_ge("address"), xsql::optional_gt("address"),
-           xsql::optional_lt("address"), xsql::optional_le("address")},
+          {xsql::optional_ge("addr"), xsql::optional_gt("addr"),
+           xsql::optional_lt("addr"), xsql::optional_le("addr")},
           [](const std::vector<xsql::GeneratorConstraintArg> &args)
               -> std::unique_ptr<xsql::Generator<HeadRow>> {
             return make_heads_generator(HeadOrder::Asc, args);
           },
           10.0, 100.0)
-      .order_by_consumed("address")
+      .order_by_consumed("addr")
       .constraint_filter(
-          {xsql::optional_ge("address"), xsql::optional_gt("address"),
-           xsql::optional_lt("address"), xsql::optional_le("address")},
+          {xsql::optional_ge("addr"), xsql::optional_gt("addr"),
+           xsql::optional_lt("addr"), xsql::optional_le("addr")},
           [](const std::vector<xsql::GeneratorConstraintArg> &args)
               -> std::unique_ptr<xsql::Generator<HeadRow>> {
             return make_heads_generator(HeadOrder::Desc, args);
           },
           10.0, 100.0)
-      .order_by_consumed("address", true)
+      .order_by_consumed("addr", true)
       .build();
 }
 

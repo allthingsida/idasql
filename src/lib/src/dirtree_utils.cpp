@@ -1,5 +1,5 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 
 #include "dirtree_utils.hpp"
 
@@ -550,7 +550,11 @@ bool move_inode_to_folder(dirtree_id_t id, uint64_t inode,
                                dirtree_error(unlink_err));
           return false;
         }
-        tree->save();
+        if (!tree->save()) {
+          xsql::set_vtab_error(std::string(surface_name) +
+                               ": failed to save after unlink '" + source + "'");
+          return false;
+        }
       }
       return true;
     }
@@ -639,6 +643,16 @@ bool rename_folder(const StandardTreeInfo &info, std::string_view from,
   if (tree->isdir(dst.c_str()) || tree->isfile(dst.c_str())) {
     if (error)
       *error = "dirtree_folders: destination already exists: " + dst;
+    return false;
+  }
+
+  // Reject renaming a folder into its own descendant (e.g. a -> a/b/c). The
+  // rename would fail, and doing this check before ensure_folder() avoids
+  // leaving a freshly-created destination parent chain behind.
+  if (dst == src || dst.compare(0, src.size() + 1, src + "/") == 0) {
+    if (error)
+      *error = "dirtree_folders: cannot rename '" + src +
+               "' into its own descendant: " + dst;
     return false;
   }
 
@@ -741,6 +755,11 @@ GeneratorTableDef<DirtreeEntryRow> define_dirtree_entries() {
         collect_one(info);
     }
 
+    // Surface a tree load()/traverse() failure as a query error instead of
+    // silently returning zero rows.
+    if (!error.empty())
+      xsql::set_vtab_error(error);
+
     return std::make_unique<VectorEntryGenerator>(std::move(rows));
   };
 
@@ -801,6 +820,11 @@ GeneratorTableDef<DirtreeFolderRow> define_dirtree_folders() {
       for (const auto &info : standard_trees())
         collect_one(info);
     }
+
+    // Surface a tree load()/traverse() failure as a query error instead of
+    // silently returning zero rows.
+    if (!error.empty())
+      xsql::set_vtab_error(error);
 
     return std::make_unique<VectorFolderGenerator>(std::move(rows));
   };

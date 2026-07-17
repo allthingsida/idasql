@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "code_funcs.hpp"
 
@@ -45,6 +44,28 @@ bool update_function_comment(FuncRow &row, xsql::FunctionArg val,
   return ok;
 }
 
+// Invalidate the decompiler cache of every function that references `callee` via a
+// code xref (call/jump). A name or prototype change on `callee` changes how those
+// CALLERS render the call site, but invalidate_decompiler_cache(callee) only
+// refreshes the callee itself; a caller decompiled earlier in the session would keep
+// stale pseudocode (the same latent class the callee_type INTERR fix addressed, one
+// hop up). Cheap (marks dirty), safe when Hex-Rays is absent.
+static void invalidate_callers(ea_t callee) {
+  if (callee == BADADDR) {
+    return;
+  }
+  xrefblk_t xb;
+  for (bool ok = xb.first_to(callee, XREF_ALL); ok; ok = xb.next_to()) {
+    if (!xb.iscode) {
+      continue;
+    }
+    func_t *caller = get_func(xb.from);
+    if (caller != nullptr && caller->start_ea != callee) {
+      decompiler::invalidate_decompiler_cache(caller->start_ea);
+    }
+  }
+}
+
 // ============================================================================
 // FUNCS Table (with UPDATE/DELETE support)
 // ============================================================================
@@ -73,9 +94,21 @@ CachedTableDef<FuncRow> define_funcs() {
           }
         }
       })
+      // Stable rowid = the function's start_ea, matching the `addr` column. This
+      // makes full-scan and index cursors report a positional-independent rowid
+      // so a multi-row UPDATE/DELETE resolves each row by its own address --
+      // deleting one func never shifts another's rowid. row_lookup below resolves
+      // that rowid back to the live function by ea (get_func), NOT by ordinal.
+      .rowid([](const FuncRow &row) -> int64_t {
+        return static_cast<int64_t>(row.start_ea);
+      })
       .row_lookup([](FuncRow &row, int64_t rowid) -> bool {
-        func_t *f = getn_func(static_cast<size_t>(rowid));
-        if (!f)
+        // rowid is a start_ea (see .rowid above): resolve the function by its
+        // stable address, and require it to actually START there (get_func also
+        // succeeds for interior addresses / chunks -- a func whose start_ea is
+        // not `rowid` is a different function and must not be mutated).
+        func_t *f = get_func(static_cast<ea_t>(rowid));
+        if (!f || f->start_ea != static_cast<ea_t>(rowid))
           return false;
         row.start_ea = f->start_ea;
         row.original_name = safe_func_name(row.start_ea);
@@ -90,10 +123,18 @@ CachedTableDef<FuncRow> define_funcs() {
         }
         return true;
       })
-      .column_int64("address",
+      .column_int64("addr",
                     [](const FuncRow &row) -> int64_t {
                       return static_cast<int64_t>(row.start_ea);
                     })
+      // Per-cursor address index: JOINs probing funcs.addr (e.g. string_refs'
+      // func_name leg) reuse one cache per cursor instead of rebuilding the whole
+      // funcs cache on every probe (~49ms/probe at 22k funcs; a string_refs scan
+      // cost ~61s on a 22k-function database before this registration).
+      .index_on("addr",
+                [](const FuncRow &row) -> int64_t {
+                  return static_cast<int64_t>(row.start_ea);
+                })
       .column_text_rw(
           "name",
           [](const FuncRow &row) -> std::string {
@@ -107,8 +148,10 @@ CachedTableDef<FuncRow> define_funcs() {
             idasql_auto_wait();
             bool ok =
                 set_name(row.start_ea, requested_name.c_str(), SN_CHECK) != 0;
-            if (ok)
+            if (ok) {
               decompiler::invalidate_decompiler_cache(row.start_ea);
+              invalidate_callers(row.start_ea);
+            }
             idasql_auto_wait();
             return ok;
           })
@@ -136,8 +179,10 @@ CachedTableDef<FuncRow> define_funcs() {
             } else {
               ok = apply_cdecl(nullptr, row.start_ea, new_decl, 0);
             }
-            if (ok)
+            if (ok) {
               decompiler::invalidate_decompiler_cache(row.start_ea);
+              invalidate_callers(row.start_ea);
+            }
             idasql_auto_wait();
             return ok;
           })
@@ -162,7 +207,7 @@ CachedTableDef<FuncRow> define_funcs() {
                       func_t *f = get_func(row.start_ea);
                       return f ? static_cast<int64_t>(f->size()) : 0;
                     })
-      .column_int64("end_ea",
+      .column_int64("end_addr",
                     [](const FuncRow &row) -> int64_t {
                       func_t *f = get_func(row.start_ea);
                       return f ? static_cast<int64_t>(f->end_ea) : 0;
@@ -177,10 +222,28 @@ CachedTableDef<FuncRow> define_funcs() {
             func_t *f = get_func(row.start_ea);
             if (!f)
               return false;
-            f->flags = static_cast<ushort>(new_flags);
+            // Only a whitelisted subset of func_t::flags (a uint64) is safe to
+            // write; every other bit is preserved from the current value. In
+            // particular FUNC_TAIL and FUNC_RESERVED are structural and must
+            // never be set through this column.
+            static constexpr uint64 WRITABLE_MASK =
+                FUNC_NORET | FUNC_LIB | FUNC_STATICDEF | FUNC_FRAME |
+                FUNC_HIDDEN | FUNC_THUNK | FUNC_BOTTOMBP;
+            const uint64 requested = static_cast<uint64>(new_flags);
+            // Refuse if the write would change ANY non-writable bit (set or
+            // clear); all such bits are preserved from the current value.
+            if (((f->flags ^ requested) & ~WRITABLE_MASK) != 0) {
+              xsql::set_vtab_error(
+                  "funcs.flags: attempt to modify a non-writable bit at " +
+                  idasql::format_ea_hex(row.start_ea));
+              return false;
+            }
+            idasql_auto_wait();
+            f->flags = (f->flags & ~WRITABLE_MASK) | (requested & WRITABLE_MASK);
             bool ok = update_func(f);
             if (ok)
               decompiler::invalidate_decompiler_cache(row.start_ea);
+            idasql_auto_wait();
             return ok;
           })
       // Prototype columns - return type (lazy-computed, cached per row)
@@ -265,10 +328,12 @@ CachedTableDef<FuncRow> define_funcs() {
           return false;
 
         idasql_auto_wait();
-        // end_ea from col 4 if provided, else BADADDR (IDA auto-detects)
+        // Columns: 0 addr, 1 name, 2 prototype, 3 comment, 4 rpt_comment,
+        // 5 size, 6 end_addr, 7 flags.
+        // end_ea from col 6 if provided, else BADADDR (IDA auto-detects).
         ea_t end = BADADDR;
-        if (argc > 4 && !argv[4].is_null())
-          end = static_cast<ea_t>(argv[4].as_int64());
+        if (argc > 6 && !argv[6].is_null())
+          end = static_cast<ea_t>(argv[6].as_int64());
 
         bool ok = add_func(ea, end);
         idasql_auto_wait();
@@ -283,6 +348,38 @@ CachedTableDef<FuncRow> define_funcs() {
             set_name(ea, name, SN_CHECK);
         }
 
+        // Optional: apply prototype (col 2)
+        if (argc > 2 && !argv[2].is_null()) {
+          const char *decl = argv[2].as_c_str();
+          if (decl && decl[0])
+            apply_cdecl(nullptr, ea, decl, 0);
+        }
+
+        func_t *f = get_func(ea);
+        // Optional: regular comment (col 3) and repeatable comment (col 4)
+        if (f && argc > 3 && !argv[3].is_null()) {
+          const char *cmt = argv[3].as_c_str();
+          if (cmt)
+            set_func_cmt(f, cmt, false);
+        }
+        if (f && argc > 4 && !argv[4].is_null()) {
+          const char *rpt = argv[4].as_c_str();
+          if (rpt)
+            set_func_cmt(f, rpt, true);
+        }
+
+        // Optional: writable flags (col 7). Only the whitelisted, non-structural
+        // subset may be OR'd in; everything else is left as IDA analyzed it.
+        if (f && argc > 7 && !argv[7].is_null()) {
+          static constexpr uint64 WRITABLE_MASK =
+              FUNC_NORET | FUNC_LIB | FUNC_STATICDEF | FUNC_FRAME | FUNC_HIDDEN |
+              FUNC_THUNK | FUNC_BOTTOMBP;
+          const uint64 requested = static_cast<uint64>(argv[7].as_int64());
+          f->flags = (f->flags & ~WRITABLE_MASK) | (requested & WRITABLE_MASK);
+          update_func(f);
+        }
+
+        idasql_auto_wait();
         return true;
       })
       .build();

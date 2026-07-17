@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * example_grep_entities.cpp - Grep table composability examples
@@ -46,7 +45,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "=== Basic Search ===\n\n";
     auto result = session.query(
-        "SELECT name, kind, address, parent_name, full_name "
+        "SELECT name, kind, addr, parent_name, full_name "
         "FROM grep "
         "WHERE pattern = '" + escaped_pattern + "' "
         "ORDER BY kind, name "
@@ -69,9 +68,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\n=== Functions Only + JOIN funcs ===\n\n";
     auto funcs_only = session.query(
-        "SELECT g.name, f.size, printf('0x%X', f.address) as addr "
+        "SELECT g.name, f.size, printf('0x%X', f.addr) as addr "
         "FROM grep g "
-        "JOIN funcs f ON g.address = f.address "
+        "JOIN funcs f ON g.addr = f.addr "
         "WHERE g.pattern = '" + escaped_pattern + "' AND g.kind = 'function' "
         "ORDER BY f.size DESC "
         "LIMIT 10"

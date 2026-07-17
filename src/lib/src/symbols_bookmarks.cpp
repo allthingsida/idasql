@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "symbols_bookmarks.hpp"
 
@@ -16,51 +15,30 @@ namespace symbols {
 // BOOKMARKS Table (with UPDATE/DELETE support)
 // ============================================================================
 
-// Sentinel for "this store bookmark has no DIRTREE_IDAPLACE_BOOKMARKS leaf"
-// (a real dirtree inode == ea can legitimately be 0, so 0 cannot mean "none").
-static constexpr uint64_t kNoLeafInode = ~uint64_t(0);
-
 void collect_bookmark_rows(std::vector<BookmarkRow> &rows) {
   rows.clear();
 
-  // The bookmark store is the source of truth. Standard bookmark dirtrees key
-  // each leaf inode by the place's primary coordinate -- for idaplace that is
-  // the ea (the leaf is even named after the hex ea). So enumerate the store
-  // with the stable size()/get() API and overlay folder info from the dirtree,
-  // keyed by ea. No bookmarks_t::get_by_inode() needed (it is 9.3-only).
-  auto inode_paths = dirtrees::collect_inode_paths(DIRTREE_IDAPLACE_BOOKMARKS);
-
+  auto folder_paths = dirtrees::collect_inode_paths(DIRTREE_IDAPLACE_BOOKMARKS);
   idaplace_t idaplace(inf_get_min_ea(), 0);
   renderer_info_t rinfo;
-  lochist_entry_t probe(&idaplace, rinfo);
-  const uint32_t n = bookmarks_t::size(probe, nullptr);
+  lochist_entry_t loc(&idaplace, rinfo);
 
-  for (uint32_t slot = 0; slot < n; ++slot) {
+  for (const auto &entry_path : folder_paths) {
     idaplace_t place(0, 0);
     lochist_entry_t entry(&place, rinfo);
     qstring desc;
-    uint32_t idx = slot;
-    if (!bookmarks_t::get(&entry, &desc, &idx, nullptr) ||
-        entry.place() == nullptr)
-      continue;
-
-    BookmarkRow row;
-    row.index = slot;
-    row.ea = static_cast<idaplace_t *>(entry.place())->ea;
-    row.desc = desc.c_str();
-
-    // inode == ea for idaplace bookmarks. Two store slots can in principle share
-    // one ea (different lnnum); the dirtree can hold only one leaf per inode, so
-    // at most one folder mapping exists per coordinate -- matching get_by_inode.
-    auto it = inode_paths.find(static_cast<uint64_t>(row.ea));
-    if (it != inode_paths.end()) {
-      row.inode = it->first;  // real dirtree inode == ea
-      row.folder_path = it->second.folder_path;
-      row.full_path = it->second.full_path;
-    } else {
-      row.inode = kNoLeafInode;  // not linked into the dirtree
+    uint32_t index = bookmarks_t::get_by_inode(
+        &entry, &desc, static_cast<inode_t>(entry_path.first), nullptr);
+    if (index != BOOKMARKS_BAD_INDEX && entry.place() != nullptr) {
+      BookmarkRow row;
+      row.index = index;
+      row.ea = static_cast<idaplace_t *>(entry.place())->ea;
+      row.desc = desc.c_str();
+      row.inode = entry_path.first;
+      row.folder_path = entry_path.second.folder_path;
+      row.full_path = entry_path.second.full_path;
+      rows.push_back(std::move(row));
     }
-    rows.push_back(std::move(row));
   }
 }
 
@@ -100,7 +78,7 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
                   [](const BookmarkRow &row) -> int {
                     return static_cast<int>(row.index);
                   })
-      .column_int64("address",
+      .column_int64("addr",
                     [](const BookmarkRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
                     })
@@ -131,9 +109,8 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
             return row.folder_path;
           },
           [](BookmarkRow &row, xsql::FunctionArg value) -> bool {
-            if (row.inode == kNoLeafInode) {
-              xsql::set_vtab_error("bookmarks.folder_path: bookmark is not "
-                                   "linked into the dirtree");
+            if (row.inode == 0) {
+              xsql::set_vtab_error("bookmarks.folder_path: bookmark inode not found");
               return false;
             }
             std::string display = row.desc.empty()
@@ -157,10 +134,35 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
       })
       .deletable([](BookmarkRow &row) -> bool {
         idasql_auto_wait();
-        idaplace_t place(row.ea, 0);
+        // bookmarks_t::erase compacts the bookmark list, so the frozen
+        // scan-time row.index drifts after an earlier row in a multi-row DELETE
+        // is erased. Re-resolve the CURRENT index (and ea) by the stable inode
+        // -- the same get_by_inode call collect_bookmark_rows uses -- so each
+        // erase targets the bookmark identified at scan time regardless of
+        // prior compaction.
+        uint32_t index = row.index;
+        ea_t ea = row.ea;
+        if (row.inode != 0) {
+          renderer_info_t rinfo_lookup;
+          idaplace_t place_lookup(0, 0);
+          lochist_entry_t entry(&place_lookup, rinfo_lookup);
+          qstring desc;
+          uint32_t resolved = bookmarks_t::get_by_inode(
+              &entry, &desc, static_cast<inode_t>(row.inode), nullptr);
+          if (resolved == BOOKMARKS_BAD_INDEX || entry.place() == nullptr) {
+            xsql::set_vtab_error("bookmarks: bookmark inode " +
+                                 std::to_string(row.inode) +
+                                 " no longer exists");
+            idasql_auto_wait();
+            return false;
+          }
+          index = resolved;
+          ea = static_cast<idaplace_t *>(entry.place())->ea;
+        }
+        idaplace_t place(ea, 0);
         renderer_info_t rinfo;
         lochist_entry_t loc(&place, rinfo);
-        bool ok = bookmarks_t::erase(loc, row.index, nullptr);
+        bool ok = bookmarks_t::erase(loc, index, nullptr);
         idasql_auto_wait();
         return ok;
       })

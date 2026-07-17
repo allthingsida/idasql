@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "code_graph.hpp"
 
@@ -72,7 +71,9 @@ void get_function_callees(ea_t func_addr, std::vector<ea_t> &callees) {
     }
 
     xrefblk_t xb;
-    for (bool ok = xb.first_from(ea, XREF_ALL); ok; ok = xb.next_from()) {
+    // XREF_NOFLOW: keep call/jump code xrefs but skip ordinary fall-through
+    // flow xrefs, which would otherwise create phantom call edges.
+    for (bool ok = xb.first_from(ea, XREF_NOFLOW); ok; ok = xb.next_from()) {
       if (!xb.iscode)
         continue;
 
@@ -94,7 +95,9 @@ void get_function_callees(ea_t func_addr, std::vector<ea_t> &callees) {
 
 void get_function_callers(ea_t func_addr, std::vector<ea_t> &callers) {
   xrefblk_t xb;
-  for (bool ok = xb.first_to(func_addr, XREF_ALL); ok; ok = xb.next_to()) {
+  // XREF_NOFLOW: keep call/jump code xrefs but skip ordinary fall-through
+  // flow xrefs, which would otherwise create phantom caller edges.
+  for (bool ok = xb.first_to(func_addr, XREF_NOFLOW); ok; ok = xb.next_to()) {
     if (!xb.iscode)
       continue;
     func_t *caller_fn = get_func(xb.from);
@@ -129,7 +132,15 @@ public:
     queue.push({start_ea, 0, BADADDR});
     visited.insert(start_ea);
 
+    uint64_t scanned = 0;
     while (!queue.empty()) {
+      // Cooperative cancellation -- honor the query deadline on huge graphs.
+      if (((++scanned) & 4095u) == 0 && xsql::vtab_interrupted()) {
+        xsql::set_vtab_error(
+            "query interrupted: timeout while building call_graph");
+        results_.clear();
+        return;
+      }
       auto [func_ea, depth, parent] = queue.front();
       queue.pop();
 
@@ -273,6 +284,13 @@ public:
     ea_t meeting_point = BADADDR;
 
     for (int d = 0; d < max_depth && meeting_point == BADADDR; d++) {
+      // Cooperative cancellation -- honor the query deadline on huge graphs.
+      if (xsql::vtab_interrupted()) {
+        xsql::set_vtab_error(
+            "query interrupted: timeout while building shortest_path");
+        results_.clear();
+        return;
+      }
       // Expand forward frontier
       if (!forward_queue.empty()) {
         size_t fsize = forward_queue.size();

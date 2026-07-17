@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * example_breakpoints.cpp - Breakpoint management with IDASQL
@@ -55,7 +54,7 @@ int main(int argc, char* argv[]) {
     std::cout << "=== Existing Breakpoints ===\n";
 
     auto existing = session.query(
-        "SELECT printf('0x%08X', address) as addr, type_name, enabled, "
+        "SELECT printf('0x%08X', addr) as addr, type_name, enabled, "
         "       loc_type_name, condition, \"group\" "
         "FROM breakpoints"
     );
@@ -78,7 +77,7 @@ int main(int argc, char* argv[]) {
 
     // Get two function addresses to use
     auto funcs = session.query(
-        "SELECT address, name FROM funcs ORDER BY address LIMIT 2"
+        "SELECT addr, name FROM funcs ORDER BY addr LIMIT 2"
     );
 
     if (funcs.row_count() < 2) {
@@ -93,19 +92,19 @@ int main(int argc, char* argv[]) {
 
     // Insert a software breakpoint at the first function
     auto r1 = session.query(
-        "INSERT INTO breakpoints (address) VALUES (" + addr1 + ")"
+        "INSERT INTO breakpoints (addr) VALUES (" + addr1 + ")"
     );
     std::cout << "Added software breakpoint at " << name1 << "\n";
 
     // Insert a hardware write watchpoint at the second function
     auto r2 = session.query(
-        "INSERT INTO breakpoints (address, type, size) VALUES (" + addr2 + ", 1, 4)"
+        "INSERT INTO breakpoints (addr, type, size) VALUES (" + addr2 + ", 1, 4)"
     );
     std::cout << "Added hardware watchpoint at " << name2 << "\n";
 
     // Show what we have
     auto after_add = session.query(
-        "SELECT printf('0x%08X', address) as addr, type_name, enabled, size "
+        "SELECT printf('0x%08X', addr) as addr, type_name, enabled, size "
         "FROM breakpoints"
     );
 
@@ -131,11 +130,11 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Disabling Second Breakpoint ===\n";
 
     session.query(
-        "UPDATE breakpoints SET enabled = 0 WHERE address = " + addr2
+        "UPDATE breakpoints SET enabled = 0 WHERE addr = " + addr2
     );
 
     auto after_disable = session.query(
-        "SELECT printf('0x%08X', address) as addr, enabled, type_name "
+        "SELECT printf('0x%08X', addr) as addr, enabled, type_name "
         "FROM breakpoints"
     );
 
@@ -151,11 +150,11 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Deleting First Breakpoint ===\n";
 
     session.query(
-        "DELETE FROM breakpoints WHERE address = " + addr1
+        "DELETE FROM breakpoints WHERE addr = " + addr1
     );
 
     auto after_delete = session.query(
-        "SELECT printf('0x%08X', address) as addr, enabled, type_name, size "
+        "SELECT printf('0x%08X', addr) as addr, enabled, type_name, size "
         "FROM breakpoints"
     );
 
@@ -169,7 +168,7 @@ int main(int argc, char* argv[]) {
     // 5. Clean up
     // =========================================================================
 
-    session.query("DELETE FROM breakpoints WHERE address = " + addr2);
+    session.query("DELETE FROM breakpoints WHERE addr = " + addr2);
     std::cout << "\nCleaned up. Final count: "
               << session.scalar("SELECT COUNT(*) FROM breakpoints")
               << " breakpoints.\n";

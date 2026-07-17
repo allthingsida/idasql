@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "functions.hpp"
 
@@ -80,7 +79,7 @@ static void sql_disasm(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* 
     }
 
     ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+    if (!resolve_address_arg(ctx, argv, 0, "addr", ea)) {
         return;
     }
     int count = (argc >= 2) ? argv[1].as_int() : 1;
@@ -110,7 +109,7 @@ static void sql_disasm_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
     }
 
     ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+    if (!resolve_address_arg(ctx, argv, 0, "addr", ea)) {
         return;
     }
     int context = (argc >= 2) ? argv[1].as_int() : 0;
@@ -206,7 +205,7 @@ static void sql_disasm_func(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
     ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+    if (!resolve_address_arg(ctx, argv, 0, "addr", ea)) {
         return;
     }
     func_t* func = get_func(ea);
@@ -243,7 +242,7 @@ static void sql_load_file_bytes(xsql::FunctionContext& ctx, int argc, xsql::Func
     }
 
     ea_t start_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 2, "address", start_ea)) {
+    if (!resolve_address_arg(ctx, argv, 2, "addr", start_ea)) {
         return;
     }
 
@@ -338,7 +337,7 @@ static void sql_make_code(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
     }
 
     ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+    if (!resolve_address_arg(ctx, argv, 0, "addr", ea)) {
         return;
     }
     if (ea == BADADDR || ea == 0) {
@@ -401,10 +400,10 @@ static void sql_parse_decls(xsql::FunctionContext& ctx, int argc, xsql::Function
     ctx.result_int(errors == 0 ? 1 : 0);
 }
 
-// call_arg_addrs(call_ea) - Get persisted argument-loader addresses for a typed call site
+// call_arg_addrs(call_addr) - Get persisted argument-loader addresses for a typed call site
 static void sql_call_arg_addrs(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
-        ctx.result_error("call_arg_addrs requires 1 argument (call_ea)");
+        ctx.result_error("call_arg_addrs requires 1 argument (call_addr)");
         return;
     }
     if (!decompiler::hexrays_available()) {
@@ -413,7 +412,7 @@ static void sql_call_arg_addrs(xsql::FunctionContext& ctx, int argc, xsql::Funct
     }
 
     ea_t call_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "call_ea", call_ea)) {
+    if (!resolve_address_arg(ctx, argv, 0, "call_addr", call_ea)) {
         return;
     }
 
@@ -510,11 +509,12 @@ static std::string render_pseudocode(cfuncptr_t& cfunc) {
     std::unordered_set<std::string> ambiguous_names;
     lvars_t* lvars = cfunc->get_lvars();
     if (lvars) {
-        for (int i = 0; i < lvars->size(); i++) {
+        for (size_t i = 0; i < lvars->size(); i++) {
             const lvar_t& lv = (*lvars)[i];
             std::string name = lv.name.c_str();
             if (name.empty()) continue;
-            auto [it, inserted] = lvar_name_to_idx.emplace(name, i);
+            auto [it, inserted] =
+                lvar_name_to_idx.emplace(name, static_cast<int>(i));
             if (!inserted) {
                 ambiguous_names.insert(name);
             }
@@ -565,7 +565,7 @@ static void sql_decompile(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
     }
 
     ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+    if (!resolve_address_arg(ctx, argv, 0, "addr", ea)) {
         return;
     }
 
@@ -602,7 +602,7 @@ static void sql_decompile_2(xsql::FunctionContext& ctx, int argc, xsql::Function
     }
 
     ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+    if (!resolve_address_arg(ctx, argv, 0, "addr", ea)) {
         return;
     }
     int refresh = argv[1].as_int();
@@ -671,7 +671,7 @@ static void sql_gen_cfg_dot(xsql::FunctionContext& ctx, int argc, xsql::Function
     }
 
     ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+    if (!resolve_address_arg(ctx, argv, 0, "addr", ea)) {
         return;
     }
     func_t* func = get_func(ea);
@@ -708,7 +708,7 @@ static void sql_gen_cfg_dot(xsql::FunctionContext& ctx, int argc, xsql::Function
     // Emit edges
     for (int i = 0; i < fc.size(); i++) {
         const qbasic_block_t& bb = fc.blocks[i];
-        for (int j = 0; j < bb.succ.size(); j++) {
+        for (size_t j = 0; j < bb.succ.size(); j++) {
             dot << "  n" << i << " -> n" << bb.succ[j] << ";\n";
         }
     }
@@ -727,7 +727,7 @@ static void sql_gen_cfg_dot_file(xsql::FunctionContext& ctx, int argc, xsql::Fun
     }
 
     ea_t ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 0, "address", ea)) {
+    if (!resolve_address_arg(ctx, argv, 0, "addr", ea)) {
         return;
     }
     const char* path = argv[1].as_c_str();
@@ -774,7 +774,7 @@ static void sql_gen_cfg_dot_file(xsql::FunctionContext& ctx, int argc, xsql::Fun
     // Emit edges
     for (int i = 0; i < fc.size(); i++) {
         const qbasic_block_t& bb = fc.blocks[i];
-        for (int j = 0; j < bb.succ.size(); j++) {
+        for (size_t j = 0; j < bb.succ.size(); j++) {
             qfprintf(fp, "  n%d -> n%d;\n", i, bb.succ[j]);
         }
     }
@@ -798,6 +798,9 @@ static std::string escape_sql_text(const char* in) {
 // gen_schema_dot(db) - Generate DOT diagram of all tables
 // This uses SQLite introspection to build the schema
 static void sql_gen_schema_dot(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
+    (void)argc;
+    (void)argv;
+
     std::ostringstream dot;
     dot << "digraph IDASQL_Schema {\n";
     dot << "  rankdir=TB;\n";
@@ -987,11 +990,11 @@ static std::string sql_single_quote_escape(const std::string& text) {
 static std::string call_arg_resolution_hint_sql(ea_t func_addr, ea_t ea, int arg_idx) {
     std::ostringstream oss;
     oss
-        << "SELECT a.call_item_id, a.arg_idx, a.arg_item_id, a.call_ea AS ea, "
+        << "SELECT a.call_item_id, a.arg_idx, a.arg_item_id, a.call_addr AS addr, "
         << "COALESCE(NULLIF(a.call_obj_name,''), a.call_helper_name, '') AS callee "
         << "FROM ctree_call_args a "
         << "WHERE a.func_addr = " << static_cast<uint64_t>(func_addr)
-        << " AND a.call_ea = " << static_cast<uint64_t>(ea)
+        << " AND a.call_addr = " << static_cast<uint64_t>(ea)
         << " AND a.arg_idx = " << arg_idx
         << " ORDER BY a.call_item_id, a.arg_idx";
     return oss.str();
@@ -1119,7 +1122,7 @@ static std::string ctree_expr_resolution_hint_sql(
         const std::string& op_name_filter) {
     std::ostringstream oss;
     oss
-        << "SELECT item_id, is_expr, op_name, depth, var_idx, var_name, obj_ea, obj_name, num_value, member_offset "
+        << "SELECT item_id, is_expr, op_name, depth, var_idx, var_name, obj_addr, obj_name, num_value, member_offset "
         << "FROM ctree "
         << "WHERE func_addr = " << static_cast<uint64_t>(func_addr)
         << " AND ea = " << static_cast<uint64_t>(ea)
@@ -1374,7 +1377,7 @@ static std::string number_format_kind(const number_format_t& nf) {
 
 static std::string numform_to_json(ea_t target_ea, int opnum, const number_format_t& nf) {
     xsql::json obj = {
-        {"ea", static_cast<int64_t>(target_ea)},
+        {"addr", static_cast<int64_t>(target_ea)},
         {"opnum", opnum},
         {"kind", number_format_kind(nf)},
         {"type_name", std::string(nf.type_name.c_str())},
@@ -1391,11 +1394,11 @@ static std::string numform_to_json(ea_t target_ea, int opnum, const number_forma
     return obj.dump();
 }
 
-// set_union_selection(func_addr, ea, path) - Set/clear union selection path at ea.
+// set_union_selection(func_addr, addr, path) - Set/clear union selection path at addr.
 // path format: JSON array (e.g. "[0,1]") or CSV ("0,1"); empty/null clears.
 static void sql_set_union_selection(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
-        ctx.result_error("set_union_selection requires 3 arguments (func_addr, ea, path)");
+        ctx.result_error("set_union_selection requires 3 arguments (func_addr, addr, path)");
         return;
     }
 
@@ -1404,7 +1407,7 @@ static void sql_set_union_selection(xsql::FunctionContext& ctx, int argc, xsql::
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const char* path_spec = argv[2].is_null() ? "" : argv[2].as_c_str();
@@ -1445,10 +1448,10 @@ static void sql_set_union_selection_item(xsql::FunctionContext& ctx, int argc, x
     ctx.result_int(ok ? 1 : 0);
 }
 
-// get_union_selection(func_addr, ea) - Get union path JSON at ea, or NULL if unset.
+// get_union_selection(func_addr, addr) - Get union path JSON at addr, or NULL if unset.
 static void sql_get_union_selection(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
-        ctx.result_error("get_union_selection requires 2 arguments (func_addr, ea)");
+        ctx.result_error("get_union_selection requires 2 arguments (func_addr, addr)");
         return;
     }
 
@@ -1457,7 +1460,7 @@ static void sql_get_union_selection(xsql::FunctionContext& ctx, int argc, xsql::
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
 
@@ -1499,10 +1502,10 @@ static void sql_get_union_selection_item(xsql::FunctionContext& ctx, int argc, x
     ctx.result_text(union_path_to_json(path));
 }
 
-// set_union_selection_ea_arg(func_addr, ea, arg_idx, path[, callee]) - Resolve arg item by call-site coordinate.
+// set_union_selection_addr_arg(func_addr, addr, arg_idx, path[, callee]) - Resolve arg item by call-site coordinate.
 static void sql_set_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4) {
-        ctx.result_error("set_union_selection_ea_arg requires 4-5 arguments (func_addr, ea, arg_idx, path, [callee])");
+        ctx.result_error("set_union_selection_addr_arg requires 4-5 arguments (func_addr, addr, arg_idx, path, [callee])");
         return;
     }
 
@@ -1511,7 +1514,7 @@ static void sql_set_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc,
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const int arg_idx = argv[2].as_int();
@@ -1535,10 +1538,10 @@ static void sql_set_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc,
     ctx.result_int(ok ? 1 : 0);
 }
 
-// get_union_selection_ea_arg(func_addr, ea, arg_idx[, callee]) - Resolve arg item and read union selection.
+// get_union_selection_addr_arg(func_addr, addr, arg_idx[, callee]) - Resolve arg item and read union selection.
 static void sql_get_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
-        ctx.result_error("get_union_selection_ea_arg requires 3-4 arguments (func_addr, ea, arg_idx, [callee])");
+        ctx.result_error("get_union_selection_addr_arg requires 3-4 arguments (func_addr, addr, arg_idx, [callee])");
         return;
     }
 
@@ -1547,7 +1550,7 @@ static void sql_get_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc,
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const int arg_idx = argv[2].as_int();
@@ -1574,10 +1577,10 @@ static void sql_get_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc,
     ctx.result_text(union_path_to_json(path));
 }
 
-// call_arg_item(func_addr, ea, arg_idx[, callee]) - Resolve call-arg coordinate to explicit ctree arg_item_id.
+// call_arg_item(func_addr, addr, arg_idx[, callee]) - Resolve call-arg coordinate to explicit ctree arg_item_id.
 static void sql_call_arg_item(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
-        ctx.result_error("call_arg_item requires 3-4 arguments (func_addr, ea, arg_idx, [callee])");
+        ctx.result_error("call_arg_item requires 3-4 arguments (func_addr, addr, arg_idx, [callee])");
         return;
     }
 
@@ -1586,7 +1589,7 @@ static void sql_call_arg_item(xsql::FunctionContext& ctx, int argc, xsql::Functi
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const int arg_idx = argv[2].as_int();
@@ -1601,10 +1604,10 @@ static void sql_call_arg_item(xsql::FunctionContext& ctx, int argc, xsql::Functi
     ctx.result_int(resolved.arg_item_id);
 }
 
-// ctree_item_at(func_addr, ea[, op_name[, nth]]) - Resolve generic expression coordinate to ctree item id.
+// ctree_item_at(func_addr, addr[, op_name[, nth]]) - Resolve generic expression coordinate to ctree item id.
 static void sql_ctree_item_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
-        ctx.result_error("ctree_item_at requires 2-4 arguments (func_addr, ea, [op_name], [nth])");
+        ctx.result_error("ctree_item_at requires 2-4 arguments (func_addr, addr, [op_name], [nth])");
         return;
     }
 
@@ -1613,7 +1616,7 @@ static void sql_ctree_item_at(xsql::FunctionContext& ctx, int argc, xsql::Functi
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const char* op_name = (argc >= 3 && !argv[2].is_null()) ? argv[2].as_c_str() : "";
@@ -1630,10 +1633,10 @@ static void sql_ctree_item_at(xsql::FunctionContext& ctx, int argc, xsql::Functi
     ctx.result_int(resolved.item_id);
 }
 
-// set_union_selection_ea_expr(func_addr, ea, path[, op_name[, nth]]) - Resolve expr item and set/clear path.
+// set_union_selection_addr_expr(func_addr, addr, path[, op_name[, nth]]) - Resolve expr item and set/clear path.
 static void sql_set_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
-        ctx.result_error("set_union_selection_ea_expr requires 3-5 arguments (func_addr, ea, path, [op_name], [nth])");
+        ctx.result_error("set_union_selection_addr_expr requires 3-5 arguments (func_addr, addr, path, [op_name], [nth])");
         return;
     }
 
@@ -1642,7 +1645,7 @@ static void sql_set_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const char* path_spec = argv[2].is_null() ? "" : argv[2].as_c_str();
@@ -1668,10 +1671,10 @@ static void sql_set_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc
     ctx.result_int(ok ? 1 : 0);
 }
 
-// get_union_selection_ea_expr(func_addr, ea[, op_name[, nth]]) - Resolve expr item and read union path JSON.
+// get_union_selection_addr_expr(func_addr, addr[, op_name[, nth]]) - Resolve expr item and read union path JSON.
 static void sql_get_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
-        ctx.result_error("get_union_selection_ea_expr requires 2-4 arguments (func_addr, ea, [op_name], [nth])");
+        ctx.result_error("get_union_selection_addr_expr requires 2-4 arguments (func_addr, addr, [op_name], [nth])");
         return;
     }
 
@@ -1680,7 +1683,7 @@ static void sql_get_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const char* op_name = (argc >= 3 && !argv[2].is_null()) ? argv[2].as_c_str() : "";
@@ -1709,14 +1712,14 @@ static void sql_get_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc
     ctx.result_text(union_path_to_json(path));
 }
 
-// set_numform(func_addr, ea, opnum, spec) - Set/clear decompiler number format at ea/opnum.
+// set_numform(func_addr, addr, opnum, spec) - Set/clear decompiler number format at addr/opnum.
 // spec format matches instructions.operand*_format_spec:
 //   clear | plain | none
 //   enum:<enum_name>[,serial=<n>]
 //   stroff:<udt[/nested_udt...]>[,delta=<n>]
 static void sql_set_numform(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4) {
-        ctx.result_error("set_numform requires 4 arguments (func_addr, ea, opnum, spec)");
+        ctx.result_error("set_numform requires 4 arguments (func_addr, addr, opnum, spec)");
         return;
     }
 
@@ -1725,7 +1728,7 @@ static void sql_set_numform(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     int opnum = argv[2].as_int();
@@ -1772,10 +1775,10 @@ static void sql_set_numform_item(xsql::FunctionContext& ctx, int argc, xsql::Fun
     ctx.result_int(ok ? 1 : 0);
 }
 
-// set_numform_ea_arg(func_addr, ea, arg_idx, opnum, spec[, callee]) - Resolve arg item by call-site coordinate.
+// set_numform_addr_arg(func_addr, addr, arg_idx, opnum, spec[, callee]) - Resolve arg item by call-site coordinate.
 static void sql_set_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 5) {
-        ctx.result_error("set_numform_ea_arg requires 5-6 arguments (func_addr, ea, arg_idx, opnum, spec, [callee])");
+        ctx.result_error("set_numform_addr_arg requires 5-6 arguments (func_addr, addr, arg_idx, opnum, spec, [callee])");
         return;
     }
 
@@ -1784,7 +1787,7 @@ static void sql_set_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::F
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const int arg_idx = argv[2].as_int();
@@ -1814,10 +1817,10 @@ static void sql_set_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::F
     ctx.result_int(ok ? 1 : 0);
 }
 
-// set_numform_ea_expr(func_addr, ea, opnum, spec[, op_name[, nth]]) - Resolve expr item and set/clear numform.
+// set_numform_addr_expr(func_addr, addr, opnum, spec[, op_name[, nth]]) - Resolve expr item and set/clear numform.
 static void sql_set_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4) {
-        ctx.result_error("set_numform_ea_expr requires 4-6 arguments (func_addr, ea, opnum, spec, [op_name], [nth])");
+        ctx.result_error("set_numform_addr_expr requires 4-6 arguments (func_addr, addr, opnum, spec, [op_name], [nth])");
         return;
     }
 
@@ -1826,7 +1829,7 @@ static void sql_set_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const int opnum = argv[2].as_int();
@@ -1858,10 +1861,10 @@ static void sql_set_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::
     ctx.result_int(ok ? 1 : 0);
 }
 
-// get_numform(func_addr, ea, opnum) - Get decompiler number format JSON at ea/opnum, or NULL if unset.
+// get_numform(func_addr, addr, opnum) - Get decompiler number format JSON at addr/opnum, or NULL if unset.
 static void sql_get_numform(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
-        ctx.result_error("get_numform requires 3 arguments (func_addr, ea, opnum)");
+        ctx.result_error("get_numform requires 3 arguments (func_addr, addr, opnum)");
         return;
     }
 
@@ -1870,7 +1873,7 @@ static void sql_get_numform(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     int opnum = argv[2].as_int();
@@ -1913,10 +1916,10 @@ static void sql_get_numform_item(xsql::FunctionContext& ctx, int argc, xsql::Fun
     ctx.result_text(numform_to_json(target_ea, opnum, nf));
 }
 
-// get_numform_ea_arg(func_addr, ea, arg_idx, opnum[, callee]) - Resolve arg item and return numform JSON.
+// get_numform_addr_arg(func_addr, addr, arg_idx, opnum[, callee]) - Resolve arg item and return numform JSON.
 static void sql_get_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4) {
-        ctx.result_error("get_numform_ea_arg requires 4-5 arguments (func_addr, ea, arg_idx, opnum, [callee])");
+        ctx.result_error("get_numform_addr_arg requires 4-5 arguments (func_addr, addr, arg_idx, opnum, [callee])");
         return;
     }
 
@@ -1925,7 +1928,7 @@ static void sql_get_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::F
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const int arg_idx = argv[2].as_int();
@@ -1952,10 +1955,10 @@ static void sql_get_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::F
     ctx.result_text(numform_to_json(item_ea, opnum, nf));
 }
 
-// get_numform_ea_expr(func_addr, ea, opnum[, op_name[, nth]]) - Resolve expr item and return numform JSON.
+// get_numform_addr_expr(func_addr, addr, opnum[, op_name[, nth]]) - Resolve expr item and return numform JSON.
 static void sql_get_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
-        ctx.result_error("get_numform_ea_expr requires 3-5 arguments (func_addr, ea, opnum, [op_name], [nth])");
+        ctx.result_error("get_numform_addr_expr requires 3-5 arguments (func_addr, addr, opnum, [op_name], [nth])");
         return;
     }
 
@@ -1964,7 +1967,7 @@ static void sql_get_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::
         return;
     }
     ea_t target_ea = BADADDR;
-    if (!resolve_address_arg(ctx, argv, 1, "ea", target_ea)) {
+    if (!resolve_address_arg(ctx, argv, 1, "addr", target_ea)) {
         return;
     }
     const int opnum = argv[2].as_int();
@@ -2120,8 +2123,8 @@ static void sql_rebuild_strings(xsql::FunctionContext& ctx, int argc, xsql::Func
     clear_strlist();
     build_strlist();
 
-    // Invalidate the strings virtual table cache so queries see new data
-    core::CoreRegistry::invalidate_strings_cache_global();
+    // No cache invalidation needed: the strings table is query-lived
+    // (no_shared_cache) and rebuilds from the live strlist on the next scan.
 
     // Return the count
     size_t count = get_strlist_qty();
@@ -2155,7 +2158,7 @@ void register_sql_functions(xsql::Database& db) {
     db.register_function("make_code_range", 2, xsql::ScalarFn(sql_make_code_range));
 
     // load_file_bytes writes a host file's bytes into the IDB at a given
-    // range. Bulk byte reads go through the bytes table (hidden `start_ea`
+    // range. Bulk byte reads go through the bytes table (hidden `start_addr`
     // + `n` input columns).
     db.register_function("load_file_bytes", 4, xsql::ScalarFn(sql_load_file_bytes));
     db.register_function("load_file_bytes", 5, xsql::ScalarFn(sql_load_file_bytes));
@@ -2170,37 +2173,37 @@ void register_sql_functions(xsql::Database& db) {
         db.register_function("call_arg_addrs", 1, xsql::ScalarFn(sql_call_arg_addrs));
         db.register_function("set_union_selection", 3, xsql::ScalarFn(sql_set_union_selection));
         db.register_function("set_union_selection_item", 3, xsql::ScalarFn(sql_set_union_selection_item));
-        db.register_function("set_union_selection_ea_arg", 4, xsql::ScalarFn(sql_set_union_selection_ea_arg));
-        db.register_function("set_union_selection_ea_arg", 5, xsql::ScalarFn(sql_set_union_selection_ea_arg));
+        db.register_function("set_union_selection_addr_arg", 4, xsql::ScalarFn(sql_set_union_selection_ea_arg));
+        db.register_function("set_union_selection_addr_arg", 5, xsql::ScalarFn(sql_set_union_selection_ea_arg));
         db.register_function("get_union_selection", 2, xsql::ScalarFn(sql_get_union_selection));
         db.register_function("get_union_selection_item", 2, xsql::ScalarFn(sql_get_union_selection_item));
-        db.register_function("get_union_selection_ea_arg", 3, xsql::ScalarFn(sql_get_union_selection_ea_arg));
-        db.register_function("get_union_selection_ea_arg", 4, xsql::ScalarFn(sql_get_union_selection_ea_arg));
+        db.register_function("get_union_selection_addr_arg", 3, xsql::ScalarFn(sql_get_union_selection_ea_arg));
+        db.register_function("get_union_selection_addr_arg", 4, xsql::ScalarFn(sql_get_union_selection_ea_arg));
         db.register_function("call_arg_item", 3, xsql::ScalarFn(sql_call_arg_item));
         db.register_function("call_arg_item", 4, xsql::ScalarFn(sql_call_arg_item));
         db.register_function("ctree_item_at", 2, xsql::ScalarFn(sql_ctree_item_at));
         db.register_function("ctree_item_at", 3, xsql::ScalarFn(sql_ctree_item_at));
         db.register_function("ctree_item_at", 4, xsql::ScalarFn(sql_ctree_item_at));
-        db.register_function("set_union_selection_ea_expr", 3, xsql::ScalarFn(sql_set_union_selection_ea_expr));
-        db.register_function("set_union_selection_ea_expr", 4, xsql::ScalarFn(sql_set_union_selection_ea_expr));
-        db.register_function("set_union_selection_ea_expr", 5, xsql::ScalarFn(sql_set_union_selection_ea_expr));
-        db.register_function("get_union_selection_ea_expr", 2, xsql::ScalarFn(sql_get_union_selection_ea_expr));
-        db.register_function("get_union_selection_ea_expr", 3, xsql::ScalarFn(sql_get_union_selection_ea_expr));
-        db.register_function("get_union_selection_ea_expr", 4, xsql::ScalarFn(sql_get_union_selection_ea_expr));
+        db.register_function("set_union_selection_addr_expr", 3, xsql::ScalarFn(sql_set_union_selection_ea_expr));
+        db.register_function("set_union_selection_addr_expr", 4, xsql::ScalarFn(sql_set_union_selection_ea_expr));
+        db.register_function("set_union_selection_addr_expr", 5, xsql::ScalarFn(sql_set_union_selection_ea_expr));
+        db.register_function("get_union_selection_addr_expr", 2, xsql::ScalarFn(sql_get_union_selection_ea_expr));
+        db.register_function("get_union_selection_addr_expr", 3, xsql::ScalarFn(sql_get_union_selection_ea_expr));
+        db.register_function("get_union_selection_addr_expr", 4, xsql::ScalarFn(sql_get_union_selection_ea_expr));
         db.register_function("set_numform", 4, xsql::ScalarFn(sql_set_numform));
         db.register_function("set_numform_item", 4, xsql::ScalarFn(sql_set_numform_item));
-        db.register_function("set_numform_ea_arg", 5, xsql::ScalarFn(sql_set_numform_ea_arg));
-        db.register_function("set_numform_ea_arg", 6, xsql::ScalarFn(sql_set_numform_ea_arg));
-        db.register_function("set_numform_ea_expr", 4, xsql::ScalarFn(sql_set_numform_ea_expr));
-        db.register_function("set_numform_ea_expr", 5, xsql::ScalarFn(sql_set_numform_ea_expr));
-        db.register_function("set_numform_ea_expr", 6, xsql::ScalarFn(sql_set_numform_ea_expr));
+        db.register_function("set_numform_addr_arg", 5, xsql::ScalarFn(sql_set_numform_ea_arg));
+        db.register_function("set_numform_addr_arg", 6, xsql::ScalarFn(sql_set_numform_ea_arg));
+        db.register_function("set_numform_addr_expr", 4, xsql::ScalarFn(sql_set_numform_ea_expr));
+        db.register_function("set_numform_addr_expr", 5, xsql::ScalarFn(sql_set_numform_ea_expr));
+        db.register_function("set_numform_addr_expr", 6, xsql::ScalarFn(sql_set_numform_ea_expr));
         db.register_function("get_numform", 3, xsql::ScalarFn(sql_get_numform));
         db.register_function("get_numform_item", 3, xsql::ScalarFn(sql_get_numform_item));
-        db.register_function("get_numform_ea_arg", 4, xsql::ScalarFn(sql_get_numform_ea_arg));
-        db.register_function("get_numform_ea_arg", 5, xsql::ScalarFn(sql_get_numform_ea_arg));
-        db.register_function("get_numform_ea_expr", 3, xsql::ScalarFn(sql_get_numform_ea_expr));
-        db.register_function("get_numform_ea_expr", 4, xsql::ScalarFn(sql_get_numform_ea_expr));
-        db.register_function("get_numform_ea_expr", 5, xsql::ScalarFn(sql_get_numform_ea_expr));
+        db.register_function("get_numform_addr_arg", 4, xsql::ScalarFn(sql_get_numform_ea_arg));
+        db.register_function("get_numform_addr_arg", 5, xsql::ScalarFn(sql_get_numform_ea_arg));
+        db.register_function("get_numform_addr_expr", 3, xsql::ScalarFn(sql_get_numform_ea_expr));
+        db.register_function("get_numform_addr_expr", 4, xsql::ScalarFn(sql_get_numform_ea_expr));
+        db.register_function("get_numform_addr_expr", 5, xsql::ScalarFn(sql_get_numform_ea_expr));
     }
 
     // File generation

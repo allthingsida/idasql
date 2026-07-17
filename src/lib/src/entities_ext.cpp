@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "entities_ext.hpp"
 
@@ -70,10 +69,12 @@ void collect_local_types(std::vector<LocalTypeEntry>& rows) {
     til_t* ti = get_idati();
     if (!ti) return;
 
-    uint32_t ord = 1;
-    while (true) {
+    // Valid local-type ordinals are 1..get_ordinal_limit(ti)-1; skip gaps (deleted types)
+    // rather than stopping at the first one.
+    uint32 limit = get_ordinal_limit(ti);
+    for (uint32 ord = 1; ord < limit; ++ord) {
         const char* name = get_numbered_type_name(ti, ord);
-        if (!name) break;
+        if (!name) continue;
 
         LocalTypeEntry entry;
         entry.ordinal = ord;
@@ -94,7 +95,6 @@ void collect_local_types(std::vector<LocalTypeEntry>& rows) {
         }
 
         rows.push_back(entry);
-        ++ord;
     }
 }
 
@@ -109,7 +109,7 @@ CachedTableDef<FixupEntry> define_fixups() {
         .cache_builder([](std::vector<FixupEntry>& rows) {
             collect_fixups(rows);
         })
-        .column_int64("address", [](const FixupEntry& row) -> int64_t {
+        .column_int64("addr", [](const FixupEntry& row) -> int64_t {
             return static_cast<int64_t>(row.ea);
         })
         .column_int64("target", [](const FixupEntry& row) -> int64_t {
@@ -129,11 +129,11 @@ VTableDef define_hidden_ranges() {
         .count([]() {
             return static_cast<size_t>(get_hidden_range_qty());
         })
-        .column_int64("start_ea", [](size_t i) -> int64_t {
+        .column_int64("start_addr", [](size_t i) -> int64_t {
             hidden_range_t* hr = getn_hidden_range(static_cast<int>(i));
             return hr ? hr->start_ea : 0;
         })
-        .column_int64("end_ea", [](size_t i) -> int64_t {
+        .column_int64("end_addr", [](size_t i) -> int64_t {
             hidden_range_t* hr = getn_hidden_range(static_cast<int>(i));
             return hr ? hr->end_ea : 0;
         })
@@ -171,7 +171,7 @@ CachedTableDef<ProblemEntry> define_problems() {
         .cache_builder([](std::vector<ProblemEntry>& rows) {
             collect_problems(rows);
         })
-        .column_int64("address", [](const ProblemEntry& row) -> int64_t {
+        .column_int64("addr", [](const ProblemEntry& row) -> int64_t {
             return static_cast<int64_t>(row.ea);
         })
         .column_int("type_id", [](const ProblemEntry& row) -> int {
@@ -191,11 +191,11 @@ VTableDef define_fchunks() {
         .count([]() {
             return get_fchunk_qty();
         })
-        .column_int64("start_ea", [](size_t i) -> int64_t {
+        .column_int64("start_addr", [](size_t i) -> int64_t {
             func_t* chunk = getn_fchunk(static_cast<int>(i));
             return chunk ? chunk->start_ea : 0;
         })
-        .column_int64("end_ea", [](size_t i) -> int64_t {
+        .column_int64("end_addr", [](size_t i) -> int64_t {
             func_t* chunk = getn_fchunk(static_cast<int>(i));
             return chunk ? chunk->end_ea : 0;
         })
@@ -275,7 +275,7 @@ VTableDef define_mappings() {
         .count([]() {
             return get_mappings_qty();
         })
-        .column_int64("from_ea", [](size_t i) -> int64_t {
+        .column_int64("from_addr", [](size_t i) -> int64_t {
             ea_t from, to;
             asize_t size;
             if (get_mapping(&from, &to, &size, i)) {
@@ -283,7 +283,7 @@ VTableDef define_mappings() {
             }
             return 0;
         })
-        .column_int64("to_ea", [](size_t i) -> int64_t {
+        .column_int64("to_addr", [](size_t i) -> int64_t {
             ea_t from, to;
             asize_t size;
             if (get_mapping(&from, &to, &size, i)) {

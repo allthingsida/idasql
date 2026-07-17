@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * example_custom_vtable.cpp - Creating custom virtual tables
@@ -42,7 +41,7 @@ idasql::VTableDef make_user_functions_table() {
             return get_func_qty();
         })
         // Column definitions - each takes a lambda (row_index) -> value
-        .column_int64("address", [](size_t i) -> int64_t {
+        .column_int64("addr", [](size_t i) -> int64_t {
             func_t* f = getn_func(i);
             return f ? f->start_ea : BADADDR;
         })
@@ -118,7 +117,7 @@ int main(int argc, char* argv[]) {
     std::cout << "=== Query: user_functions (Top 10 by size) ===\n\n";
 
     auto result = session.query(
-        "SELECT printf('0x%X', address) as addr, name, size, flags "
+        "SELECT printf('0x%X', addr) as addr, name, size, flags "
         "FROM user_functions "
         "ORDER BY size DESC "
         "LIMIT 10"
@@ -146,11 +145,11 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Join: user_functions + xrefs (most called) ===\n\n";
 
     auto most_called = session.query(
-        "SELECT uf.name, COUNT(x.from_ea) as call_count "
+        "SELECT uf.name, COUNT(x.from_addr) as call_count "
         "FROM user_functions uf "
-        "JOIN xrefs x ON uf.address = x.to_ea "
+        "JOIN xrefs x ON uf.addr = x.to_addr "
         "WHERE x.type = 17 "  // Code call xref
-        "GROUP BY uf.address "
+        "GROUP BY uf.addr "
         "ORDER BY call_count DESC "
         "LIMIT 10"
     );

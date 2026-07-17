@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * example_instructions.cpp - Instruction analysis with IDASQL
@@ -45,7 +44,7 @@ int main(int argc, char* argv[]) {
     std::cout << "=== Instruction Statistics ===\n";
 
     // Get stats for the largest function
-    auto largest_func = session.scalar("SELECT address FROM funcs ORDER BY size DESC LIMIT 1");
+    auto largest_func = session.scalar("SELECT addr FROM funcs ORDER BY size DESC LIMIT 1");
     std::cout << "Analyzing largest function at 0x" << std::hex << std::stoull(largest_func) << std::dec << "\n\n";
 
     // =========================================================================
@@ -97,7 +96,7 @@ int main(int argc, char* argv[]) {
     auto nops = session.query(
         "SELECT f.name as name, COUNT(*) as nop_count "
         "FROM instructions i "
-        "JOIN funcs f ON i.func_addr = f.address "
+        "JOIN funcs f ON i.func_addr = f.addr "
         "WHERE i.mnemonic = 'nop' "
         "GROUP BY i.func_addr, f.name "
         "HAVING nop_count > 5 "
@@ -140,7 +139,7 @@ int main(int argc, char* argv[]) {
         "  SUM(CASE WHEN mnemonic = 'push' THEN 1 ELSE 0 END) as pushes, "
         "  SUM(CASE WHEN mnemonic = 'pop' THEN 1 ELSE 0 END) as pops "
         "FROM instructions i "
-        "JOIN funcs f ON i.func_addr = f.address "
+        "JOIN funcs f ON i.func_addr = f.addr "
         "GROUP BY i.func_addr, f.name "
         "HAVING pushes > 20 AND ABS(pushes - pops) > 5 "
         "ORDER BY pushes DESC "
@@ -183,7 +182,7 @@ int main(int argc, char* argv[]) {
     auto func_insns = session.query(
         "SELECT mnemonic, COUNT(*) as count "
         "FROM instructions "
-        "WHERE func_addr = (SELECT address FROM funcs ORDER BY size DESC LIMIT 1) "
+        "WHERE func_addr = (SELECT addr FROM funcs ORDER BY size DESC LIMIT 1) "
         "GROUP BY mnemonic "
         "ORDER BY count DESC "
         "LIMIT 10"

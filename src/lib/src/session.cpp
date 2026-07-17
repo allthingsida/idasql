@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include <idasql/database.hpp>
 
@@ -13,6 +12,7 @@
 #include <system_error>
 
 #include "ida_headers.hpp"
+#include "types_bookmarks.hpp"
 
 namespace idasql {
 
@@ -66,10 +66,25 @@ std::filesystem::path i64_sibling_for_idb(const std::filesystem::path& idb_path)
     return candidate;
 }
 
-std::filesystem::path upgrade_log_for_idb(const std::filesystem::path& idb_path) {
+[[maybe_unused]] std::filesystem::path upgrade_log_for_idb(const std::filesystem::path& idb_path) {
     std::filesystem::path log_path = idb_path;
     log_path.replace_extension(".id0.upgrade.log");
     return log_path;
+}
+
+bool legacy_idb_upgrade_allowed_in_process() {
+#ifdef _WIN32
+    return true;
+#else
+    qstring value;
+    return qgetenv("IDASQL_ALLOW_LEGACY_IDB_UPGRADE_IN_PROCESS", &value) &&
+        value == "1";
+#endif
+}
+
+void close_ida_database_for_session() {
+    types::reset_local_type_bookmark_place_cache();
+    close_database(false);
 }
 
 } // namespace
@@ -119,13 +134,20 @@ bool Session::open(const char* idb_path) {
             open_notice_ = "Opened " + i64_path.string() +
                 " (existing 64-bit database) instead of " + requested_path.string() + ".";
         } else {
+            if (!legacy_idb_upgrade_allowed_in_process()) {
+                open_outcome_ = OpenOutcome::Failed;
+                error_ = "Legacy .idb upgrade is not supported in-process from this executable; "
+                    "use the idasql CLI to upgrade the .idb, then reopen the generated .i64.";
+                return false;
+            }
+
             int rc = idasql_open_database(requested_path.string().c_str());
             ec.clear();
             bool i64_exists_after = fs::exists(i64_path, ec);
             if (i64_exists_after && !i64_existed_before) {
                 if (rc == 0) {
                     ida_opened_ = true;
-                    close_database(false);
+                    close_ida_database_for_session();
                     ida_opened_ = false;
                 }
                 open_outcome_ = OpenOutcome::UpgradedReopenRequired;
@@ -200,7 +222,7 @@ bool Session::open(const char* idb_path) {
 void Session::close() {
     engine_.reset();
     if (ida_opened_) {
-        close_database(false);
+        close_ida_database_for_session();
         ida_opened_ = false;
     }
 }

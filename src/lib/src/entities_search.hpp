@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * entities_search.hpp - Grep-style entity search table
@@ -71,7 +70,7 @@ class EntityGenerator {
     EntitySource current_source_ = EntitySource::Functions;
     size_t current_index_ = 0;
     EntityRow current_row_;
-    uint32 type_ordinal_ = 0;
+    uint32 type_ordinal_ = 1;  // valid local-type ordinals are 1..get_ordinal_limit()-1
     size_t member_index_ = 0;
     tinfo_t current_type_;
 

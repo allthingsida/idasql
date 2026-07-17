@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * idapython_exec.hpp - IDAPython bridge
@@ -38,7 +37,10 @@ public:
 
     bool acquire_runtime(std::string* error = nullptr);
     void release_runtime();
-    bool begin_capture(std::string* error = nullptr);
+    // max_bytes caps the captured output (0 == unbounded). Past the cap, output is
+    // dropped and a single truncation marker is appended so a runaway snippet cannot
+    // exhaust memory / the response channel.
+    bool begin_capture(std::string* error = nullptr, size_t max_bytes = 0);
     std::string end_capture();
 
     virtual ssize_t idaapi on_event(ssize_t code, va_list va) override;
@@ -54,6 +56,9 @@ private:
     bool capturing_ = false;
     size_t runtime_refcount_ = 0;
     std::ostringstream buffer_;
+    size_t cap_bytes_ = 0;      // 0 == unbounded
+    size_t written_ = 0;        // bytes appended so far this capture
+    bool truncated_ = false;    // truncation marker already appended
 };
 
 bool runtime_acquire(std::string* error = nullptr);
@@ -61,7 +66,8 @@ void runtime_release();
 
 class ScopedCapture {
 public:
-    ScopedCapture();
+    // max_bytes caps captured output (0 == unbounded; see begin_capture).
+    explicit ScopedCapture(size_t max_bytes = 0);
     ~ScopedCapture();
     bool ok() const { return active_; }
     const std::string& error() const { return error_; }

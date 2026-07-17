@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "types_func_args.hpp"
 
@@ -316,7 +315,12 @@ void FuncArgsInTypeIterator::column(xsql::FunctionContext& ctx, int col) {
 }
 
 int64_t FuncArgsInTypeIterator::rowid() const {
-    return static_cast<int64_t>(type_ordinal_) * 10000 + (idx_ + 1);
+    // Pack (type_ordinal, arg_index) with the shared helper so the pushdown
+    // iterator and the full-scan cache rowid agree (see types_common.hpp). The
+    // return-type row has arg_index == -1, so shift by +1 to keep the packed
+    // index non-negative (return type -> 0, first arg -> 1, ...); the cache
+    // .rowid() below shifts identically.
+    return pack_type_rowid(type_ordinal_, static_cast<int>(idx_) + 1);
 }
 
 // ============================================================================
@@ -332,6 +336,18 @@ CachedTableDef<FuncArgEntry> define_types_func_args() {
         })
         .cache_builder([](std::vector<FuncArgEntry>& rows) {
             collect_func_args(rows);
+        })
+        // Stable rowid = pack_type_rowid(type_ordinal, arg_index + 1), matching the
+        // FuncArgsInTypeIterator::rowid pushdown path above. Without this the
+        // full-scan cursor used positional rowids while the filtered iterator used
+        // the packed scheme, so the SAME (type_ordinal, arg_index) row got two
+        // different rowids depending on access path. This table is read-only (no
+        // by-rowid UPDATE/DELETE), so no row_lookup()/snapshot_mutations() is
+        // needed -- SQLite resolves a rare `WHERE rowid=?` by full scan, correct now
+        // that both paths agree. The +1 shift keeps the return-type row (arg_index
+        // == -1) non-negative for packing.
+        .rowid([](const FuncArgEntry& row) -> int64_t {
+            return pack_type_rowid(row.type_ordinal, row.arg_index + 1);
         })
         .column_int("type_ordinal", [](const FuncArgEntry& row) -> int {
             return static_cast<int>(row.type_ordinal);
@@ -400,6 +416,11 @@ CachedTableDef<FuncArgEntry> define_types_func_args() {
             return row.tc.base_type_resolved;
         })
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
+            // Type ordinals are uint32; reject anything out of range rather than
+            // truncating (e.g. 4294967297 -> 1 would return ordinal-1's args).
+            // Ordinal 0 is always a gap, so the iterator yields no rows.
+            if (ordinal <= 0 || ordinal > static_cast<int64_t>(UINT32_MAX))
+                return std::make_unique<FuncArgsInTypeIterator>(0u);
             return std::make_unique<FuncArgsInTypeIterator>(static_cast<uint32_t>(ordinal));
         }, 10.0, 5.0)
         .build();

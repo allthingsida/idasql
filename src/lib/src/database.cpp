@@ -1,17 +1,12 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include <idasql/database.hpp>
 
 #include <idasql/platform.hpp>
-
-#include <cctype>
-#include <limits>
-#include <algorithm>
 
 #include "ida_headers.hpp"
 
@@ -39,6 +34,11 @@ QueryEngine::QueryEngine() {
 
 QueryEngine::~QueryEngine() = default;
 
+// Defined here (not inline in the header) so the registry member types are
+// complete for the move of their std::unique_ptr members.
+QueryEngine::QueryEngine(QueryEngine&&) noexcept = default;
+QueryEngine& QueryEngine::operator=(QueryEngine&&) noexcept = default;
+
 QueryResult QueryEngine::query(const char* sql) {
     QueryResult result;
 
@@ -60,6 +60,7 @@ QueryResult QueryEngine::query(const char* sql) {
     for (auto& raw_row : raw.rows) {
         Row row;
         row.values = std::move(raw_row.values);
+        row.nulls = std::move(raw_row.nulls);  // carry the SQL-NULL mask through
         result.rows.push_back(std::move(row));
     }
     result.error = std::move(raw.error);
@@ -104,9 +105,36 @@ bool QueryEngine::execute_script(const std::string& script,
         return false;
     }
 
-    bool ok = db_.execute_script(script, results, error);
-    error_ = ok ? "" : error;
-    return ok;
+    // Route each statement through the runtime-PRAGMA handler so scripts run via
+    // `idasql -f setup.sql` honor `PRAGMA idasql.* = ...;` control statements the
+    // same way single-statement query()/exec() do. Non-PRAGMA statements are
+    // executed by the shared db_ script executor, preserving interleaving order.
+    std::vector<std::string> statements;
+    if (!xsql::collect_statements(script, statements, error)) {
+        error_ = error;
+        return false;
+    }
+
+    for (const auto& sql : statements) {
+        QueryResult pragma_result;
+        if (handle_runtime_pragma(sql.c_str(), pragma_result)) {
+            if (!pragma_result.success) {
+                error = pragma_result.error;
+                error_ = error;
+                return false;
+            }
+            continue;
+        }
+
+        if (!db_.execute_script(sql, results, error)) {
+            error_ = error;
+            return false;
+        }
+    }
+
+    error.clear();
+    error_.clear();
+    return true;
 }
 
 bool QueryEngine::export_tables(const std::vector<std::string>& tables,
@@ -131,57 +159,6 @@ std::string QueryEngine::scalar(const char* sql) {
     return "";
 }
 
-// trim_copy is now in <idasql/string_utils.hpp>
-
-std::string QueryEngine::to_lower_copy(std::string value) {
-    for (char& c : value) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return value;
-}
-
-std::string QueryEngine::strip_optional_quotes(const std::string& s) {
-    if (s.size() >= 2) {
-        char a = s.front();
-        char b = s.back();
-        if ((a == '\'' && b == '\'') || (a == '"' && b == '"')) {
-            return s.substr(1, s.size() - 2);
-        }
-    }
-    return s;
-}
-
-bool QueryEngine::parse_int_value(const std::string& text, int& value) {
-    try {
-        size_t consumed = 0;
-        long long parsed = std::stoll(text, &consumed, 10);
-        if (consumed != text.size()) {
-            return false;
-        }
-        if (parsed < (std::numeric_limits<int>::min)() ||
-            parsed > (std::numeric_limits<int>::max)()) {
-            return false;
-        }
-        value = static_cast<int>(parsed);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-bool QueryEngine::parse_bool_value(const std::string& text, bool& value) {
-    const std::string lower = to_lower_copy(trim_copy(text));
-    if (lower == "1" || lower == "on" || lower == "true" || lower == "yes") {
-        value = true;
-        return true;
-    }
-    if (lower == "0" || lower == "off" || lower == "false" || lower == "no") {
-        value = false;
-        return true;
-    }
-    return false;
-}
-
 QueryResult QueryEngine::make_pragma_result(const std::string& key, const std::string& value) {
     QueryResult result;
     result.columns = {"name", "value"};
@@ -200,112 +177,29 @@ QueryResult QueryEngine::make_pragma_error(const std::string& error) {
 }
 
 bool QueryEngine::handle_runtime_pragma(const char* sql, QueryResult& out) {
-    if (sql == nullptr) {
+    const auto request = xsql::runtime::parse_runtime_pragma(sql, "idasql");
+    if (!request.matched) {
         return false;
     }
 
-    std::string text = trim_copy(sql);
-    if (text.empty()) {
-        return false;
-    }
-    if (!text.empty() && text.back() == ';') {
-        text.pop_back();
-        text = trim_copy(text);
-    }
-
-    std::string lower = to_lower_copy(text);
-    const std::string pragma_prefix = "pragma";
-    if (lower.rfind(pragma_prefix, 0) != 0) {
-        return false;
-    }
-
-    std::string body = trim_copy(text.substr(pragma_prefix.size()));
-    std::string body_lower = to_lower_copy(body);
-    const std::string idasql_prefix = "idasql.";
-    if (body_lower.rfind(idasql_prefix, 0) != 0) {
-        return false;
-    }
-
-    std::string key_expr = trim_copy(body.substr(idasql_prefix.size()));
-    std::string value_expr;
-    size_t eq_pos = key_expr.find('=');
-    if (eq_pos != std::string::npos) {
-        value_expr = trim_copy(key_expr.substr(eq_pos + 1));
-        key_expr = trim_copy(key_expr.substr(0, eq_pos));
-        value_expr = strip_optional_quotes(value_expr);
-    }
-
-    const std::string key = to_lower_copy(key_expr);
     auto& settings = runtime_settings();
 
-    if (key == "query_timeout_ms") {
-        if (value_expr.empty()) {
-            out = make_pragma_result("query_timeout_ms", std::to_string(settings.query_timeout_ms()));
-            return true;
-        }
-        int timeout_ms = 0;
-        if (!parse_int_value(value_expr, timeout_ms) || !settings.set_query_timeout_ms(timeout_ms)) {
-            out = make_pragma_error("Invalid idasql.query_timeout_ms value");
-            return true;
-        }
-        out = make_pragma_result("query_timeout_ms", std::to_string(settings.query_timeout_ms()));
+    const auto common = xsql::runtime::handle_common_runtime_pragma(
+        request, "idasql", settings.common_settings());
+    if (common.handled) {
+        out = common.success
+            ? make_pragma_result(common.name, common.value)
+            : make_pragma_error(common.error);
         return true;
     }
 
-    if (key == "queue_admission_timeout_ms") {
-        if (value_expr.empty()) {
-            out = make_pragma_result("queue_admission_timeout_ms",
-                                     std::to_string(settings.queue_admission_timeout_ms()));
-            return true;
-        }
-        int timeout_ms = 0;
-        if (!parse_int_value(value_expr, timeout_ms) ||
-            !settings.set_queue_admission_timeout_ms(timeout_ms)) {
-            out = make_pragma_error("Invalid idasql.queue_admission_timeout_ms value");
-            return true;
-        }
-        out = make_pragma_result("queue_admission_timeout_ms",
-                                 std::to_string(settings.queue_admission_timeout_ms()));
-        return true;
-    }
-
-    if (key == "max_queue") {
-        if (value_expr.empty()) {
-            out = make_pragma_result("max_queue", std::to_string(settings.max_queue()));
-            return true;
-        }
-        int queue_limit = 0;
-        if (!parse_int_value(value_expr, queue_limit) || queue_limit < 0 ||
-            !settings.set_max_queue(static_cast<size_t>(queue_limit))) {
-            out = make_pragma_error("Invalid idasql.max_queue value");
-            return true;
-        }
-        out = make_pragma_result("max_queue", std::to_string(settings.max_queue()));
-        return true;
-    }
-
-    if (key == "hints_enabled") {
-        if (value_expr.empty()) {
-            out = make_pragma_result("hints_enabled", settings.hints_enabled() ? "1" : "0");
-            return true;
-        }
-        bool enabled = false;
-        if (!parse_bool_value(value_expr, enabled)) {
-            out = make_pragma_error("Invalid idasql.hints_enabled value");
-            return true;
-        }
-        settings.set_hints_enabled(enabled);
-        out = make_pragma_result("hints_enabled", settings.hints_enabled() ? "1" : "0");
-        return true;
-    }
-
-    if (key == "enable_idapython") {
-        if (value_expr.empty()) {
+    if (request.key == "enable_idapython") {
+        if (request.value.empty()) {
             out = make_pragma_result("enable_idapython", settings.enable_idapython() ? "1" : "0");
             return true;
         }
         bool enabled = false;
-        if (!parse_bool_value(value_expr, enabled)) {
+        if (!xsql::runtime::parse_bool_value(request.value, enabled)) {
             out = make_pragma_error("Invalid idasql.enable_idapython value");
             return true;
         }
@@ -314,36 +208,25 @@ bool QueryEngine::handle_runtime_pragma(const char* sql, QueryResult& out) {
         return true;
     }
 
-    if (key == "timeout_push") {
-        if (value_expr.empty()) {
-            out = make_pragma_error("idasql.timeout_push requires a timeout value");
+    if (request.key == "idapython_output_max") {
+        if (request.value.empty()) {
+            out = make_pragma_result("idapython_output_max",
+                                     std::to_string(settings.idapython_output_max()));
             return true;
         }
-        int timeout_ms = 0;
-        if (!parse_int_value(value_expr, timeout_ms)) {
-            out = make_pragma_error("Invalid idasql.timeout_push value");
+        int value = 0;
+        if (!xsql::runtime::parse_int_value(request.value, value) || value < 0) {
+            out = make_pragma_error(
+                "Invalid idasql.idapython_output_max value (bytes; 0 = unbounded)");
             return true;
         }
-        int effective_timeout = 0;
-        if (!settings.timeout_push(timeout_ms, &effective_timeout)) {
-            out = make_pragma_error("Invalid idasql.timeout_push value");
-            return true;
-        }
-        out = make_pragma_result("query_timeout_ms", std::to_string(effective_timeout));
+        settings.set_idapython_output_max(static_cast<size_t>(value));
+        out = make_pragma_result("idapython_output_max",
+                                 std::to_string(settings.idapython_output_max()));
         return true;
     }
 
-    if (key == "timeout_pop") {
-        int effective_timeout = 0;
-        if (!settings.timeout_pop(&effective_timeout)) {
-            out = make_pragma_error("idasql.timeout_pop stack is empty");
-            return true;
-        }
-        out = make_pragma_result("query_timeout_ms", std::to_string(effective_timeout));
-        return true;
-    }
-
-    out = make_pragma_error("Unknown idasql pragma key");
+    out = make_pragma_error(xsql::runtime::unknown_runtime_pragma_error("idasql"));
     return true;
 }
 
@@ -352,7 +235,7 @@ void QueryEngine::append_query_hints(const std::string& sql, QueryResult& result
         return;
     }
 
-    const std::string lower = to_lower_copy(sql);
+    const std::string lower = xsql::runtime::to_lower_copy(sql);
     const bool touches_decompiler_table =
         lower.find("ctree_lvars") != std::string::npos ||
         lower.find("ctree_call_args") != std::string::npos ||

@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * database.hpp - IDASQL API
@@ -55,9 +54,17 @@ namespace idasql {
  */
 struct Row {
     std::vector<std::string> values;
+    // Per-cell SQL-NULL flags, parallel to `values` (nonzero => the cell was SQL
+    // NULL; its `values` entry is then an empty string). Mirrors xsql::Row::nulls.
+    // May be left empty by producers that don't track nullness; consumers treat an
+    // empty `nulls` vector as "unknown" and fall back to prior behavior. This lets
+    // a real SQL NULL be distinguished from an empty/"NULL" text value on every
+    // output surface (HTTP json/csv/tsv, MCP, -q).
+    std::vector<char> nulls;
 
     const std::string& operator[](size_t i) const { return values[i]; }
     size_t size() const { return values.size(); }
+    bool is_null(size_t i) const { return i < nulls.size() && nulls[i] != 0; }
 };
 
 /**
@@ -213,10 +220,6 @@ public:
     const xsql::Database& database() const { return db_; }
 
 private:
-    static std::string to_lower_copy(std::string value);
-    static std::string strip_optional_quotes(const std::string& s);
-    static bool parse_int_value(const std::string& text, int& value);
-    static bool parse_bool_value(const std::string& text, bool& value);
     static QueryResult make_pragma_result(const std::string& key, const std::string& value);
     static QueryResult make_pragma_error(const std::string& error);
     bool handle_runtime_pragma(const char* sql, QueryResult& out);

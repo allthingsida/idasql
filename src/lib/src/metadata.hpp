@@ -1,19 +1,19 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * metadata.hpp - IDA database metadata as virtual tables
  *
- * Tables: db_info, ida_info, welcome
+ * Tables: db_info, ida_info, binary
  */
 
 #pragma once
 
-#include "metadata_welcome.hpp"
+#include "metadata_binary.hpp"
+#include "metadata_runtime_settings.hpp"
 #include <idasql/vtable.hpp>
 #include <xsql/database.hpp>
 
@@ -22,16 +22,20 @@
 namespace idasql {
 namespace metadata {
 
-struct MetadataItem {
-    std::string key;
-    std::string value;
-    std::string type;  // "string", "int", "hex", "bool"
+// MetadataItem (the shared key/value/type row shape) lives in
+// metadata_binary.hpp so define_binary() can use it without a cycle.
+
+struct TrueBelieverRow {
+    std::string handle;
+    std::string name;
 };
 
 struct MetadataRegistry {
     CachedTableDef<MetadataItem> db_info;
     CachedTableDef<MetadataItem> ida_info;
-    CachedTableDef<WelcomeRow> welcome;
+    CachedTableDef<MetadataItem> binary;
+    CachedTableDef<RuntimeSettingRow> runtime_settings;
+    CachedTableDef<TrueBelieverRow> true_believers;
 
     MetadataRegistry();
     void register_all(xsql::Database& db);

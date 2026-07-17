@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * entities_xrefs.hpp - `xrefs` and `data_refs` tables, plus constraint-pushdown
@@ -34,7 +33,7 @@ struct DataRefInfo {
 
 /**
  * Iterator for xrefs TO a specific address.
- * Used when query has: WHERE to_ea = X
+ * Used when query has: WHERE to_addr = X
  * Uses xrefblk_t::first_to/next_to for O(refs_to_X) instead of O(all_xrefs)
  */
 class XrefsToIterator : public xsql::RowIterator {
@@ -53,7 +52,7 @@ public:
 
 /**
  * Iterator for xrefs FROM a specific address.
- * Used when query has: WHERE from_ea = X
+ * Used when query has: WHERE from_addr = X
  * Uses xrefblk_t::first_from/next_from for O(refs_from_X) instead of
  * O(all_xrefs)
  */

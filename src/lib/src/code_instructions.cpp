@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "code_instructions.hpp"
 
@@ -169,7 +168,14 @@ void collect_instruction_rows(std::vector<InstructionRow> &rows) {
 
   ea_t ea = inf_get_min_ea();
   ea_t max_ea = inf_get_max_ea();
+  uint64_t scanned = 0;
   while (ea < max_ea && ea != BADADDR) {
+    // Cooperative cancellation -- this whole-program walk cannot be
+    // interrupted by the SQLite progress handler, so poll the query deadline.
+    if (((++scanned) & 4095u) == 0 && xsql::vtab_interrupted()) {
+      xsql::set_vtab_error("query interrupted: timeout while building instructions");
+      return;
+    }
     if (is_code(get_flags(ea))) {
       rows.push_back({ea});
     }
@@ -186,7 +192,19 @@ CachedTableDef<InstructionRow> define_instructions() {
           .cache_builder([](std::vector<InstructionRow> &rows) {
             collect_instruction_rows(rows);
           })
+          // Stable rowid = the instruction's address, matching the `addr` column
+          // and both filter iterators (InstructionAtAddressIterator /
+          // InstructionsInFuncIterator both report ea as rowid). This makes the
+          // full-scan rowid agree with the filtered rowids, so a multi-row
+          // UPDATE/DELETE resolves each row by its own address -- deleting the
+          // instruction at one ea never shifts another row's rowid.
+          .rowid([](const InstructionRow &row) -> int64_t {
+            return static_cast<int64_t>(row.ea);
+          })
           .row_lookup([](InstructionRow &row, int64_t rowid) -> bool {
+            // rowid is an instruction address (see .rowid above): resolve by ea,
+            // position-independent. No positional fallback -- with rowid_fn set,
+            // every scan (full or filtered) produces an ea, never a cache index.
             if (rowid < 0)
               return false;
             const ea_t ea = static_cast<ea_t>(rowid);
@@ -194,19 +212,9 @@ CachedTableDef<InstructionRow> define_instructions() {
               row.ea = ea;
               return true;
             }
-            // Full scans use positional rowids; resolve through the instruction
-            // snapshot.
-            std::vector<InstructionRow> rows;
-            collect_instruction_rows(rows);
-            const size_t pos = static_cast<size_t>(rowid);
-            if (pos < rows.size() && rows[pos].ea != BADADDR &&
-                is_code(get_flags(rows[pos].ea))) {
-              row.ea = rows[pos].ea;
-              return true;
-            }
             return false;
           })
-          .column_int64("address",
+          .column_int64("addr",
                         [](const InstructionRow &row) -> int64_t {
                           return static_cast<int64_t>(row.ea);
                         })
@@ -507,7 +515,7 @@ CachedTableDef<InstructionRow> define_instructions() {
         return ok;
       })
       .filter_eq(
-          "address",
+          "addr",
           [](int64_t address) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<InstructionAtAddressIterator>(
                 static_cast<ea_t>(address));
@@ -608,13 +616,24 @@ void collect_instruction_operand_rows(std::vector<InstructionOperandRow> &rows) 
 
   ea_t ea = inf_get_min_ea();
   ea_t max_ea = inf_get_max_ea();
+  uint64_t scanned = 0;
   while (ea < max_ea && ea != BADADDR) {
+    // Cooperative cancellation (whole-program decode walk).
+    if (((++scanned) & 4095u) == 0 && xsql::vtab_interrupted()) {
+      xsql::set_vtab_error(
+          "query interrupted: timeout while building instruction_operands");
+      return;
+    }
     if (is_code(get_flags(ea))) {
       insn_t insn;
       if (decode_insn(&insn, ea) > 0) {
         for (int opnum = 0; opnum < UA_MAXOP; ++opnum) {
+          // Skip void slots but keep scanning all UA_MAXOP operands: some IDPs
+          // leave gaps (a real operand after a void), and the pushdown
+          // iterators 'continue' past voids -- 'break' here would make
+          // full-scan and filtered results disagree.
           if (insn.ops[opnum].type == o_void)
-            break;
+            continue;
           rows.push_back({ea, opnum});
         }
       }
@@ -735,7 +754,7 @@ CachedTableDef<InstructionOperandRow> define_instruction_operands() {
       .cache_builder([](std::vector<InstructionOperandRow> &rows) {
         collect_instruction_operand_rows(rows);
       })
-      .column_int64("address",
+      .column_int64("addr",
                     [](const InstructionOperandRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
                     })
@@ -781,7 +800,7 @@ CachedTableDef<InstructionOperandRow> define_instruction_operands() {
           return 0;
         return op.reg;
       })
-      .column_int64("addr", [](const InstructionOperandRow &row) -> int64_t {
+      .column_int64("op_addr", [](const InstructionOperandRow &row) -> int64_t {
         insn_t insn;
         op_t op;
         if (!decode_operand(row.ea, row.opnum, insn, op, nullptr))
@@ -804,7 +823,7 @@ CachedTableDef<InstructionOperandRow> define_instruction_operands() {
         return operand_value_for_row(op);
       })
       .filter_eq(
-          "address",
+          "addr",
           [](int64_t address) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<InstructionOperandsAtAddressIterator>(
                 static_cast<ea_t>(address));

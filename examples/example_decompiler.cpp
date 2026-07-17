@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * example_decompiler.cpp - Hex-Rays decompiler analysis with IDASQL
@@ -48,7 +47,7 @@ int main(int argc, char* argv[]) {
     std::cout << "=== Decompiler Analysis ===\n\n";
 
     // Try to decompile a function to check if Hex-Rays is available
-    auto test = session.query("SELECT decompile((SELECT address FROM funcs WHERE rowid = 0)) as code");
+    auto test = session.query("SELECT decompile((SELECT addr FROM funcs WHERE rowid = 0)) as code");
     if (!test.success || test.empty() || test.rows[0][0].find("Decompiler") != std::string::npos) {
         std::cerr << "Warning: Hex-Rays decompiler may not be available.\n";
         std::cerr << "Some queries may fail or return empty results.\n\n";
@@ -65,7 +64,7 @@ int main(int argc, char* argv[]) {
         "  f.name as name, "
         "  COUNT(*) as lines "
         "FROM pseudocode p "
-        "JOIN funcs f ON p.func_addr = f.address "
+        "JOIN funcs f ON p.func_addr = f.addr "
         "GROUP BY p.func_addr, f.name "
         "ORDER BY lines DESC "
         "LIMIT 10"
@@ -90,7 +89,7 @@ int main(int argc, char* argv[]) {
         "  SUM(CASE WHEN is_arg = 1 THEN 1 ELSE 0 END) as args, "
         "  SUM(CASE WHEN is_arg = 0 THEN 1 ELSE 0 END) as locals "
         "FROM ctree_lvars l "
-        "JOIN funcs f ON l.func_addr = f.address "
+        "JOIN funcs f ON l.func_addr = f.addr "
         "GROUP BY l.func_addr, f.name "
         "ORDER BY total_vars DESC "
         "LIMIT 10"
@@ -133,7 +132,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "\n=== Pseudocode for Largest Function (first 30 lines) ===\n";
 
-    auto largest = session.scalar("SELECT address FROM funcs ORDER BY size DESC LIMIT 1");
+    auto largest = session.scalar("SELECT addr FROM funcs ORDER BY size DESC LIMIT 1");
     std::string pseudocode_sql =
         "SELECT line "
         "FROM pseudocode "
@@ -180,7 +179,7 @@ int main(int argc, char* argv[]) {
 
     // Find main function
     auto main_addr = session.scalar(
-        "SELECT address FROM funcs WHERE name LIKE '%main%' LIMIT 1"
+        "SELECT addr FROM funcs WHERE name LIKE '%main%' LIMIT 1"
     );
 
     if (!main_addr.empty()) {
@@ -200,7 +199,7 @@ int main(int argc, char* argv[]) {
     auto if_lines = session.query(
         "SELECT f.name as func, p.line "
         "FROM pseudocode p "
-        "JOIN funcs f ON p.func_addr = f.address "
+        "JOIN funcs f ON p.func_addr = f.addr "
         "WHERE line LIKE '%if (%' "
         "LIMIT 10"
     );

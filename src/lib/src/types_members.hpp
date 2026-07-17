@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * types_members.hpp - `types_members` table (struct/union members), member
@@ -29,6 +28,7 @@ struct MemberEntry {
   std::string member_type;
   bool is_bitfield;
   bool is_baseclass;
+  bool is_gap;
   std::string comment;
   // Member type classification (for efficient filtering)
   bool mt_is_struct;
@@ -38,6 +38,18 @@ struct MemberEntry {
   bool mt_is_array;
   int member_type_ordinal; // -1 if member type not in local types
 };
+
+// Array-aware type-string parsing, shared with the ctree_lvars type setter.
+// make_type_declarator() re-attaches a trailing `[N]` array suffix after a
+// synthesized variable name so parse_decl accepts array types; returns "" when
+// no base type remains.  parse_type_declarator() turns a bare type / declarator
+// string (scalar, pointer, array, named type) into a tinfo_t, returning false
+// with `error` set on failure.
+std::string make_type_declarator(const std::string &type_text,
+                                 const char *var_name = "__idasql_var");
+
+bool parse_type_declarator(const std::string &type_text, tinfo_t &out_type,
+                           std::string &error, const char *what = "type");
 
 int get_type_ordinal_by_name(til_t *ti, const char *type_name);
 
@@ -54,8 +66,12 @@ struct TypeMemberRef {
   uint32_t ordinal;
 
   TypeMemberRef(uint32_t ord);
-  bool save();
 };
+
+// Resolve the live UDT index for a cached member row, or -1 (with `error` set)
+// when the cached member can no longer be matched by name (layout changed).
+int resolve_member_index(const TypeMemberRef &ref, const MemberEntry &row,
+                         std::string &error);
 
 bool build_member_entry(uint32_t ordinal, int member_index, MemberEntry &entry);
 

@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "code_loops.hpp"
 
@@ -179,13 +178,13 @@ GeneratorTableDef<LoopInfo> define_disasm_loops() {
       .column_int64("func_addr",
                     [](const LoopInfo &r) -> int64_t { return r.func_addr; })
       .column_int("loop_id", [](const LoopInfo &r) -> int { return r.loop_id; })
-      .column_int64("header_ea",
+      .column_int64("header_addr",
                     [](const LoopInfo &r) -> int64_t { return r.header_ea; })
       .column_int64(
-          "header_end_ea",
+          "header_end_addr",
           [](const LoopInfo &r) -> int64_t { return r.header_end_ea; })
       .column_int64(
-          "back_edge_block_ea",
+          "back_edge_block_addr",
           [](const LoopInfo &r) -> int64_t { return r.back_edge_block_ea; })
       .column_int64(
           "back_edge_block_end",

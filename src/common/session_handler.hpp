@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #pragma once
 
@@ -63,11 +62,14 @@ public:
         end_session();
     }
 
-    // Non-copyable, movable
+    // Non-copyable AND non-movable: callbacks_ holds lambdas that capture `this`,
+    // so a move would leave them pointing at the moved-from object (dangling this).
+    // It is never moved today; deleting the move members makes that a compile error
+    // instead of a latent footgun.
     SessionHandler(const SessionHandler&) = delete;
     SessionHandler& operator=(const SessionHandler&) = delete;
-    SessionHandler(SessionHandler&&) = default;
-    SessionHandler& operator=(SessionHandler&&) = default;
+    SessionHandler(SessionHandler&&) = delete;
+    SessionHandler& operator=(SessionHandler&&) = delete;
 
     std::string process_line(const std::string& line) {
         if (line.empty()) {

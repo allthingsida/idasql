@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "types.hpp"
 
@@ -15,6 +14,8 @@ TypesRegistry::TypesRegistry()
     , applied_types(define_applied_types())
     , local_type_bookmarks(define_local_type_bookmarks())
     , types_members(define_types_members())
+    , struct_member_xrefs(define_struct_member_xrefs())
+    , type_gaps(define_type_gaps())
     , types_enum_values(define_types_enum_values())
     , types_func_args(define_types_func_args())
 {}
@@ -31,6 +32,12 @@ void TypesRegistry::register_all(xsql::Database& db) {
 
     db.register_cached_table("ida_types_members", &types_members);
     db.create_table("types_members", "ida_types_members");
+
+    db.register_cached_table("ida_struct_member_xrefs", &struct_member_xrefs);
+    db.create_table("struct_member_xrefs", "ida_struct_member_xrefs");
+
+    db.register_cached_table("ida_type_gaps", &type_gaps);
+    db.create_table("type_gaps", "ida_type_gaps");
 
     db.register_cached_table("ida_types_enum_values", &types_enum_values);
     db.create_table("types_enum_values", "ida_types_enum_values");

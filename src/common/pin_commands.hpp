@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * pin_commands.hpp - Wire the ".pin" dot-command callbacks to the autostart
@@ -54,11 +53,16 @@ inline std::string format_service_pin(const char* name,
                                       const autostart::ServicePin& p) {
     std::ostringstream os;
     os << "  " << std::left << std::setw(5) << name;
-    if (p.port == 0)
+    if (!p.configured) {
         os << "(not set)";
-    else
-        os << p.host << ":" << p.port
-           << "  (autostart: " << (p.enabled ? "on" : "off") << ")";
+    } else {
+        os << p.host << ":";
+        if (p.port == 0)
+            os << "<random port each launch>";
+        else
+            os << p.port;
+        os << "  (autostart: " << (p.enabled ? "on" : "off") << ")";
+    }
     os << "\n";
     return os.str();
 }
@@ -80,18 +84,22 @@ inline void wire_pin_callbacks(CommandCallbacks& cb) {
     cb.pin_list = []() -> std::string { return pin_detail::format_pin_list(); };
 
     cb.pin_set = [](const std::string& service, const std::string& bind,
-                    int port) -> std::string {
+                    int port, const std::string& token) -> std::string {
         autostart::Service svc;
         std::string err;
         if (!pin_detail::resolve_service(service, svc, err))
             return err;
 
         const std::string host = bind.empty() ? "127.0.0.1" : bind;
-        autostart::set(svc, host, port);
+        autostart::set(svc, host, port, token);
 
         std::ostringstream os;
-        os << "Pinned " << service << " -> " << host << ":" << port
-           << " (autostart on).\n"
+        os << "Pinned " << service << " -> " << host << ":";
+        if (port == 0)
+            os << "<random port each launch>";
+        else
+            os << port;
+        os << (token.empty() ? " (autostart on)." : " (autostart on, auth token set).") << "\n"
            << "The plugin auto-starts this when the database is opened; '."
            << service << " start' with no port reuses it.";
         return os.str();
@@ -107,9 +115,9 @@ inline void wire_pin_callbacks(CommandCallbacks& cb) {
             autostart::PinConfig cfg = autostart::load();
             const autostart::ServicePin& p =
                 (svc == autostart::Service::Http) ? cfg.http : cfg.mcp;
-            if (p.port == 0)
+            if (!p.configured)
                 return "No " + service + " pin set. Use '.pin set " + service
-                       + " <port>' first.";
+                       + " [bindinterface] [port]' first.";
         }
         autostart::set_enabled(svc, enable);
         return std::string("Autostart ") + (enable ? "enabled" : "disabled")

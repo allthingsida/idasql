@@ -1,11 +1,12 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "idapython_exec.hpp"
+
+#include <idasql/runtime_settings.hpp>
 
 namespace idasql {
 namespace idapython {
@@ -44,7 +45,7 @@ void UiMessageCapture::release_runtime() {
     maybe_unhook_locked();
 }
 
-bool UiMessageCapture::begin_capture(std::string* error) {
+bool UiMessageCapture::begin_capture(std::string* error, size_t max_bytes) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ensure_hook_locked(error)) {
         return false;
@@ -57,6 +58,9 @@ bool UiMessageCapture::begin_capture(std::string* error) {
     }
     buffer_.str("");
     buffer_.clear();
+    cap_bytes_ = max_bytes;
+    written_ = 0;
+    truncated_ = false;
     capturing_ = true;
     return true;
 }
@@ -109,7 +113,29 @@ ssize_t idaapi UiMessageCapture::on_event(ssize_t code, va_list va) {
         return 0;
     }
 
-    buffer_ << formatted.c_str();
+    // Unbounded when cap_bytes_ == 0. Otherwise append up to the cap, then emit a
+    // single truncation marker and drop the rest so a runaway snippet cannot
+    // exhaust memory or the response channel.
+    if (cap_bytes_ == 0) {
+        buffer_ << formatted.c_str();
+        return 1;
+    }
+    if (truncated_) {
+        return 1;  // already capped; swallow further output
+    }
+    const size_t len = formatted.length();
+    if (written_ + len <= cap_bytes_) {
+        buffer_ << formatted.c_str();
+        written_ += len;
+    } else {
+        const size_t room = cap_bytes_ - written_;
+        if (room > 0) {
+            buffer_.write(formatted.c_str(), static_cast<std::streamsize>(room));
+            written_ += room;
+        }
+        buffer_ << "\n...[idapython output truncated at " << cap_bytes_ << " bytes]...\n";
+        truncated_ = true;
+    }
     return 1;
 }
 
@@ -142,7 +168,8 @@ void runtime_release() {
     UiMessageCapture::instance().release_runtime();
 }
 
-ScopedCapture::ScopedCapture() : active_(UiMessageCapture::instance().begin_capture(&error_)) {}
+ScopedCapture::ScopedCapture(size_t max_bytes)
+    : active_(UiMessageCapture::instance().begin_capture(&error_, max_bytes)) {}
 
 ScopedCapture::~ScopedCapture() {
     if (active_ && !finished_) {
@@ -162,11 +189,14 @@ std::string ScopedCapture::finish() {
 extlang_t* get_python_extlang() {
     static std::mutex mutex;
     static extlang_t* cached = nullptr;
-    static bool tried = false;
 
     std::lock_guard<std::mutex> lock(mutex);
-    if (!tried) {
-        tried = true;
+    // Retry the lookup while unresolved rather than latching a one-time failure:
+    // if IDAPython is not loaded yet on the first call, a `tried`-once cache would
+    // report "Python interpreter not available" for the whole process lifetime even
+    // after it loads. find_extlang_by_name is a cheap registered-name lookup; once
+    // it resolves we keep the pointer.
+    if (cached == nullptr) {
         extlang_object_t obj = find_extlang_by_name("Python");
         cached = obj;
     }
@@ -218,7 +248,7 @@ ExecutionResult execute_snippet(const std::string& code, const std::string& sand
         return result;
     }
 
-    ScopedCapture capture;
+    ScopedCapture capture(runtime_settings().idapython_output_max());
     if (!capture.ok()) {
         result.error = capture.error();
         return result;
@@ -255,7 +285,7 @@ ExecutionResult execute_file(const std::string& path, const std::string& sandbox
         return result;
     }
 
-    ScopedCapture capture;
+    ScopedCapture capture(runtime_settings().idapython_output_max());
     if (!capture.ok()) {
         result.error = capture.error();
         return result;

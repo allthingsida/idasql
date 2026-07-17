@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "code_blocks.hpp"
 
@@ -72,6 +71,11 @@ CachedTableDef<BlockInfo> define_blocks() {
       .cache_builder([](std::vector<BlockInfo> &cache) {
         size_t func_qty = get_func_qty();
         for (size_t i = 0; i < func_qty; i++) {
+          // Cooperative cancellation across the per-function build.
+          if ((i & 1023u) == 0 && xsql::vtab_interrupted()) {
+            xsql::set_vtab_error("query interrupted: timeout while building blocks");
+            return;
+          }
           func_t *func = getn_func(i);
           if (!func)
             continue;
@@ -89,15 +93,15 @@ CachedTableDef<BlockInfo> define_blocks() {
           }
         }
       })
-      .column_int64("func_ea",
+      .column_int64("func_addr",
                     [](const BlockInfo &r) -> int64_t {
                       return static_cast<int64_t>(r.func_ea);
                     })
-      .column_int64("start_ea",
+      .column_int64("start_addr",
                     [](const BlockInfo &r) -> int64_t {
                       return static_cast<int64_t>(r.start_ea);
                     })
-      .column_int64("end_ea",
+      .column_int64("end_addr",
                     [](const BlockInfo &r) -> int64_t {
                       return static_cast<int64_t>(r.end_ea);
                     })
@@ -106,7 +110,7 @@ CachedTableDef<BlockInfo> define_blocks() {
                       return static_cast<int64_t>(r.end_ea - r.start_ea);
                     })
       .filter_eq(
-          "func_ea",
+          "func_addr",
           [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<BlocksInFuncIterator>(
                 static_cast<ea_t>(func_addr));
@@ -124,6 +128,12 @@ CachedTableDef<FunctionChunkInfo> define_function_chunks() {
         cache.reserve(chunk_qty);
 
         for (size_t i = 0; i < chunk_qty; i++) {
+          // Cooperative cancellation across the per-chunk build.
+          if ((i & 1023u) == 0 && xsql::vtab_interrupted()) {
+            xsql::set_vtab_error(
+                "query interrupted: timeout while building function_chunks");
+            return;
+          }
           func_t *chunk = getn_fchunk(static_cast<int>(i));
           if (!chunk)
             continue;
@@ -138,8 +148,14 @@ CachedTableDef<FunctionChunkInfo> define_function_chunks() {
           row.chunk_end = chunk->end_ea;
           row.total_size = chunk->size();
 
+          // block_count must count THIS chunk's basic blocks, not the whole
+          // owner function's. qflow_chart_t::create ignores the [ea1, ea2) range
+          // when a non-null pfn is passed (it charts the entire function), so
+          // pass nullptr with the chunk bounds to chart only [chunk_start,
+          // chunk_end) -- otherwise every chunk of a function reports the same
+          // function-wide block count.
           qflow_chart_t fc;
-          fc.create("", owner, chunk->start_ea, chunk->end_ea, FC_NOEXT);
+          fc.create("", nullptr, chunk->start_ea, chunk->end_ea, FC_NOEXT);
           row.block_count = fc.size();
 
           cache.push_back(row);

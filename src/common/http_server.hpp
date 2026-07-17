@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #pragma once
 
@@ -28,16 +27,8 @@
 
 namespace idasql {
 
-// Legacy callback: SQL script in, JSON string out. Used by the in-process
-// plugin, which marshals whole-script execution to IDA's main thread via
-// execute_sync and returns the serialized envelope itself.
+// Callback for handling SQL queries
 using HTTPQueryCallback = std::function<std::string(const std::string& sql)>;
-
-// Preferred path (CLI): a single-statement executor. The thinclient owns
-// multi-statement orchestration, query-string options (continue_on_error/
-// include_sql), and output formatting (json/text/csv/tsv) from the ScriptResult.
-using HTTPStatementExecutor =
-    std::function<void(const std::string& sql, xsql::ScriptStatementResult& out)>;
 
 class IDAHTTPServer {
 public:
@@ -56,15 +47,12 @@ public:
      * @param bind_addr Address to bind to (default: localhost only)
      * @param use_queue If true, callbacks are queued for main thread (CLI mode)
      *                  If false, callbacks called directly (plugin mode with execute_sync)
+     * @param auth_token Optional bearer token. Empty == no authentication (the
+     *                  loopback default); non-empty makes /query, /status and
+     *                  /shutdown require `Authorization: Bearer <token>`.
      * @return Actual port used, or -1 on failure
      */
     int start(int port, HTTPQueryCallback query_cb,
-              const std::string& bind_addr = "127.0.0.1",
-              bool use_queue = false);
-
-    // Preferred overload: drive the server with a single-statement executor
-    // (enables continue_on_error/include_sql and round-trip-free format=).
-    int start(int port, HTTPStatementExecutor executor,
               const std::string& bind_addr = "127.0.0.1",
               bool use_queue = false,
               const std::string& auth_token = "");

@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 /**
  * example_functions.cpp - Function analysis with IDASQL
@@ -80,9 +79,9 @@ int main(int argc, char* argv[]) {
     auto most_called = session.query(
         "SELECT f.name, COUNT(*) as callers "
         "FROM funcs f "
-        "JOIN xrefs x ON f.address = x.to_ea "
+        "JOIN xrefs x ON f.addr = x.to_addr "
         "WHERE x.is_code = 1 "
-        "GROUP BY f.address "
+        "GROUP BY f.addr "
         "ORDER BY callers DESC "
         "LIMIT 10"
     );
@@ -100,7 +99,7 @@ int main(int argc, char* argv[]) {
     auto most_calls = session.query(
         "SELECT f.name as name, COUNT(*) as calls "
         "FROM instructions i "
-        "JOIN funcs f ON i.func_addr = f.address "
+        "JOIN funcs f ON i.func_addr = f.addr "
         "WHERE i.mnemonic = 'call' "
         "GROUP BY i.func_addr, f.name "
         "ORDER BY calls DESC "
@@ -119,11 +118,11 @@ int main(int argc, char* argv[]) {
 
     auto complex = session.query(
         "SELECT "
-        "  (SELECT name FROM funcs WHERE address = b.func_ea) as name, "
+        "  (SELECT name FROM funcs WHERE addr = b.func_addr) as name, "
         "  COUNT(*) as blocks, "
         "  SUM(b.size) as total_size "
         "FROM blocks b "
-        "GROUP BY b.func_ea "
+        "GROUP BY b.func_addr "
         "ORDER BY blocks DESC "
         "LIMIT 10"
     );
@@ -150,7 +149,7 @@ int main(int argc, char* argv[]) {
         "FROM funcs f "
         "WHERE NOT EXISTS ("
         "  SELECT 1 FROM instructions i "
-        "  WHERE i.func_addr = f.address AND i.mnemonic = 'call'"
+        "  WHERE i.func_addr = f.addr AND i.mnemonic = 'call'"
         ") "
         "ORDER BY f.size DESC "
         "LIMIT 10"
@@ -167,10 +166,10 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Orphan Functions (no callers, first 10) ===\n";
 
     auto orphans = session.query(
-        "SELECT f.name, printf('0x%X', f.address) as addr "
+        "SELECT f.name, printf('0x%X', f.addr) as addr "
         "FROM funcs f "
         "WHERE NOT EXISTS ("
-        "  SELECT 1 FROM xrefs x WHERE x.to_ea = f.address AND x.is_code = 1"
+        "  SELECT 1 FROM xrefs x WHERE x.to_addr = f.addr AND x.is_code = 1"
         ") "
         "LIMIT 10"
     );

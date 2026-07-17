@@ -1,3 +1,11 @@
+#
+# Copyright (c) 2024-2026 Elias Bachaalany
+# SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
+#
+# This file is licensed under the Human-Origin Source License v1.0.
+# See LICENSE.
+#
+
 # examples/CMakeLists.txt - IDASQL Example Programs
 #
 cmake_minimum_required(VERSION 3.20)

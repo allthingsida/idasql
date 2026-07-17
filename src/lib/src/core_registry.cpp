@@ -1,9 +1,8 @@
 // Copyright (c) 2024-2026 Elias Bachaalany
-// SPDX-License-Identifier: MPL-2.0
+// SPDX-License-Identifier: LicenseRef-Human-Origin-Source-1.0
 //
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// This file is licensed under the Human-Origin Source License v1.0.
+// See LICENSE.
 
 #include "core.hpp"
 
@@ -33,21 +32,7 @@ CoreRegistry::CoreRegistry()
       netnode_kv(memory::define_netnode_kv()), xrefs(xrefs::define_xrefs()),
       data_refs(xrefs::define_data_refs()),
       dirtree_entries(dirtrees::define_dirtree_entries()),
-      dirtree_folders(dirtrees::define_dirtree_folders()) {
-  g_instance = this;
-}
-
-CoreRegistry::~CoreRegistry() {
-  if (g_instance == this)
-    g_instance = nullptr;
-}
-
-void CoreRegistry::invalidate_strings_cache() { strings.invalidate_cache(); }
-
-void CoreRegistry::invalidate_strings_cache_global() {
-  if (g_instance)
-    g_instance->invalidate_strings_cache();
-}
+      dirtree_folders(dirtrees::define_dirtree_folders()) {}
 
 void CoreRegistry::register_all(xsql::Database &db) {
   // code domain
@@ -100,14 +85,15 @@ void CoreRegistry::create_helper_views(xsql::Database &db) {
   db.exec(R"(
         CREATE VIEW IF NOT EXISTS callers AS
         SELECT
-            x.to_ea as func_addr,
-            x.from_ea as caller_addr,
+            x.to_addr as func_addr,
+            x.from_addr as caller_addr,
             COALESCE(f.name, n.name, printf('sub_%X', x.from_func)) as caller_name,
             x.from_func as caller_func_addr
         FROM xrefs x
-        LEFT JOIN funcs f ON f.address = x.from_func
-        LEFT JOIN names n ON n.address = x.from_func
-        WHERE x.is_code = 1 AND x.from_func != 0
+        LEFT JOIN funcs f ON f.addr = x.from_func
+        LEFT JOIN names n ON n.addr = x.from_func
+        WHERE x.is_code = 1 AND x.from_func IS NOT NULL
+          AND x.to_addr IN (SELECT addr FROM funcs)
     )");
 
   // callees view - what does a function call
@@ -117,30 +103,31 @@ void CoreRegistry::create_helper_views(xsql::Database &db) {
         SELECT
             x.from_func as func_addr,
             COALESCE(f.name, fn.name, printf('sub_%X', x.from_func)) as func_name,
-            x.to_ea as callee_addr,
-            COALESCE(cn.name, cf.name, printf('sub_%X', x.to_ea)) as callee_name
+            x.to_addr as callee_addr,
+            COALESCE(cn.name, cf.name, printf('sub_%X', x.to_addr)) as callee_name
         FROM xrefs x
-        LEFT JOIN funcs f ON f.address = x.from_func
-        LEFT JOIN names fn ON fn.address = x.from_func
-        LEFT JOIN names cn ON cn.address = x.to_ea
-        LEFT JOIN funcs cf ON cf.address = x.to_ea
-        WHERE x.is_code = 1 AND x.from_func != 0
+        LEFT JOIN funcs f ON f.addr = x.from_func
+        LEFT JOIN names fn ON fn.addr = x.from_func
+        LEFT JOIN names cn ON cn.addr = x.to_addr
+        LEFT JOIN funcs cf ON cf.addr = x.to_addr
+        WHERE x.is_code = 1 AND x.from_func IS NOT NULL
+          AND x.to_addr IN (SELECT addr FROM funcs)
     )");
 
   // string_refs view - which functions reference which strings
   db.exec(R"(
         CREATE VIEW IF NOT EXISTS string_refs AS
         SELECT
-            s.address as string_addr,
+            s.addr as string_addr,
             s.content as string_value,
             s.length as string_length,
-            x.from_ea as ref_addr,
+            x.from_addr as ref_addr,
             x.from_func as func_addr,
             COALESCE(f.name, n.name, printf('sub_%X', x.from_func)) as func_name
         FROM strings s
-        JOIN xrefs x ON x.to_ea = s.address
-        LEFT JOIN funcs f ON f.address = x.from_func
-        LEFT JOIN names n ON n.address = x.from_func
+        JOIN xrefs x ON x.to_addr = s.addr
+        LEFT JOIN funcs f ON f.addr = x.from_func
+        LEFT JOIN names n ON n.addr = x.from_func
         WHERE x.from_func != 0
     )");
 }
