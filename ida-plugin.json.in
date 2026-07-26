@@ -2,7 +2,7 @@
   "IDAMetadataDescriptorVersion": 1,
   "plugin": {
     "name": "IDASQL",
-    "version": "@TOOL_VERSION_MAJOR@.@TOOL_VERSION_MINOR@.@TOOL_VERSION_PATCH@",
+    "version": "@TOOL_VERSION_MAJOR@.@TOOL_VERSION_MINOR@.@TOOL_VERSION_PATCH@.@TOOL_VERSION_REVISION@",
     "entryPoint": "idasql",
     "description": "SQL interface for IDA databases. Query functions, xrefs, strings, types, and more using SQL. Supports local CLI, HTTP REST server, and optional MCP integration.",
     "urls": {
@@ -18,7 +18,7 @@
       "api-scripting-and-automation",
       "collaboration-and-productivity"
     ],
-    "idaVersions": ">=9.0",
+    "idaVersions": "@IDASQL_TARGET_IDA_VERSION@",
     "platforms": [
       "windows-x86_64",
       "linux-x86_64",
