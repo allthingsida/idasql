@@ -21,6 +21,7 @@
     "idaVersions": "@IDASQL_TARGET_IDA_VERSION@",
     "platforms": [
       "windows-x86_64",
+      "windows-aarch64",
       "linux-x86_64",
       "macos-aarch64"
     ],
