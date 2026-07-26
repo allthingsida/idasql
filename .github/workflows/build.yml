@@ -9,184 +9,338 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-linux:
-    name: Build (Linux)
-    runs-on: ubuntu-latest
+  build:
+    name: Build (IDA ${{ matrix.ida_version }}, ${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ida: "92"
+            ida_version: "9.2"
+            sdk_ref: v9.2.0-sdk.1
+            runner: ubuntu-24.04
+            platform: linux-x86_64
+            plugin_ext: .so
+            cli_ext: ""
+          - ida: "92"
+            ida_version: "9.2"
+            sdk_ref: v9.2.0-sdk.1
+            runner: macos-15
+            platform: macos-arm64
+            plugin_ext: .dylib
+            cli_ext: ""
+          - ida: "92"
+            ida_version: "9.2"
+            sdk_ref: v9.2.0-sdk.1
+            runner: windows-2022
+            platform: windows-x86_64
+            plugin_ext: .dll
+            cli_ext: .exe
+            cmake_arch: x64
+            pe_machine: "0x8664"
+
+          - ida: "93"
+            ida_version: "9.3"
+            sdk_ref: v9.3.0-sdk.3
+            runner: ubuntu-24.04
+            platform: linux-x86_64
+            plugin_ext: .so
+            cli_ext: ""
+          - ida: "93"
+            ida_version: "9.3"
+            sdk_ref: v9.3.0-sdk.3
+            runner: macos-15
+            platform: macos-arm64
+            plugin_ext: .dylib
+            cli_ext: ""
+          - ida: "93"
+            ida_version: "9.3"
+            sdk_ref: v9.3.0-sdk.3
+            runner: windows-2022
+            platform: windows-x86_64
+            plugin_ext: .dll
+            cli_ext: .exe
+            cmake_arch: x64
+            pe_machine: "0x8664"
+
+          - ida: "94"
+            ida_version: "9.4"
+            sdk_ref: v9.4.0-release
+            runner: ubuntu-24.04
+            platform: linux-x86_64
+            plugin_ext: .so
+            cli_ext: ""
+          - ida: "94"
+            ida_version: "9.4"
+            sdk_ref: v9.4.0-release
+            runner: macos-15
+            platform: macos-arm64
+            plugin_ext: .dylib
+            cli_ext: ""
+          - ida: "94"
+            ida_version: "9.4"
+            sdk_ref: v9.4.0-release
+            runner: windows-2022
+            platform: windows-x86_64
+            plugin_ext: .dll
+            cli_ext: .exe
+            cmake_arch: x64
+            pe_machine: "0x8664"
+          - ida: "94"
+            ida_version: "9.4"
+            sdk_ref: v9.4.0-release
+            runner: windows-11-arm
+            platform: windows-arm64
+            plugin_ext: .dll
+            cli_ext: .exe
+            cmake_arch: ARM64
+            pe_machine: "0xAA64"
+
     env:
       IDASDK: ${{ github.workspace }}/ida-sdk
+      IDABIN: ${{ github.workspace }}/stage
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout IDASQL
+        uses: actions/checkout@v7
 
-      - name: Checkout submodules
-        run: git submodule update --init --recursive
-
-      - name: Setup IDA SDK
-        run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
-
-      - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_BUILD_EXAMPLES=ON
-
-      - name: Build
-        run: cmake --build build --config Release
-
-      - name: Upload plugin
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugin-linux
-          path: |
-            ${{ env.IDASDK }}/src/bin/plugins/idasql.so
-            ${{ env.IDASDK }}/src/bin/plugins/ida-plugin.json
-
-      - name: Upload CLI
-        uses: actions/upload-artifact@v4
-        with:
-          name: cli-linux
-          path: ${{ env.IDASDK }}/src/bin/idasql
-
-  build-macos:
-    name: Build (macOS)
-    runs-on: macos-latest
-    env:
-      IDASDK: ${{ github.workspace }}/ida-sdk
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Checkout submodules
-        run: git submodule update --init --recursive
-
-      - name: Setup IDA SDK
-        run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
-
-      - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DIDASQL_BUILD_EXAMPLES=ON
-
-      - name: Build
-        run: cmake --build build --config Release
-
-      - name: Upload plugin
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugin-macos
-          path: |
-            ${{ env.IDASDK }}/src/bin/plugins/idasql.dylib
-            ${{ env.IDASDK }}/src/bin/plugins/ida-plugin.json
-
-      - name: Upload CLI
-        uses: actions/upload-artifact@v4
-        with:
-          name: cli-macos
-          path: ${{ env.IDASDK }}/src/bin/idasql
-
-  build-windows:
-    name: Build (Windows)
-    runs-on: windows-latest
-    env:
-      IDASDK: ${{ github.workspace }}/ida-sdk
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Checkout submodules
+      - name: Checkout IDA SDK
         shell: bash
-        run: git submodule update --init --recursive
+        run: >-
+          git clone
+          --branch "${{ matrix.sdk_ref }}"
+          --depth 1
+          --single-branch
+          https://github.com/HexRaysSA/ida-sdk.git
+          "${IDASDK}"
 
-      - name: Setup IDA SDK
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
         shell: bash
-        run: git clone --depth 1 --recurse-submodules https://github.com/HexRaysSA/ida-sdk ida-sdk
+        run: |
+          mkdir -p "${IDABIN}"
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DIDASDK="${IDASDK}" \
+            -DIDABIN="${IDABIN}" \
+            -DIDASQL_TARGET_IDA_VERSION="${{ matrix.ida_version }}" \
+            -DIDASQL_BUILD_EXAMPLES=ON
 
-      - name: Configure
-        run: cmake -B build -DIDASQL_BUILD_EXAMPLES=ON
+      - name: Configure (macOS ARM64)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p "${IDABIN}"
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DIDASDK="${IDASDK}" \
+            -DIDABIN="${IDABIN}" \
+            -DIDASQL_TARGET_IDA_VERSION="${{ matrix.ida_version }}" \
+            -DIDASQL_BUILD_EXAMPLES=ON
+
+      - name: Configure (Windows native)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:IDABIN | Out-Null
+          cmake -S . -B build -A "${{ matrix.cmake_arch }}" `
+            "-DIDASDK=$env:IDASDK" `
+            "-DIDABIN=$env:IDABIN" `
+            "-DIDASQL_TARGET_IDA_VERSION=${{ matrix.ida_version }}" `
+            -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Build
-        run: cmake --build build --config Release
+        shell: pwsh
+        run: cmake --build build --config Release --parallel 4
 
-      - name: Upload plugin
-        uses: actions/upload-artifact@v4
+      - name: Stage and record provenance
+        shell: pwsh
+        run: |
+          $artifact = Join-Path $PWD "artifact"
+          $artifactPlugin = Join-Path $artifact "plugin"
+          $artifactCli = Join-Path $artifact "cli"
+          New-Item -ItemType Directory -Force -Path $artifactPlugin, $artifactCli | Out-Null
+
+          $pluginName = "idasql${{ matrix.plugin_ext }}"
+          $cliName = "idasql${{ matrix.cli_ext }}"
+          $pluginSource = Join-Path $env:IDABIN "plugins/$pluginName"
+          $manifestSource = Join-Path $env:IDABIN "plugins/ida-plugin.json"
+          $cliSource = Join-Path $env:IDABIN $cliName
+          foreach ($required in @($pluginSource, $manifestSource, $cliSource)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Required build output is missing: $required"
+            }
+          }
+
+          Copy-Item -LiteralPath $pluginSource -Destination $artifactPlugin
+          Copy-Item -LiteralPath $manifestSource -Destination $artifactPlugin
+          Copy-Item -LiteralPath $cliSource -Destination $artifactCli
+
+          $idaCmakeDir = Join-Path $PWD "build/_deps/ida_cmake-src"
+          $idaCmakeSha = (git -C $idaCmakeDir rev-parse HEAD).Trim()
+          $idaCmakeOrigin = (git -C $idaCmakeDir remote get-url origin).Trim()
+          if ($idaCmakeOrigin -notmatch "allthingsida/ida-cmake") {
+            throw "Unexpected ida-cmake origin: $idaCmakeOrigin"
+          }
+          $sdkSha = (git -C $env:IDASDK rev-parse HEAD).Trim()
+
+          [System.IO.File]::WriteAllText(
+            (Join-Path $artifact "ida-cmake-sha.txt"),
+            "$idaCmakeSha`n",
+            [System.Text.UTF8Encoding]::new($false))
+          [ordered]@{
+            ida_version = "${{ matrix.ida_version }}"
+            sdk_ref = "${{ matrix.sdk_ref }}"
+            sdk_sha = $sdkSha
+            platform = "${{ matrix.platform }}"
+            ida_cmake_origin = $idaCmakeOrigin
+            ida_cmake_sha = $idaCmakeSha
+          } | ConvertTo-Json | Set-Content -Encoding utf8 `
+              (Join-Path $artifact "build-metadata.json")
+
+          "ida-cmake: $idaCmakeSha" >> $env:GITHUB_STEP_SUMMARY
+          "IDA SDK: $sdkSha (${{ matrix.sdk_ref }})" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Validate manifest and imports
+        shell: pwsh
+        run: |
+          $manifestPath = Join-Path $PWD "artifact/plugin/ida-plugin.json"
+          $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+          if ($manifest.plugin.version -ne "0.0.18.1") {
+            throw "Unexpected plugin version: $($manifest.plugin.version)"
+          }
+          if ($manifest.plugin.idaVersions -ne "${{ matrix.ida_version }}") {
+            throw "Unexpected IDA version: $($manifest.plugin.idaVersions)"
+          }
+
+          $binaries = @(
+            (Join-Path $PWD "artifact/plugin/idasql${{ matrix.plugin_ext }}"),
+            (Join-Path $PWD "artifact/cli/idasql${{ matrix.cli_ext }}")
+          )
+          foreach ($binary in $binaries) {
+            $text = [System.Text.Encoding]::ASCII.GetString(
+              [System.IO.File]::ReadAllBytes($binary))
+            if (-not $text.Contains("0.0.18.1")) {
+              throw "Version string 0.0.18.1 not found in $binary"
+            }
+            if ("${{ matrix.ida }}" -ne "94" -and
+                $text.Contains("lock_func_range_ea")) {
+              throw "IDA 9.4-only import lock_func_range_ea found in $binary"
+            }
+          }
+
+      - name: Validate Linux architecture
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          file artifact/plugin/idasql.so artifact/cli/idasql
+          file artifact/plugin/idasql.so | grep -Eq 'x86-64|x86_64'
+          file artifact/cli/idasql | grep -Eq 'x86-64|x86_64'
+
+      - name: Validate macOS architecture
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test "$(lipo -archs artifact/plugin/idasql.dylib)" = "arm64"
+          test "$(lipo -archs artifact/cli/idasql)" = "arm64"
+
+      - name: Validate Windows architecture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $expected = "${{ matrix.pe_machine }}"
+          $binaries = @(
+            (Join-Path $PWD "artifact/plugin/idasql.dll"),
+            (Join-Path $PWD "artifact/cli/idasql.exe")
+          )
+          foreach ($binary in $binaries) {
+            $bytes = [System.IO.File]::ReadAllBytes($binary)
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            $actual = "0x{0:X4}" -f $machine
+            if ($actual -ne $expected) {
+              throw "Unexpected PE machine for $binary`: $actual (expected $expected)"
+            }
+          }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
         with:
-          name: plugin-windows
-          path: |
-            ${{ env.IDASDK }}/src/bin/plugins/idasql.dll
-            ${{ env.IDASDK }}/src/bin/plugins/ida-plugin.json
+          name: build-ida${{ matrix.ida }}-${{ matrix.platform }}
+          path: artifact
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Upload CLI
-        uses: actions/upload-artifact@v4
+  package:
+    name: Assemble release archives
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout IDASQL
+        uses: actions/checkout@v7
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
         with:
-          name: cli-windows
-          path: ${{ env.IDASDK }}/src/bin/idasql.exe
+          pattern: build-ida*
+          path: incoming
 
-  publish-release:
-    name: Publish Release
+      - name: Assemble and validate release archives
+        shell: bash
+        run: bash .github/scripts/package-release.sh incoming release
+
+      - name: Publish package summary
+        shell: bash
+        run: |
+          echo '### Release archive SHA-256' >> "${GITHUB_STEP_SUMMARY}"
+          echo '```text' >> "${GITHUB_STEP_SUMMARY}"
+          cat release/SHA256SUMS.txt >> "${GITHUB_STEP_SUMMARY}"
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          echo "ida-cmake: $(cat release/IDA_CMAKE_SHA.txt)" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload release archive artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-archives-${{ github.sha }}
+          path: release
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build-linux, build-macos, build-windows]
-    runs-on: ubuntu-latest
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Require the reviewed release tag
+        shell: bash
+        run: test "${GITHUB_REF_NAME}" = "v0.0.18.1"
 
-      - name: Download plugins
-        uses: actions/download-artifact@v4
+      - name: Download release archives
+        uses: actions/download-artifact@v8
         with:
-          pattern: plugin-*
-          path: plugins
-          merge-multiple: true
+          name: release-archives-${{ github.sha }}
+          path: release
 
-      - name: Download CLI (Linux)
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-linux
-          path: cli-linux
-
-      - name: Download CLI (macOS)
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-macos
-          path: cli-macos
-
-      - name: Download CLI (Windows)
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-windows
-          path: cli-windows
-
-      - name: Prepare release
-        run: |
-          mkdir -p release/plugin
-          mkdir -p release/cli/{windows,linux,macos}
-          cp plugins/idasql.dll release/plugin/ || true
-          cp plugins/idasql.so release/plugin/ || true
-          cp plugins/idasql.dylib release/plugin/ || true
-          cp plugins/ida-plugin.json release/plugin/
-          cp cli-windows/idasql.exe release/cli/windows/ || true
-          cp cli-linux/idasql release/cli/linux/ || true
-          cp cli-macos/idasql release/cli/macos/ || true
-          echo "=== Plugin ===" && ls -la release/plugin/
-          echo "=== CLI ===" && ls -laR release/cli/
-
-      - name: Create plugin zip
-        run: |
-          cd release/plugin
-          zip -9 ../idasql_plugin-${{ github.ref_name }}.zip *
-
-      - name: Create CLI zip
-        run: |
-          cd release/cli
-          zip -r9 ../idasql_cli-${{ github.ref_name }}.zip windows linux macos
-
-      - name: Create Release
+      - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: IDASQL ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            release/idasql_plugin-${{ github.ref_name }}.zip
-            release/idasql_cli-${{ github.ref_name }}.zip
+            release/idasql-v0.0.18.1-ida92.zip
+            release/idasql-v0.0.18.1-ida93.zip
+            release/idasql-v0.0.18.1-ida94.zip

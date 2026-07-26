@@ -18,7 +18,7 @@
 # CMake configure, so bumping IDASQL_VERSION_* in idasql_version.hpp
 # automatically flows into the produced binary.
 #
-# Requires TOOL_VERSION_MAJOR/MINOR/PATCH to be set in the calling scope
+# Requires TOOL_VERSION_MAJOR/MINOR/PATCH/REVISION to be set in the calling scope
 # (the root CMakeLists parses idasql_version.hpp and sets them).
 
 set(_XSQL_VI_COMPANY "allthingsida")
@@ -38,9 +38,10 @@ function(xsql_add_versioninfo target)
 
   if(NOT DEFINED TOOL_VERSION_MAJOR
       OR NOT DEFINED TOOL_VERSION_MINOR
-      OR NOT DEFINED TOOL_VERSION_PATCH)
+      OR NOT DEFINED TOOL_VERSION_PATCH
+      OR NOT DEFINED TOOL_VERSION_REVISION)
     message(FATAL_ERROR
-      "xsql_add_versioninfo(${target}): TOOL_VERSION_MAJOR/MINOR/PATCH must be set in scope")
+      "xsql_add_versioninfo(${target}): TOOL_VERSION_MAJOR/MINOR/PATCH/REVISION must be set in scope")
   endif()
 
   set(VERINFO_FILETYPE          "${VI_FILETYPE}")

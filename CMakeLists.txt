@@ -42,6 +42,18 @@ FetchContent_Populate(ida_cmake)
 include(${ida_cmake_SOURCE_DIR}/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
+# Refuse to proceed if package resolution escaped the standalone ida-cmake
+# fetched above (IDA SDK 9.4 also carries a bundled CMake implementation).
+file(REAL_PATH "${ida_cmake_SOURCE_DIR}" _idasql_fetched_idacmake_dir)
+file(REAL_PATH "${IDA_CMAKE_DIR}" _idasql_active_idacmake_dir)
+if(NOT _idasql_active_idacmake_dir STREQUAL _idasql_fetched_idacmake_dir)
+    message(FATAL_ERROR
+        "idasql: expected standalone ida-cmake at "
+        "${_idasql_fetched_idacmake_dir}, but idasdk resolved "
+        "${_idasql_active_idacmake_dir}")
+endif()
+message(STATUS "idasql: using standalone ida-cmake from ${_idasql_active_idacmake_dir}")
+
 if(TARGET ida_compiler_settings)
     target_compile_options(ida_compiler_settings INTERFACE
         "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-class-memaccess>"
@@ -83,8 +95,7 @@ else()
     message(STATUS "idasql: Fetching libxsql from GitHub...")
     FetchContent_Declare(libxsql
         GIT_REPOSITORY https://github.com/0xeb/libxsql.git
-        GIT_TAG        main
-        GIT_SHALLOW    TRUE
+        GIT_TAG        d5a210dad0333dc8dbdbfbbb295968cfe1a0950c
     )
     FetchContent_MakeAvailable(libxsql)
 endif()
@@ -112,11 +123,9 @@ if(IDASQL_WITH_MCP)
         set(FASTMCPP_FETCH_CURL OFF CACHE BOOL "" FORCE)
 
         message(STATUS "idasql: Fetching fastmcpp from GitHub...")
-        # fastmcpp is a first-party dep we own — track main so idasql builds
-        # against the latest (only third-party deps are pinned to a fixed tag).
         FetchContent_Declare(fastmcpp
             GIT_REPOSITORY https://github.com/0xeb/fastmcpp.git
-            GIT_TAG        main
+            GIT_TAG        9a3ee7125b1db9dc85a71f60661beb40ea1e7993
         )
         FetchContent_MakeAvailable(fastmcpp)
     endif()
@@ -144,11 +153,27 @@ string(REGEX MATCH "IDASQL_VERSION_MINOR[ \t]+([0-9]+)" _ "${_idasql_version_con
 set(TOOL_VERSION_MINOR "${CMAKE_MATCH_1}")
 string(REGEX MATCH "IDASQL_VERSION_PATCH[ \t]+([0-9]+)" _ "${_idasql_version_contents}")
 set(TOOL_VERSION_PATCH "${CMAKE_MATCH_1}")
-if(TOOL_VERSION_MAJOR STREQUAL "" OR TOOL_VERSION_MINOR STREQUAL "" OR TOOL_VERSION_PATCH STREQUAL "")
+string(REGEX MATCH "IDASQL_VERSION_REVISION[ \t]+([0-9]+)" _ "${_idasql_version_contents}")
+set(TOOL_VERSION_REVISION "${CMAKE_MATCH_1}")
+if(TOOL_VERSION_MAJOR STREQUAL ""
+        OR TOOL_VERSION_MINOR STREQUAL ""
+        OR TOOL_VERSION_PATCH STREQUAL ""
+        OR TOOL_VERSION_REVISION STREQUAL "")
     message(FATAL_ERROR "idasql: failed to parse version from ${_idasql_version_hpp}")
 endif()
-message(STATUS "idasql: version ${TOOL_VERSION_MAJOR}.${TOOL_VERSION_MINOR}.${TOOL_VERSION_PATCH}")
+message(STATUS
+    "idasql: version "
+    "${TOOL_VERSION_MAJOR}.${TOOL_VERSION_MINOR}.${TOOL_VERSION_PATCH}.${TOOL_VERSION_REVISION}")
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/versioninfo.cmake)
+
+# Release CI sets this to one exact ABI version (9.2, 9.3, or 9.4). Keep the
+# historical range for ordinary local builds that do not opt into packaging.
+set(IDASQL_TARGET_IDA_VERSION ">=9.0" CACHE STRING
+    "IDA version or range advertised by the generated plugin manifest")
+if(IDASQL_TARGET_IDA_VERSION STREQUAL "")
+    message(FATAL_ERROR "idasql: IDASQL_TARGET_IDA_VERSION must not be empty")
+endif()
+message(STATUS "idasql: manifest target IDA version ${IDASQL_TARGET_IDA_VERSION}")
 
 # Generate ida-plugin.json from the version header so the IDA-native plugin
 # manifest can never drift from idasql_version.hpp. The generated file is the

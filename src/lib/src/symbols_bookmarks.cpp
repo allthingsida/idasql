@@ -27,7 +27,7 @@ void collect_bookmark_rows(std::vector<BookmarkRow> &rows) {
     idaplace_t place(0, 0);
     lochist_entry_t entry(&place, rinfo);
     qstring desc;
-    uint32_t index = bookmarks_t::get_by_inode(
+    uint32_t index = idasql_bookmarks_get_by_inode(
         &entry, &desc, static_cast<inode_t>(entry_path.first), nullptr);
     if (index != BOOKMARKS_BAD_INDEX && entry.place() != nullptr) {
       BookmarkRow row;
@@ -147,7 +147,7 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
           idaplace_t place_lookup(0, 0);
           lochist_entry_t entry(&place_lookup, rinfo_lookup);
           qstring desc;
-          uint32_t resolved = bookmarks_t::get_by_inode(
+          uint32_t resolved = idasql_bookmarks_get_by_inode(
               &entry, &desc, static_cast<inode_t>(row.inode), nullptr);
           if (resolved == BOOKMARKS_BAD_INDEX || entry.place() == nullptr) {
             xsql::set_vtab_error("bookmarks: bookmark inode " +
