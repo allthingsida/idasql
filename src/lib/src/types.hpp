@@ -40,8 +40,8 @@ struct TypesRegistry {
   GeneratorTableDef<AppliedTypeEntry> applied_types;
   CachedTableDef<LocalTypeBookmarkRow> local_type_bookmarks;
   CachedTableDef<MemberEntry> types_members;
-  CachedTableDef<MemberXrefRow> struct_member_xrefs;
-  CachedTableDef<GapRow> type_gaps;
+  GeneratorTableDef<MemberXrefRow> struct_member_xrefs;
+  GeneratorTableDef<GapRow> type_gaps;
   CachedTableDef<EnumValueEntry> types_enum_values;
   CachedTableDef<FuncArgEntry> types_func_args;
 

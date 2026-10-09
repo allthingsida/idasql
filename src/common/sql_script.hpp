@@ -16,6 +16,7 @@
  */
 
 #include <idasql/database.hpp>
+#include <idasql/runtime_settings.hpp>
 
 #include <xsql/query_script.hpp>
 
@@ -24,15 +25,26 @@
 
 namespace idasql {
 
-using SqlExecutor = std::function<QueryResult(const std::string& sql)>;
+using SqlExecutor = std::function<QueryResult(
+    const std::string& sql, const xsql::QueryOptions& options)>;
+
+// A request's own deadline (X-XSQL-Timeout, which libxsql parses into timeout_ms)
+// wins; 0 means "not set" there, so the live query_timeout_ms applies.
+inline xsql::ScriptOptions with_default_timeout(xsql::ScriptOptions options) {
+    if (options.timeout_ms <= 0) options.timeout_ms = runtime_settings().query_timeout_ms();
+    return options;
+}
 
 inline xsql::ScriptResult run_sql_script(const std::string& sql,
                                          const SqlExecutor& exec,
-                                         const xsql::ScriptOptions& options = {})
+                                         const xsql::ScriptOptions& options)
 {
     return xsql::run_script(sql, options,
-        [&exec](const std::string& stmt, xsql::ScriptStatementResult& out) {
-            QueryResult r = exec(stmt);
+        [&exec, &options](const std::string& stmt, xsql::ScriptStatementResult& out) {
+            xsql::QueryOptions query_options;
+            query_options.timeout_ms = options.timeout_ms;
+            query_options.should_cancel = options.should_cancel;
+            QueryResult r = exec(stmt, query_options);
 
             out.columns = r.columns;
             out.rows.reserve(r.rows.size());
@@ -58,15 +70,52 @@ inline xsql::ScriptResult run_sql_script(const std::string& sql,
         });
 }
 
+// Omitting ScriptOptions inherits the live product default even for callers
+// that provide their own executor. Passing ScriptOptions explicitly remains
+// exact: timeout_ms == 0 means no deadline.
+inline xsql::ScriptResult run_sql_script(const std::string& sql, const SqlExecutor& exec) {
+    xsql::ScriptOptions options;
+    options.timeout_ms = runtime_settings().query_timeout_ms();
+    return run_sql_script(sql, exec, options);
+}
+
 // Convenience for the common case: executor wraps Database::query.
 inline xsql::ScriptResult run_sql_script(Database& db,
                                          const std::string& sql,
-                                         const xsql::ScriptOptions& options = {})
+                                         const xsql::ScriptOptions& options)
 {
     return run_sql_script(
         sql,
-        [&db](const std::string& stmt) { return db.query(stmt); },
+        [&db](const std::string& stmt, const xsql::QueryOptions& query_options) {
+            return db.query(stmt, query_options);
+        },
         options);
+}
+
+// Omitting ScriptOptions inherits the live product default. The overload above
+// remains exact: an explicitly supplied timeout_ms == 0 means no deadline.
+inline xsql::ScriptResult run_sql_script(Database& db, const std::string& sql) {
+    xsql::ScriptOptions options;
+    options.timeout_ms = runtime_settings().query_timeout_ms();
+    return run_sql_script(db, sql, options);
+}
+
+// QueryEngine is the lower-level database facade used by plugins and embedded
+// callers. Keep the same omitted-vs-explicit timeout contract as Session.
+inline xsql::ScriptResult run_sql_script(QueryEngine& engine, const std::string& sql,
+                                         const xsql::ScriptOptions& options) {
+    return run_sql_script(
+        sql,
+        [&engine](const std::string& stmt, const xsql::QueryOptions& query_options) {
+            return engine.query(stmt, query_options);
+        },
+        options);
+}
+
+inline xsql::ScriptResult run_sql_script(QueryEngine& engine, const std::string& sql) {
+    xsql::ScriptOptions options;
+    options.timeout_ms = runtime_settings().query_timeout_ms();
+    return run_sql_script(engine, sql, options);
 }
 
 } // namespace idasql

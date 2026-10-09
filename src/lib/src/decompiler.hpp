@@ -31,6 +31,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <optional>
 
 #include "ida_headers.hpp"
 
@@ -44,7 +45,7 @@ namespace decompiler {
 // Global flag tracking if Hex-Rays is available.
 // Set once during DecompilerRegistry::register_all().
 // Must remain inline with static bool -- called from multiple TUs
-// (functions.hpp, database.hpp, decompiler.cpp).
+// (functions.hpp, database.hpp, decompiler_ctree.cpp, decompiler_mc.cpp).
 inline bool& hexrays_available() {
     static bool available = false;
     return available;
@@ -57,6 +58,13 @@ bool init_hexrays();
 // Invalidate decompiler cache for the function containing ea.
 // Safe to call even if Hex-Rays is unavailable or ea is not in a function.
 void invalidate_decompiler_cache(ea_t ea);
+
+// Every idasql decompilation goes through this one wrapper around
+// idasql_decompile(). Hex-Rays stores a guessed prototype the first time it
+// decompiles a function (an IDB change); here that is a side effect of reading,
+// so it is not counted as a write by the checkpoint redo guard or
+// auto_checkpoint. The caller's own edits after it are counted as usual.
+cfuncptr_t decompile_for_read(ea_t ea, hexrays_failure_t* hf = nullptr, int decomp_flags = 0);
 
 // Apply an explicit callee type to one call site. `name` is the user-defined call's
 // display name (must be non-empty; defaults to a safe placeholder when not supplied).
@@ -95,6 +103,7 @@ struct PseudocodeLine {
 
 // Persisted decompiler comments that no longer map to the current ctree/pseudocode.
 struct OrphanCommentInfo {
+    uint32_t ordinal = 0;  // position among the function's orphans (rowid local index)
     ea_t func_addr;
     std::string func_name;
     ea_t ea;
@@ -132,6 +141,7 @@ struct LvarRenameResult {
     bool applied = false;         // Observed name changed to requested target
     ea_t func_addr = BADADDR;
     int lvar_idx = -1;
+    int after_idx = -1;           // The lvar's index after the rename (Hex-Rays may re-order)
     std::string target_name;      // Original name selector (for by-name API)
     std::string requested_name;   // Requested new name
     std::string before_name;      // Name before mutation
@@ -482,7 +492,6 @@ class CtreeGenerator : public xsql::Generator<CtreeItem> {
     size_t func_idx_ = 0;
     std::vector<CtreeItem> items_;
     size_t idx_ = 0;
-    int64_t rowid_ = -1;
     bool started_ = false;
 
     bool load_next_func();
@@ -497,7 +506,6 @@ class CallArgsGenerator : public xsql::Generator<CallArgInfo> {
     size_t func_idx_ = 0;
     std::vector<CallArgInfo> args_;
     size_t idx_ = 0;
-    int64_t rowid_ = -1;
     bool started_ = false;
 
     bool load_next_func();
@@ -577,15 +585,90 @@ CachedTableDef<CtreeLabelInfo> define_ctree_labels();
 GeneratorTableDef<CtreeItem> define_ctree();
 GeneratorTableDef<CallArgInfo> define_ctree_call_args();
 
+// One "Split expression" setting (hexrays.hpp: vdui_t::split_item): the
+// decompiler keeps the operation at addr in pieces of piece_size bytes instead
+// of merging them (decompiler_splits.cpp).
+struct SplitRow {
+    ea_t func_addr = BADADDR;
+    ea_t addr = BADADDR;
+    int piece_size = 0;  // 1, 2, 4 or 8
+};
+
+// The split settings of one function (func_addr pushdown).
+class SplitsInFuncIterator : public xsql::RowIterator {
+    std::vector<SplitRow> rows_;
+    size_t idx_ = 0;
+    bool started_ = false;
+
+public:
+    explicit SplitsInFuncIterator(ea_t func_addr);
+    bool next() override;
+    bool eof() const override;
+    void column(xsql::FunctionContext& ctx, int col) override;
+    int64_t rowid() const override;
+};
+
+CachedTableDef<SplitRow> define_decompiler_splits();
+
+// Whether decompiler_splits reads and writes on this IDA ("9.4", from
+// get_kernel_version): the versions its stored form was verified on.
+bool splits_version_supported(const char* kernel_version);
+
 // ============================================================================
 // Views Registration
 // ============================================================================
 
-bool register_ctree_views(xsql::Database& db);
+bool register_ctree_views(xsql::Database& db);       // ctree/pseudocode (decompiler_ctree.cpp)
+bool register_microcode_views(xsql::Database& db);   // ir_ops family (decompiler_mc.cpp)
 
 // ============================================================================
 // Registry
 // ============================================================================
+
+// One Hex-Rays microcode instruction (minsn_t) at a requested maturity
+// (MMAT_LVARS by default) — the native idasql leg of the cross-tool low-level IR.
+// `opcode` is the raw mcode_t; `l_text`/
+// `r_text`/`d_text` are the rendered operands (empty when the slot is void/mop_z);
+// `text` is the full rendered microcode instruction. Per-function; filter by `func_addr`.
+struct MicrocodeRow {
+    ea_t func_addr = BADADDR;
+    int block_num = 0;
+    int seq = 0;
+    ea_t ea = BADADDR;
+    int opcode = 0;
+    std::string text;
+    std::string l_text;
+    std::string r_text;
+    std::string d_text;
+    std::string canonical_op;  // cross-tool low-IR canonical (P-code-style) op; "" if none
+    std::string maturity;      // returned mba_maturity_t rung name (generated..lvars)
+    std::string stage;         // canonical cross-tool stage (raw/optimized/final)
+};
+
+// One row per microcode operand (minsn l/r/d) — the 5-kind operand model.
+struct MicrocodeOperandRow {
+    ea_t func_addr = BADADDR;
+    int op_seq = 0;            // owning minsn seq (joins microcode.seq)
+    int operand_index = 0;     // 0=l, 1=r, 2=d
+    std::string role;          // "in" (l/r) | "out" (d)
+    std::string kind;          // reg|imm|mem|var|result, or "" if outside the 5-kind model
+    std::string text;          // rendered operand
+    int64_t value = 0;         // immediate value (kind='imm')
+    bool has_value = false;
+    int size = 0;              // operand size in bytes
+    std::string maturity;
+    std::string stage;
+};
+
+GeneratorTableDef<MicrocodeRow> define_microcode();
+GeneratorTableDef<MicrocodeOperandRow> define_microcode_operands();
+
+// Why Hex-Rays cannot lift the function starting at `func_addr` to `maturity`
+// ("" = lvars), or nullopt when it can. The microcode tables skip such a function;
+// this says why. A bad argument (no function starts there, an unknown maturity)
+// is reported through `bad_argument` with nullopt.
+std::optional<std::string> microcode_error(ea_t func_addr, const std::string& maturity,
+                                           std::string* bad_argument);
 
 struct DecompilerRegistry {
     // Cached tables (query-scoped cache, write support)
@@ -594,9 +677,12 @@ struct DecompilerRegistry {
     CachedTableDef<OrphanCommentGroupInfo> pseudocode_orphan_comment_groups;
     CachedTableDef<LvarInfo> ctree_lvars;
     CachedTableDef<CtreeLabelInfo> ctree_labels;
+    CachedTableDef<SplitRow> decompiler_splits;
     // Generator tables (lazy full scans)
     GeneratorTableDef<CtreeItem> ctree;
     GeneratorTableDef<CallArgInfo> ctree_call_args;
+    GeneratorTableDef<MicrocodeRow> microcode;
+    GeneratorTableDef<MicrocodeOperandRow> microcode_operands;
 
     DecompilerRegistry();
     void register_all(xsql::Database& db);

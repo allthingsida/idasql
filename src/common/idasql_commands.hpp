@@ -17,6 +17,7 @@
 
 #include <xsql/thinclient/clipboard.hpp>
 #include "binary_query.hpp"
+#include "idasql_version.hpp"
 
 namespace idasql {
 
@@ -180,7 +181,9 @@ inline CommandResult handle_command(
     }
 
     if (input == ".help") {
-        output = "IDASQL Commands:\n"
+        output = "IDASQL v" IDASQL_VERSION_STRING "\n"
+                 "\n"
+                 "IDASQL Commands:\n"
                  "  .tables         List all tables\n"
                  "  .schema <table> Show table schema\n"
                  "  .info           Show database info\n"
@@ -189,23 +192,34 @@ inline CommandResult handle_command(
 #ifdef IDASQL_HAS_MCP
                  "\n"
                  "MCP Server:\n"
-                 "  .mcp                              Show status or start if not running\n"
+                 "  .mcp                              Show status or start if not "
+                 "running\n"
                  "  .mcp start [bindinterface] [port] Start MCP server\n"
                  "  .mcp stop                         Stop MCP server\n"
                  "  .mcp help                         Show MCP help\n"
 #endif
                  "\n"
                  "HTTP Server:\n"
-                 "  .http                              Show status or start if not running\n"
+                 "  .http                              Show status or start if not "
+                 "running\n"
                  "  .http start [bindinterface] [port] Start HTTP server\n"
                  "  .http stop                         Stop HTTP server\n"
                  "  .http help                         Show HTTP help\n"
                  "\n"
                  "Autostart Pins:\n"
                  "  .pin                              Show pinned autostart config\n"
-                 "  .pin http|mcp [bindinterface] [port]  Pin a server; omit port for a random port each launch\n"
+#ifdef IDASQL_HAS_MCP
+                 "  .pin http|mcp [bindinterface] [port]  Pin a server; omit port for a "
+                 "random port each launch\n"
                  "  .pin on|off http|mcp              Enable/disable autostart-on-load\n"
                  "  .pin clear [http|mcp|all]         Remove pinned config\n"
+#else
+                 "  .pin http [bindinterface] [port]  Pin HTTP; omit port for a random "
+                 "port each launch\n"
+                 "  .pin on|off http                 Enable/disable HTTP "
+                 "autostart-on-load\n"
+                 "  .pin clear [http|all]            Remove pinned config\n"
+#endif
                  "  .pin help                         Show pin help\n"
                  "\n"
                  "SQL:\n"
@@ -255,8 +269,10 @@ inline CommandResult handle_command(
             }
         } else if (subargs == "help") {
             output = "MCP Server Commands:\n"
-                     "  .mcp                              Show status, start if not running\n"
-                     "  .mcp start [bindinterface] [port] Start MCP server (default: 127.0.0.1, random port)\n"
+                     "  .mcp                              Show status, start if not "
+                     "running\n"
+                     "  .mcp start [bindinterface] [port] Start MCP server (default: "
+                     "127.0.0.1, random port)\n"
                      "  .mcp stop                         Stop MCP server\n"
                      "  .mcp help                         Show this help\n"
                      "\n"
@@ -264,7 +280,8 @@ inline CommandResult handle_command(
                      "  idasql_query  - Execute SQL query directly\n"
                      "\n"
                      "Connect with Claude Desktop by adding to config:\n"
-                     "  {\"mcpServers\": {\"idasql\": {\"url\": \"http://127.0.0.1:<port>/sse\"}}}\n";
+                     "  {\"mcpServers\": {\"idasql\": {\"url\": "
+                     "\"http://127.0.0.1:<port>/sse\"}}}\n";
         } else {
             output = "Unknown MCP command: " + subargs + "\nUse '.mcp help' for available commands.";
         }
@@ -293,7 +310,8 @@ inline CommandResult handle_command(
             std::string token;
             std::string rest = subargs.length() > 5 ? subargs.substr(5) : "";
             if (!parse_bind_port_token(rest, bind_addr, port, token)) {
-                output = "Error: invalid port (must be a number 0-65535) or missing --token value.\n"
+                output = "Error: invalid port (must be a number 0-65535) or missing "
+                         "--token value.\n"
                          "Usage: .http start [bindinterface] [port] [--token SECRET]";
                 return CommandResult::HANDLED;
             }
@@ -316,21 +334,27 @@ inline CommandResult handle_command(
         } else if (subargs == "help") {
             const std::string example = idasql::format_query_curl_example("http://127.0.0.1:<port>");
             output = "HTTP Server Commands:\n"
-                     "  .http                              Show status, start if not running\n"
-                     "  .http start [bindinterface] [port] [--token SECRET]  Start HTTP server\n"
-                     "                                     (default: 127.0.0.1, random port, no auth;\n"
-                     "                                      --token requires Authorization: Bearer SECRET)\n"
+                     "  .http                              Show status, start if not "
+                     "running\n"
+                     "  .http start [bindinterface] [port] [--token SECRET]  Start "
+                     "HTTP server\n"
+                     "                                     (default: 127.0.0.1, "
+                     "random port, no auth;\n"
+                     "                                      --token requires "
+                     "Authorization: Bearer SECRET)\n"
                      "  .http stop                         Stop HTTP server\n"
                      "  .http help                         Show this help\n"
                      "\n"
                      "Endpoints:\n"
                      "  GET  /help       API documentation\n"
                      "  POST /query      Execute SQL (body = raw SQL)\n"
+                     "  POST /cancel     Cooperatively cancel the in-flight query\n"
                      "  GET  /status     Health check\n"
                      "  POST /shutdown   Stop server\n"
                      "\n"
                      "Schema discovery:\n"
-                     "  SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY type, name;\n"
+                     "  SELECT name, type FROM sqlite_master WHERE type IN "
+                     "('table','view') ORDER BY type, name;\n"
                      "  PRAGMA table_info(funcs);\n"
                      "\n"
                      "Example:\n"
@@ -365,7 +389,8 @@ inline CommandResult handle_command(
         } else if (subargs == "help") {
             output =
                 "Autostart pin commands:\n"
-                "  .pin                      Show pinned config (alias of .pin list)\n"
+                "  .pin                      Show pinned config (alias of .pin "
+                "list)\n"
                 "  .pin list | .pin status   Show pinned config\n"
 #ifdef IDASQL_HAS_MCP
                 "  .pin http [bindinterface] [port]  Pin HTTP; enables autostart\n"
@@ -398,12 +423,34 @@ inline CommandResult handle_command(
 #endif
         } else {
             std::string verb = next_token(subargs);
+#ifdef IDASQL_HAS_MCP
+            constexpr const char* kPinServices = "http|mcp";
+            constexpr const char* kPinClearServices = "http|mcp|all";
+#else
+            constexpr const char* kPinServices = "http";
+            constexpr const char* kPinClearServices = "http|all";
+#endif
+            auto reject_unavailable_mcp = [&](const std::string& service) {
+#ifndef IDASQL_HAS_MCP
+                if (service == "mcp") {
+                    output = "MCP server support was not compiled in.";
+                    return true;
+                }
+#else
+                (void)service;
+#endif
+                return false;
+            };
             // Shared "pin a service" handler. The port is optional: when omitted
             // (or 0) the pin is stored with port 0 = "autostart with a fresh
             // random port each launch". bind defaults to 127.0.0.1.
             auto do_pin_set = [&](const std::string& service) {
+                if (reject_unavailable_mcp(service)) {
+                    return;
+                }
                 if (service != "http" && service != "mcp") {
-                    output = "Usage: .pin set http|mcp [bindinterface] [port] [--token SECRET]";
+                    output = std::string("Usage: .pin set ") + kPinServices +
+                             " [bindinterface] [port] [--token SECRET]";
                     return;
                 }
                 std::string bind_addr;
@@ -428,8 +475,10 @@ inline CommandResult handle_command(
                 do_pin_set(verb);
             } else if (verb == "on" || verb == "off") {
                 std::string service = next_token(subargs);
-                if (service != "http" && service != "mcp") {
-                    output = "Usage: .pin " + verb + " http|mcp";
+                if (reject_unavailable_mcp(service)) {
+                    // The build has no MCP callbacks to dispatch.
+                } else if (service != "http" && service != "mcp") {
+                    output = "Usage: .pin " + verb + " " + kPinServices;
                 } else if (callbacks.pin_enable) {
                     output = callbacks.pin_enable(service, verb == "on");
                 } else {
@@ -438,8 +487,10 @@ inline CommandResult handle_command(
             } else if (verb == "clear") {
                 std::string service = next_token(subargs);
                 if (service.empty()) service = "all";
-                if (service != "http" && service != "mcp" && service != "all") {
-                    output = "Usage: .pin clear [http|mcp|all]";
+                if (reject_unavailable_mcp(service)) {
+                    // The build has no MCP callbacks to dispatch.
+                } else if (service != "http" && service != "mcp" && service != "all") {
+                    output = std::string("Usage: .pin clear [") + kPinClearServices + "]";
                 } else if (callbacks.pin_clear) {
                     output = callbacks.pin_clear(service);
                 } else {

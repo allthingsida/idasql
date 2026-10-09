@@ -173,7 +173,8 @@ bool Session::open(const char* idb_path) {
     if (!already_opened) {
         int rc = idasql_open_database(open_path.string().c_str());
         if (rc != 0) {
-            error_ = "Failed to open database: " + open_path.string();
+            error_ = "Failed to open database: " + open_path.string() +
+                " (open_database returned " + std::to_string(rc) + ")";
             return false;
         }
         ida_opened_ = true;
@@ -234,6 +235,15 @@ QueryResult Session::query(const char* sql) {
         return r;
     }
     return engine_->query(sql);
+}
+
+QueryResult Session::query(const char* sql, const xsql::QueryOptions& options) {
+    if (!engine_) {
+        QueryResult r;
+        r.error = "Session not open";
+        return r;
+    }
+    return engine_->query(sql, options);
 }
 
 xsql::Status Session::exec(const char* sql) {

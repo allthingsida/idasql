@@ -24,8 +24,9 @@ struct StandardTreeInfo {
 };
 
 struct DirtreePathInfo {
-  std::string full_path;
+  std::string full_path;    // printable: what the path columns show
   std::string folder_path;
+  std::string tree_path;    // the tree's own spelling, for dirtree_t calls
 };
 
 struct DirtreeEntryRow {

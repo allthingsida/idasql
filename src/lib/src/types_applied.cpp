@@ -7,6 +7,7 @@
 #include "types_applied.hpp"
 
 #include "address_resolution.hpp"
+#include "core_common.hpp"
 #include "decompiler.hpp"
 
 namespace idasql {
@@ -15,28 +16,6 @@ namespace types {
 namespace {
 
 enum class AppliedTypeOrder { Asc, Desc };
-
-struct AppliedTypeBounds {
-    bool has_lower = false;
-    ea_t lower = 0;
-    bool lower_inclusive = true;
-    bool has_upper = false;
-    ea_t upper = 0;
-    bool upper_inclusive = true;
-};
-
-bool applied_type_within_bounds(ea_t ea, const AppliedTypeBounds& bounds) {
-    if (ea == BADADDR) return false;
-    if (bounds.has_lower &&
-        (ea < bounds.lower || (ea == bounds.lower && !bounds.lower_inclusive))) {
-        return false;
-    }
-    if (bounds.has_upper &&
-        (ea > bounds.upper || (ea == bounds.upper && !bounds.upper_inclusive))) {
-        return false;
-    }
-    return true;
-}
 
 bool address_has_applied_type(ea_t ea) {
     tinfo_t tif;
@@ -47,147 +26,72 @@ bool is_mapped_address(ea_t ea) {
     return ea != BADADDR && is_mapped(ea);
 }
 
-void tighten_applied_lower(AppliedTypeBounds& bounds, ea_t ea, bool inclusive) {
-    if (!bounds.has_lower || ea > bounds.lower ||
-        (ea == bounds.lower && !inclusive && bounds.lower_inclusive)) {
-        bounds.has_lower = true;
-        bounds.lower = ea;
-        bounds.lower_inclusive = inclusive;
-    }
-}
-
-void tighten_applied_upper(AppliedTypeBounds& bounds, ea_t ea, bool inclusive) {
-    if (!bounds.has_upper || ea < bounds.upper ||
-        (ea == bounds.upper && !inclusive && bounds.upper_inclusive)) {
-        bounds.has_upper = true;
-        bounds.upper = ea;
-        bounds.upper_inclusive = inclusive;
-    }
-}
-
+// Yields the typed heads of an addr window in SQL order (core::HeadSpanWalker):
+// an address >= 2^63 is a negative INTEGER, so with ORDER BY addr the high half
+// comes first. `addr = X` also yields an untyped mapped X (the row an INSERT or
+// UPDATE targets).
 class AppliedTypesGenerator : public xsql::Generator<AppliedTypeEntry> {
-    AppliedTypeOrder order_;
-    AppliedTypeBounds bounds_;
-    bool include_untyped_point_ = false;
-    bool started_ = false;
-    ea_t current_ea_ = BADADDR;
+    core::HeadSpanWalker walker_;
+    std::optional<ea_t> point_;
+    bool point_done_ = false;
     mutable AppliedTypeEntry row_{BADADDR};
 
-    ea_t first_ascending() const {
-        const ea_t max_ea = inf_get_max_ea();
-        ea_t start = bounds_.has_lower ? bounds_.lower : inf_get_min_ea();
-        if (start == BADADDR || start >= max_ea) return BADADDR;
-        if (bounds_.has_lower && !bounds_.lower_inclusive) {
-            start = next_head(start, max_ea);
-        } else if (!is_head(get_flags(start))) {
-            start = next_head(start, max_ea);
-        }
-        return start;
-    }
-
-    ea_t first_descending() const {
-        const ea_t min_ea = inf_get_min_ea();
-        ea_t start = bounds_.has_upper ? bounds_.upper : inf_get_max_ea();
-        if (start == BADADDR) return BADADDR;
-        if (bounds_.has_upper && bounds_.upper_inclusive && is_head(get_flags(start))) {
-            return start;
-        }
-        if (start <= min_ea) return BADADDR;
-        return prev_head(start, min_ea);
-    }
-
 public:
-    AppliedTypesGenerator(AppliedTypeOrder order, AppliedTypeBounds bounds, bool include_untyped_point)
-        : order_(order), bounds_(bounds), include_untyped_point_(include_untyped_point) {}
+    AppliedTypesGenerator(AppliedTypeOrder order, const xsql::Int64KeyRange& range,
+                          bool include_untyped_point)
+        : walker_(range, order == AppliedTypeOrder::Desc) {
+        if (include_untyped_point) {
+            point_ = !range.empty() && range.lower() == range.upper()
+                ? std::optional<ea_t>(core::normalize_sql_ea(range.lower()))
+                : std::optional<ea_t>(BADADDR);
+        }
+    }
 
     bool next() override {
-        if (include_untyped_point_) {
-            if (started_) return false;
-            started_ = true;
-            if (!bounds_.has_lower || !bounds_.has_upper || bounds_.lower != bounds_.upper) {
-                return false;
-            }
-            const ea_t ea = bounds_.lower;
-            if (!is_mapped_address(ea)) return false;
-            row_.ea = ea;
-            current_ea_ = ea;
+        if (point_) {
+            if (point_done_ || !is_mapped_address(*point_)) return false;
+            point_done_ = true;
+            row_.ea = *point_;
             return true;
         }
-
-        ea_t next_ea = BADADDR;
-        while (true) {
-            if (!started_) {
-                started_ = true;
-                next_ea = order_ == AppliedTypeOrder::Asc ? first_ascending() : first_descending();
-            } else if (order_ == AppliedTypeOrder::Asc) {
-                next_ea = next_head(current_ea_, inf_get_max_ea());
-            } else {
-                next_ea = prev_head(current_ea_, inf_get_min_ea());
-            }
-
-            if (!applied_type_within_bounds(next_ea, bounds_)) {
-                current_ea_ = BADADDR;
-                return false;
-            }
-
-            current_ea_ = next_ea;
-            if (address_has_applied_type(current_ea_)) {
-                row_.ea = current_ea_;
+        for (ea_t ea = walker_.next(); ea != BADADDR; ea = walker_.next()) {
+            if (address_has_applied_type(ea)) {
+                row_.ea = ea;
                 return true;
             }
         }
+        return false;
     }
 
     const AppliedTypeEntry& current() const override { return row_; }
     int64_t rowid() const override { return static_cast<int64_t>(row_.ea); }
 };
 
-bool apply_applied_type_constraint(
-        AppliedTypeBounds& bounds,
+// Narrow `range` by one addr constraint. The plan is omit=1, so a number (or
+// NULL, or a blob) compares the way SQLite compares the INTEGER addr column:
+// `addr >= 4096.5` keeps 4097 and up, `addr = NULL` keeps nothing. Text is
+// the documented address spelling -- a numeric or '0x...' string, or a symbol
+// name -- resolved to its address first; an unresolvable name is an error.
+bool constrain_applied_type_addr(
+        xsql::Int64KeyRange& range,
         const xsql::GeneratorConstraintArg& arg,
         std::string* error) {
-    switch (arg.op) {
-    case xsql::ConstraintOp::Eq:
-    {
-        ea_t ea = BADADDR;
-        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
-        tighten_applied_lower(bounds, ea, true);
-        tighten_applied_upper(bounds, ea, true);
-        break;
-    }
-    case xsql::ConstraintOp::Gt:
-    {
-        ea_t ea = BADADDR;
-        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
-        tighten_applied_lower(bounds, ea, false);
-        break;
-    }
-    case xsql::ConstraintOp::Ge:
-    {
-        ea_t ea = BADADDR;
-        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
-        tighten_applied_lower(bounds, ea, true);
-        break;
-    }
-    case xsql::ConstraintOp::Lt:
-    {
-        ea_t ea = BADADDR;
-        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
-        tighten_applied_upper(bounds, ea, false);
-        break;
-    }
-    case xsql::ConstraintOp::Le:
-    {
-        ea_t ea = BADADDR;
-        if (!resolve_address_value(arg.value, "addr", ea, error)) return false;
-        tighten_applied_upper(bounds, ea, true);
-        break;
-    }
-    case xsql::ConstraintOp::Like:
+    if (arg.op == xsql::ConstraintOp::Like) {
         if (error) {
             *error = "applied_types: internal error: LIKE constraint routed to numeric addr bounds";
         }
         return false;
+    }
+    if (arg.value.type() != SQLITE_TEXT) {
+        range.constrain(arg.op, arg.value);
+        return true;
+    }
+    std::optional<ea_t> ea;
+    if (!resolve_address_key(arg.value, "addr", ea, error)) return false;
+    if (ea) {
+        range.constrain(arg.op, static_cast<int64_t>(static_cast<uint64_t>(*ea)));
+    } else {
+        range.constrain(arg.op, arg.value);
     }
     return true;
 }
@@ -197,15 +101,16 @@ make_applied_types_generator(
         AppliedTypeOrder order,
         const std::vector<xsql::GeneratorConstraintArg>& args,
         bool include_untyped_point) {
-    AppliedTypeBounds bounds;
+    xsql::Int64KeyRange range;
     for (const auto& arg : args) {
         std::string error;
-        if (!apply_applied_type_constraint(bounds, arg, &error)) {
+        if (!constrain_applied_type_addr(range, arg, &error)) {
             xsql::set_vtab_error(error);
             return nullptr;
         }
     }
-    return std::make_unique<AppliedTypesGenerator>(order, bounds, include_untyped_point);
+    if (range.empty()) return nullptr;  // no address satisfies the constraints
+    return std::make_unique<AppliedTypesGenerator>(order, range, include_untyped_point);
 }
 
 bool set_applied_type_decl(ea_t ea, xsql::FunctionArg val, bool allow_clear, bool reject_empty) {
@@ -262,7 +167,7 @@ GeneratorTableDef<AppliedTypeEntry> define_applied_types() {
         })
         .generator([]() -> std::unique_ptr<xsql::Generator<AppliedTypeEntry>> {
             return std::make_unique<AppliedTypesGenerator>(
-                AppliedTypeOrder::Asc, AppliedTypeBounds{}, false);
+                AppliedTypeOrder::Asc, xsql::Int64KeyRange{}, false);
         })
         .column_int64("addr", [](const AppliedTypeEntry& row) -> int64_t {
             return static_cast<int64_t>(row.ea);

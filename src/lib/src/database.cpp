@@ -9,6 +9,8 @@
 #include <idasql/platform.hpp>
 
 #include "ida_headers.hpp"
+#include "checkpoints.hpp"
+#include "python_bridge.hpp"
 
 // Private headers for registry implementations
 #include "core.hpp"
@@ -32,14 +34,73 @@ QueryEngine::QueryEngine() {
     init();
 }
 
-QueryEngine::~QueryEngine() = default;
+QueryEngine::~QueryEngine() {
+    // `import idasql` must stop reaching this engine, and its connection stops
+    // counting toward the checkpoint write epoch. A moved-from engine was already
+    // handed over to the new owner (see the move operations).
+    python_bridge::detach(this);
+    checkpoints::detach_engine(this);
+}
 
 // Defined here (not inline in the header) so the registry member types are
-// complete for the move of their std::unique_ptr members.
-QueryEngine::QueryEngine(QueryEngine&&) noexcept = default;
-QueryEngine& QueryEngine::operator=(QueryEngine&&) noexcept = default;
+// complete for the move of their std::unique_ptr members. The bridge and the
+// checkpoint write epoch keep a pointer to the engine; a move hands it over.
+QueryEngine::QueryEngine(QueryEngine&& other) noexcept
+    : db_(std::move(other.db_)),
+      error_(std::move(other.error_)),
+      core_(std::move(other.core_)),
+      metadata_(std::move(other.metadata_)),
+      extended_(std::move(other.extended_)),
+      types_(std::move(other.types_)),
+      debugger_(std::move(other.debugger_)),
+      decompiler_(std::move(other.decompiler_)),
+      checkpoints_(std::move(other.checkpoints_)) {
+    python_bridge::retarget(&other, this);
+    checkpoints::retarget_engine(&other, this);
+}
+
+QueryEngine& QueryEngine::operator=(QueryEngine&& other) noexcept {
+    if (this != &other) {
+        python_bridge::detach(this);
+        checkpoints::detach_engine(this);
+        db_ = std::move(other.db_);
+        error_ = std::move(other.error_);
+        core_ = std::move(other.core_);
+        metadata_ = std::move(other.metadata_);
+        extended_ = std::move(other.extended_);
+        types_ = std::move(other.types_);
+        debugger_ = std::move(other.debugger_);
+        decompiler_ = std::move(other.decompiler_);
+        checkpoints_ = std::move(other.checkpoints_);
+        python_bridge::retarget(&other, this);
+        checkpoints::retarget_engine(&other, this);
+    }
+    return *this;
+}
 
 QueryResult QueryEngine::query(const char* sql) {
+    xsql::QueryOptions options;
+    options.timeout_ms = runtime_settings().query_timeout_ms();
+    return run_query(sql, nullptr, options);
+}
+
+QueryResult QueryEngine::query(const char* sql, const xsql::QueryOptions& options) {
+    return run_query(sql, nullptr, options);
+}
+
+QueryResult QueryEngine::query(const char* sql, const std::vector<xsql::QueryParam>& params) {
+    xsql::QueryOptions options;
+    options.timeout_ms = runtime_settings().query_timeout_ms();
+    return run_query(sql, &params, options);
+}
+
+QueryResult QueryEngine::query(const char* sql, const std::vector<xsql::QueryParam>& params,
+                               const xsql::QueryOptions& options) {
+    return run_query(sql, &params, options);
+}
+
+QueryResult QueryEngine::run_query(const char* sql, const std::vector<xsql::QueryParam>* params,
+                                   const xsql::QueryOptions& options) {
     QueryResult result;
 
     if (!db_.is_open()) {
@@ -48,19 +109,78 @@ QueryResult QueryEngine::query(const char* sql) {
     }
 
     if (handle_runtime_pragma(sql, result)) {
+        if (params != nullptr && !params->empty() && result.success) {
+            result = make_pragma_error("runtime PRAGMAs take no bound parameters");
+        }
         error_ = result.success ? "" : result.error;
         return result;
     }
 
-    xsql::QueryOptions options;
-    options.timeout_ms = runtime_settings().query_timeout_ms();
-    xsql::Result raw = db_.query(sql, options);
+    // The options overload is an explicit contract: timeout_ms == 0 means no
+    // deadline. Only the no-options overload above inherits the live runtime
+    // default.
+    const xsql::QueryOptions& effective_options = options;
+
+    // Generator-table xNext() has a boolean EOF contract, so a generator that
+    // cooperatively stops after setting a vtab error can otherwise look like a
+    // successful end-of-scan. Capture that side channel around the query and
+    // classify it consistently with xsql's progress-handler cancellation path.
+    xsql::clear_vtab_error();
+    // auto_checkpoint: a top-level statement that writes gets its own undo
+    // checkpoint (statements nested from Python belong to the outer one).
+    checkpoints::StatementScope statement_scope(sql ? sql : "", &db_);
+    xsql::Result raw = params != nullptr
+        ? db_.query(sql, *params, effective_options)
+        : db_.query(sql, effective_options);
+    statement_scope.finish();
+    std::string generator_error = xsql::get_vtab_error();
+    xsql::clear_vtab_error();
+    if (!generator_error.empty()) {
+        // Rows produced by a prematurely finalized aggregate are not trustworthy;
+        // conservatively discard all rows from the truncated statement.
+        raw.rows.clear();
+        const bool cancelled =
+            effective_options.should_cancel && effective_options.should_cancel();
+        if (cancelled) {
+            if (!raw.columns.empty()) {
+                raw.error.clear();
+                raw.partial = true;
+                raw.warnings.push_back(
+                    "query cancelled; returning no rows from the interrupted scan");
+            } else {
+                raw.error = "Query cancelled";
+            }
+        } else if (effective_options.timeout_ms > 0
+                   && raw.elapsed_ms >= effective_options.timeout_ms) {
+            raw.timed_out = true;
+            if (!raw.columns.empty()) {
+                raw.error.clear();
+                raw.partial = true;
+                raw.warnings.push_back(
+                    "query timed out; returning no rows from the interrupted scan");
+            } else {
+                raw.error = "Query timed out";
+            }
+        } else if (raw.error.empty()) {
+            raw.error = std::move(generator_error);
+        }
+    }
+    // A statement that failed outright is never a partial success. xsql flags
+    // ANY mid-step failure of a readonly, column-producing statement as
+    // `partial` with a "returning partial rows" warning; for a real error that
+    // is contradictory, and it reaches here whether or not the vtab-error side
+    // channel survived. The cancelled/timed-out paths above deliberately clear
+    // `error` first, so they keep their partial classification.
+    if (!raw.error.empty()) {
+        raw.partial = false;
+    }
     result.columns = std::move(raw.columns);
     result.rows.reserve(raw.rows.size());
     for (auto& raw_row : raw.rows) {
         Row row;
         row.values = std::move(raw_row.values);
         row.nulls = std::move(raw_row.nulls);  // carry the SQL-NULL mask through
+        row.types = std::move(raw_row.types);  // and the storage class per cell
         result.rows.push_back(std::move(row));
     }
     result.error = std::move(raw.error);
@@ -87,7 +207,9 @@ xsql::Status QueryEngine::exec(const char* sql) {
         return pragma_result.success ? xsql::Status::ok : xsql::Status::error;
     }
 
+    checkpoints::StatementScope statement_scope(sql ? sql : "", &db_);
     xsql::Status rc = db_.exec(sql);
+    statement_scope.finish();
     error_ = db_.last_error();
     return rc;
 }
@@ -105,10 +227,11 @@ bool QueryEngine::execute_script(const std::string& script,
         return false;
     }
 
-    // Route each statement through the runtime-PRAGMA handler so scripts run via
-    // `idasql -f setup.sql` honor `PRAGMA idasql.* = ...;` control statements the
-    // same way single-statement query()/exec() do. Non-PRAGMA statements are
-    // executed by the shared db_ script executor, preserving interleaving order.
+    // Route each statement through the runtime-PRAGMA handler so a script passed to
+    // execute_script() honors the two imperative verbs (`PRAGMA idasql.timeout_push = <ms>;`,
+    // `PRAGMA idasql.timeout_pop;`) the same way query()/exec() do; value settings are
+    // changed with `UPDATE runtime_settings`. Other statements run through the shared
+    // db_ script executor, in order. (`idasql -f` runs through run_sql_script().)
     std::vector<std::string> statements;
     if (!xsql::collect_statements(script, statements, error)) {
         error_ = error;
@@ -126,7 +249,10 @@ bool QueryEngine::execute_script(const std::string& script,
             continue;
         }
 
-        if (!db_.execute_script(sql, results, error)) {
+        checkpoints::StatementScope statement_scope(sql, &db_);
+        const bool ok = db_.execute_script(sql, results, error);
+        statement_scope.finish();
+        if (!ok) {
             error_ = error;
             return false;
         }
@@ -182,50 +308,22 @@ bool QueryEngine::handle_runtime_pragma(const char* sql, QueryResult& out) {
         return false;
     }
 
-    auto& settings = runtime_settings();
-
-    const auto common = xsql::runtime::handle_common_runtime_pragma(
-        request, "idasql", settings.common_settings());
-    if (common.handled) {
-        out = common.success
-            ? make_pragma_result(common.name, common.value)
-            : make_pragma_error(common.error);
+    // Clean break: value settings are no longer changed by PRAGMA. They are read via
+    // `SELECT ... FROM runtime_settings` and changed via `UPDATE runtime_settings`.
+    // Only the two imperative timeout verbs remain as PRAGMAs.
+    if (request.key == "timeout_push" || request.key == "timeout_pop") {
+        auto& settings = runtime_settings();
+        const auto reply = xsql::runtime::handle_common_runtime_pragma(
+            request, "idasql", settings.common_settings());
+        out = reply.success
+            ? make_pragma_result(reply.name, reply.value)
+            : make_pragma_error(reply.error);
         return true;
     }
 
-    if (request.key == "enable_idapython") {
-        if (request.value.empty()) {
-            out = make_pragma_result("enable_idapython", settings.enable_idapython() ? "1" : "0");
-            return true;
-        }
-        bool enabled = false;
-        if (!xsql::runtime::parse_bool_value(request.value, enabled)) {
-            out = make_pragma_error("Invalid idasql.enable_idapython value");
-            return true;
-        }
-        settings.set_enable_idapython(enabled);
-        out = make_pragma_result("enable_idapython", settings.enable_idapython() ? "1" : "0");
-        return true;
-    }
-
-    if (request.key == "idapython_output_max") {
-        if (request.value.empty()) {
-            out = make_pragma_result("idapython_output_max",
-                                     std::to_string(settings.idapython_output_max()));
-            return true;
-        }
-        int value = 0;
-        if (!xsql::runtime::parse_int_value(request.value, value) || value < 0) {
-            out = make_pragma_error(
-                "Invalid idasql.idapython_output_max value (bytes; 0 = unbounded)");
-            return true;
-        }
-        settings.set_idapython_output_max(static_cast<size_t>(value));
-        out = make_pragma_result("idapython_output_max",
-                                 std::to_string(settings.idapython_output_max()));
-        return true;
-    }
-
+    // Clean break: only the two timeout verbs are idasql PRAGMAs. Every other key
+    // is simply an unknown pragma (no migration hint -- runtime_settings is a plain
+    // writable table, discoverable like any other).
     out = make_pragma_error(xsql::runtime::unknown_runtime_pragma_error("idasql"));
     return true;
 }
@@ -288,7 +386,18 @@ void QueryEngine::init() {
     decompiler_->register_all(db_);
 
     functions::register_sql_functions(db_);
+
+    // Undo checkpoints (#59): the writable `checkpoints` table, the `undo_state`
+    // view, and this connection's share of the write epoch.
+    checkpoints_ = std::make_unique<checkpoints::CheckpointsRegistry>();
+    checkpoints_->register_all(db_);
+    checkpoints::attach_engine(this);
+
+    // In-process `import idasql` for IDAPython (#57).
+    python_bridge::attach(this);
+
     search::register_byte_search(db_);
+    deep_links::register_deep_links(db_);  // IDA 9.4+ only
 
     // get_ui_context_json(): registered for every runtime. Returns live UI
     // state in the GUI plugin; a "not applicable" stub under idalib/CLI.

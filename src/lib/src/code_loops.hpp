@@ -24,7 +24,9 @@ struct LoopInfo {
   ea_t back_edge_block_end;
 };
 
-void collect_loops_for_func(std::vector<LoopInfo> &loops, func_t *pfn);
+// Back edges of the function containing `func_ea` (a tail address selects
+// its owner); nothing outside a function.
+void collect_loops_for_func(std::vector<LoopInfo> &loops, ea_t func_ea);
 
 GeneratorTableDef<LoopInfo> define_disasm_loops();
 

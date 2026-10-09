@@ -21,14 +21,34 @@
 
 #include <xsql/thinclient/http_query_server.hpp>
 
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <functional>
 #include <memory>
+#include <utility>
 
 namespace idasql {
 
-// Callback for handling SQL queries
-using HTTPQueryCallback = std::function<std::string(const std::string& sql)>;
+// Callback for handling SQL scripts with the request's timeout/cancellation
+// options intact.
+using HTTPQueryCallback = std::function<xsql::ScriptResult(
+    const std::string& sql, const xsql::ScriptOptions& options)>;
+
+// Counts the POST /cancel requests a server has answered (see cancel_counter()).
+using CancelCounter = std::shared_ptr<std::atomic<std::uint64_t>>;
+
+// Arm a request's cancellation when it actually STARTS executing: it is cancelled
+// only by a /cancel that arrives after this point. A request that waits for the
+// main thread (execute_sync) is not running yet, so a /cancel aimed at the query
+// ahead of it must not reach it -- libxsql's own queue re-arms the same way.
+inline void arm_cancel_at_start(xsql::ScriptOptions& options, CancelCounter counter) {
+    if (!counter) return;
+    const std::uint64_t armed = counter->load();
+    options.should_cancel = [counter = std::move(counter), armed]() {
+        return counter->load() != armed;
+    };
+}
 
 class IDAHTTPServer {
 public:
@@ -42,14 +62,14 @@ public:
     /**
      * Start HTTP server on given port with callbacks
      *
-     * @param port Port to listen on (0 = random port 8100-8199)
-     * @param query_cb SQL query callback (returns JSON string)
+     * @param port Port to listen on (0 = random port 8100-8999)
+     * @param query_cb SQL script callback (returns the canonical result envelope)
      * @param bind_addr Address to bind to (default: localhost only)
      * @param use_queue If true, callbacks are queued for main thread (CLI mode)
      *                  If false, callbacks called directly (plugin mode with execute_sync)
      * @param auth_token Optional bearer token. Empty == no authentication (the
-     *                  loopback default); non-empty makes /query, /status and
-     *                  /shutdown require `Authorization: Bearer <token>`.
+     *                  loopback default); non-empty makes /query, /status,
+     *                  /cancel, and /shutdown require `Authorization: Bearer <token>`.
      * @return Actual port used, or -1 on failure
      */
     int start(int port, HTTPQueryCallback query_cb,
@@ -65,6 +85,21 @@ public:
 
     /** Stop the server */
     void stop();
+
+    /**
+     * Close the listening socket without joining the server's threads, and leak
+     * the server to process exit. New connections are refused and keep-alive
+     * loops end; the request already running finishes on its own. Only for
+     * teardown on the thread a request is waiting on, where stop() would join
+     * that request's worker forever.
+     */
+    void abandon();
+
+    /**
+     * Bumped on every POST /cancel this server answers. Shared, so a counter
+     * captured by a request outlives a restart or an abandoned server.
+     */
+    CancelCounter cancel_counter() const { return cancel_counter_; }
 
     /** Check if server is running */
     bool is_running() const;
@@ -84,6 +119,7 @@ public:
 private:
     std::unique_ptr<xsql::thinclient::http_query_server> impl_;
     std::string bind_addr_{"127.0.0.1"};
+    CancelCounter cancel_counter_ = std::make_shared<std::atomic<std::uint64_t>>(0);
 };
 
 /**

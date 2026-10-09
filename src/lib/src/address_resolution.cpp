@@ -4,6 +4,7 @@
 #include "address_resolution.hpp"
 
 #include <idasql/string_utils.hpp>
+#include <xsql/vtable.hpp>
 
 #include <sqlite3.h>
 
@@ -98,6 +99,27 @@ bool resolve_address_value(
     return false;
 }
 
+bool resolve_address_key(
+        xsql::FunctionArg arg,
+        const char* arg_name,
+        std::optional<ea_t>& out_ea,
+        std::string* error) {
+    out_ea.reset();
+    if (const std::optional<int64_t> key = xsql::exact_int64(arg)) {
+        out_ea = static_cast<ea_t>(static_cast<uint64_t>(*key));
+        return true;
+    }
+    if (arg.type() != SQLITE_TEXT) {
+        return true;  // NULL, a blob or a non-integral real equals no address
+    }
+    ea_t ea = BADADDR;
+    if (!resolve_address_value(arg, arg_name, ea, error)) {
+        return false;
+    }
+    out_ea = ea;
+    return true;
+}
+
 bool resolve_address_arg(
         xsql::FunctionContext& ctx,
         xsql::FunctionArg* argv,
@@ -116,6 +138,75 @@ bool resolve_address_arg(
         return false;
     }
     return true;
+}
+
+std::optional<int64_t> resolve_int_value(
+        xsql::FunctionArg arg,
+        const char* arg_name,
+        int64_t lo,
+        int64_t hi,
+        std::string* error) {
+    const std::string name = (arg_name && *arg_name) ? arg_name : "value";
+    auto fail = [&](const std::string& why) -> std::optional<int64_t> {
+        if (error) *error = name + ": " + why;
+        return std::nullopt;
+    };
+    if (arg.is_null()) return fail("must not be NULL");
+    std::optional<int64_t> v;
+    if (arg.type() != SQLITE_BLOB) v = xsql::exact_int64(arg);
+    if (!v) {
+        return fail(std::string("expected an integer (e.g. 16 or 0x10), got ") +
+                    (arg.type() == SQLITE_BLOB    ? "a blob"
+                     : arg.type() == SQLITE_FLOAT ? "a non-integral or out-of-range real"
+                                                  : "non-integer text"));
+    }
+    if (*v < lo || *v > hi) {
+        return fail("out of range (" + std::to_string(lo) + ".." + std::to_string(hi) +
+                    "): " + std::to_string(*v));
+    }
+    return v;
+}
+
+bool resolve_int_arg(
+        xsql::FunctionContext& ctx,
+        xsql::FunctionArg* argv,
+        int arg_index,
+        const char* arg_name,
+        int64_t lo,
+        int64_t hi,
+        int64_t& out) {
+    std::string error;
+    const std::optional<int64_t> v = resolve_int_value(argv[arg_index], arg_name, lo, hi, &error);
+    if (!v) {
+        ctx.result_error(error);
+        return false;
+    }
+    out = *v;
+    return true;
+}
+
+bool write_address(xsql::FunctionArg arg, const char* table, const char* column, ea_t& out_ea) {
+    const std::string name = std::string(table) + "." + column;
+    std::string error;
+    if (!resolve_address_value(arg, name.c_str(), out_ea, &error)) {
+        // resolve_address_value names the column in most messages, not all.
+        xsql::set_vtab_error(error.rfind(name, 0) == 0 ? error : name + ": " + error);
+        return false;
+    }
+    return true;
+}
+
+std::optional<int64_t> write_int(
+        xsql::FunctionArg arg,
+        const char* table,
+        const char* column,
+        int64_t lo,
+        int64_t hi) {
+    std::string error;
+    const std::optional<int64_t> v =
+        resolve_int_value(arg, (std::string(table) + "." + column).c_str(), lo, hi, &error);
+    if (!v) xsql::set_vtab_error(error);
+    return v;
 }
 
 } // namespace idasql

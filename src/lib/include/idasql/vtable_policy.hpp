@@ -8,7 +8,7 @@
  * vtable_policy.hpp - Policy and configuration system for IDASQL
  *
  * This allows passing options to virtual tables via:
- *   1. Module arguments: CREATE VIRTUAL TABLE funcs USING ida_funcs(cache=off)
+ *   1. Module arguments: CREATE VIRTUAL TABLE funcs USING funcs(cache=off)
  *   2. Global configuration via SQL function: SELECT idasql_config('cache', 'off')
  *   3. Per-session settings stored in a config table
  *

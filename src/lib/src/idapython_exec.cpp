@@ -168,8 +168,13 @@ void runtime_release() {
     UiMessageCapture::instance().release_runtime();
 }
 
-ScopedCapture::ScopedCapture(size_t max_bytes)
-    : active_(UiMessageCapture::instance().begin_capture(&error_, max_bytes)) {}
+// In the body, not the member-init list: begin_capture() writes into error_,
+// which is declared after active_ and so would not be constructed yet there.
+// (A nested capture, e.g. a helper run while a snippet is capturing, writes the
+// "already active" error into it.)
+ScopedCapture::ScopedCapture(size_t max_bytes) {
+    active_ = UiMessageCapture::instance().begin_capture(&error_, max_bytes);
+}
 
 ScopedCapture::~ScopedCapture() {
     if (active_ && !finished_) {

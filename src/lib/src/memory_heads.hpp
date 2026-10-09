@@ -19,7 +19,6 @@ struct HeadRow {
   ea_t ea = BADADDR;
 };
 
-void collect_head_rows(std::vector<HeadRow> &rows);
 const char *get_item_type_str(ea_t ea);
 
 GeneratorTableDef<HeadRow> define_heads();

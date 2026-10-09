@@ -85,9 +85,22 @@ public:
     void stop();
 
     /**
+     * Stop answering without joining the server's threads, and leak them to
+     * process exit. Only for teardown on the thread a request is waiting on, where
+     * stop() would wait for that request forever.
+     */
+    void abandon();
+
+    /**
      * Check if server is running.
      */
     bool is_running() const { return running_.load(); }
+
+    /**
+     * Whether this build has the deep_links table (IDA 9.4+). Set before start():
+     * the server instructions and tool description mention it only when true.
+     */
+    void set_deep_links_available(bool available) { deep_links_ = available; }
 
     /**
      * Get the port the server is listening on.
@@ -119,6 +132,7 @@ private:
     std::function<bool()> interrupt_check_;
     std::atomic<bool> running_{false};
     std::atomic<bool> use_queue_{false};
+    bool deep_links_ = false;
     std::string bind_addr_{"127.0.0.1"};
     int port_{0};
 
@@ -146,7 +160,13 @@ std::string format_mcp_info(int port, const std::string& bind_addr);
 /**
  * Format MCP server status.
  */
-std::string format_mcp_status(int port, bool running);
 std::string format_mcp_status(int port, bool running, const std::string& bind_addr);
+
+/**
+ * The server instructions and the idasql_query tool description an MCP client
+ * shows its model. Deep-link guidance only when the build has deep_links.
+ */
+std::string mcp_server_instructions(bool deep_links);
+std::string mcp_query_tool_description(bool deep_links);
 
 } // namespace idasql

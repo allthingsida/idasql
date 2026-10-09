@@ -5,6 +5,7 @@
 // See LICENSE.
 
 #include "symbols_comments.hpp"
+#include "address_resolution.hpp"
 
 using namespace idasql::core;
 
@@ -114,10 +115,14 @@ CachedTableDef<CommentRow> define_comments() {
         return ok;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
-        if (argc < 1 || argv[0].is_null())
+        if (argc < 1 || argv[0].is_null()) {
+          xsql::set_vtab_error("comments: INSERT needs addr");
           return false;
+        }
 
-        ea_t ea = static_cast<ea_t>(argv[0].as_int64());
+        ea_t ea = BADADDR;
+        if (!idasql::write_address(argv[0], "comments", "addr", ea))
+          return false;
         bool did_something = false;
         idasql_auto_wait();
         if (argc > 1 && !argv[1].is_null()) {

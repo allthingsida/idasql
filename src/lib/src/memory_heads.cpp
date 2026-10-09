@@ -15,18 +15,6 @@ namespace memory {
 // HEADS Table - All defined items in the database
 // ============================================================================
 
-void collect_head_rows(std::vector<HeadRow> &rows) {
-  rows.clear();
-
-  ea_t ea = inf_get_min_ea();
-  ea_t max_ea = inf_get_max_ea();
-
-  while (ea < max_ea && ea != BADADDR) {
-    rows.push_back({ea});
-    ea = next_head(ea, max_ea);
-  }
-}
-
 const char *get_item_type_str(ea_t ea) {
   flags64_t f = get_flags(ea);
   if (is_code(f))
@@ -48,166 +36,45 @@ namespace {
 
 enum class HeadOrder { Asc, Desc };
 
-struct HeadBounds {
-  bool has_lower = false;
-  ea_t lower = 0;
-  bool lower_inclusive = true;
-  bool has_upper = false;
-  ea_t upper = 0;
-  bool upper_inclusive = true;
-};
-
-bool is_defined_head(ea_t ea) {
-  return ea != BADADDR && is_head(get_flags(ea));
-}
-
-void tighten_lower_bound(HeadBounds &bounds, ea_t ea, bool inclusive) {
-  if (!bounds.has_lower || ea > bounds.lower ||
-      (ea == bounds.lower && !inclusive && bounds.lower_inclusive)) {
-    bounds.has_lower = true;
-    bounds.lower = ea;
-    bounds.lower_inclusive = inclusive;
-  }
-}
-
-void tighten_upper_bound(HeadBounds &bounds, ea_t ea, bool inclusive) {
-  if (!bounds.has_upper || ea < bounds.upper ||
-      (ea == bounds.upper && !inclusive && bounds.upper_inclusive)) {
-    bounds.has_upper = true;
-    bounds.upper = ea;
-    bounds.upper_inclusive = inclusive;
-  }
-}
-
-bool head_within_bounds(ea_t ea, const HeadBounds &bounds) {
-  if (ea == BADADDR)
-    return false;
-  if (bounds.has_lower &&
-      (ea < bounds.lower ||
-       (ea == bounds.lower && !bounds.lower_inclusive))) {
-    return false;
-  }
-  if (bounds.has_upper &&
-      (ea > bounds.upper ||
-       (ea == bounds.upper && !bounds.upper_inclusive))) {
-    return false;
-  }
-  return true;
-}
-
+// Yields the heads of an addr window in SQL order (HeadSpanWalker): an address
+// >= 2^63 is a negative INTEGER, so with ORDER BY addr the high half comes
+// first. The unconstrained scan walks every address the same way.
 class HeadsGenerator : public xsql::Generator<HeadRow> {
-  HeadOrder order_;
-  HeadBounds bounds_;
-  bool started_ = false;
-  ea_t current_ea_ = BADADDR;
+  HeadSpanWalker walker_;
   mutable HeadRow row_{BADADDR};
 
-  ea_t first_ascending() const {
-    const ea_t max_ea = inf_get_max_ea();
-    ea_t start = bounds_.has_lower ? bounds_.lower : inf_get_min_ea();
-    if (start == BADADDR || start >= max_ea)
-      return BADADDR;
-    if (bounds_.has_lower && !bounds_.lower_inclusive)
-      return next_head(start, max_ea);
-    if (is_defined_head(start))
-      return start;
-    return next_head(start, max_ea);
-  }
-
-  ea_t first_descending() const {
-    const ea_t min_ea = inf_get_min_ea();
-    ea_t start = bounds_.has_upper ? bounds_.upper : inf_get_max_ea();
-    if (start == BADADDR)
-      return BADADDR;
-    if (bounds_.has_upper && bounds_.upper_inclusive &&
-        is_defined_head(start)) {
-      return start;
-    }
-    if (start <= min_ea)
-      return BADADDR;
-    return prev_head(start, min_ea);
-  }
-
 public:
-  HeadsGenerator(HeadOrder order, HeadBounds bounds)
-      : order_(order), bounds_(bounds) {}
+  HeadsGenerator(HeadOrder order, const xsql::Int64KeyRange &range)
+      : walker_(range, order == HeadOrder::Desc) {}
 
   bool next() override {
-    ea_t next_ea = BADADDR;
-    if (!started_) {
-      started_ = true;
-      next_ea =
-          order_ == HeadOrder::Asc ? first_ascending() : first_descending();
-    } else if (order_ == HeadOrder::Asc) {
-      next_ea = next_head(current_ea_, inf_get_max_ea());
-    } else {
-      next_ea = prev_head(current_ea_, inf_get_min_ea());
-    }
-
-    if (!head_within_bounds(next_ea, bounds_)) {
-      current_ea_ = BADADDR;
-      return false;
-    }
-
-    current_ea_ = next_ea;
-    row_.ea = current_ea_;
-    return true;
+    row_.ea = walker_.next();
+    return row_.ea != BADADDR;
   }
 
   const HeadRow &current() const override { return row_; }
 
-  int64_t rowid() const override { return static_cast<int64_t>(current_ea_); }
+  int64_t rowid() const override { return static_cast<int64_t>(row_.ea); }
 };
 
-void apply_head_constraint(HeadBounds &bounds,
-                           const xsql::GeneratorConstraintArg &arg) {
-  switch (arg.op) {
-  case xsql::ConstraintOp::Eq:
-  {
-    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
-    tighten_lower_bound(bounds, ea, true);
-    tighten_upper_bound(bounds, ea, true);
-    break;
-  }
-  case xsql::ConstraintOp::Gt:
-  {
-    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
-    tighten_lower_bound(bounds, ea, false);
-    break;
-  }
-  case xsql::ConstraintOp::Ge:
-  {
-    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
-    tighten_lower_bound(bounds, ea, true);
-    break;
-  }
-  case xsql::ConstraintOp::Lt:
-  {
-    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
-    tighten_upper_bound(bounds, ea, false);
-    break;
-  }
-  case xsql::ConstraintOp::Le:
-  {
-    const ea_t ea = normalize_sql_ea(arg.value.as_int64());
-    tighten_upper_bound(bounds, ea, true);
-    break;
-  }
-  case xsql::ConstraintOp::Like:
-    xsql::set_vtab_error(
-        "heads: internal error: LIKE constraint routed to numeric addr bounds");
-    break;
-  }
-}
-
+// The addr constraints are omit=1, so they are compared the way SQLite
+// compares the INTEGER addr column (xsql::Int64KeyRange): `addr = 4096.5` and
+// `addr = NULL` match nothing, `addr >= 4095.5` starts at 4096.
 std::unique_ptr<xsql::Generator<HeadRow>>
 make_heads_generator(HeadOrder order,
                      const std::vector<xsql::GeneratorConstraintArg> &args) {
-  HeadBounds bounds;
+  xsql::Int64KeyRange range;
   for (const auto &arg : args) {
-    apply_head_constraint(bounds, arg);
+    if (arg.op == xsql::ConstraintOp::Like) {
+      xsql::set_vtab_error(
+          "heads: internal error: LIKE constraint routed to numeric addr bounds");
+      return nullptr;
+    }
+    range.constrain(arg.op, arg.value);
   }
-  return std::make_unique<HeadsGenerator>(order, bounds);
+  if (range.empty())
+    return nullptr;
+  return std::make_unique<HeadsGenerator>(order, range);
 }
 
 } // namespace
@@ -215,9 +82,10 @@ make_heads_generator(HeadOrder order,
 GeneratorTableDef<HeadRow> define_heads() {
   return generator_table<HeadRow>("heads")
       .estimate_rows(
-          []() -> size_t { return static_cast<size_t>(get_nlist_size()); })
+          []() -> size_t { return estimate_heads(); })
       .generator([]() -> std::unique_ptr<xsql::Generator<HeadRow>> {
-        return std::make_unique<HeadsGenerator>(HeadOrder::Asc, HeadBounds{});
+        return std::make_unique<HeadsGenerator>(HeadOrder::Asc,
+                                                xsql::Int64KeyRange{});
       })
       .column_int64("addr",
                     [](const HeadRow &row) -> int64_t {

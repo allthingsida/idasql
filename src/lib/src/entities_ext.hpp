@@ -7,7 +7,8 @@
 /**
  * entities_ext.hpp - Additional IDA entities as virtual tables
  *
- * Tables: fixups, hidden_ranges, problems, fchunks, signatures, local_types, mappings
+ * Tables: fixups, hidden_ranges, problems, fchunks, signatures, available_signatures,
+ *         local_types, mappings
  */
 
 #pragma once
@@ -34,11 +35,25 @@ struct ProblemEntry {
     std::string type_name;
 };
 
+// One entry of the database's FLIRT signature list.
 struct SignatureEntry {
-    int index;
-    std::string name;
+    int index = 0;
+    std::string name;      // as IDA stores it: a short name or an absolute path
+    std::string title;     // the library's name, "" when the file is not found
+    int state = 0;         // IDASGN_APPLIED / IDASGN_CURRENT / IDASGN_PLANNED
+    int32 matches = 0;     // library modules the signature recognised
     std::string optlibs;
-    int32 state;
+};
+
+// One .sig file IDA would find for the current processor.
+struct AvailableSignature {
+    std::string name;      // file name without ".sig": what INSERT takes
+    std::string title;
+    std::string path;
+    std::string source;    // "idausr", "idasgn" or "idadir"
+    int is_startup = -1;   // -1: unknown (no header reader on this SDK)
+    int64_t modules = -1;  // -1: unknown
+    bool in_list = false;  // already in the database's signature list
 };
 
 struct LocalTypeEntry {
@@ -53,6 +68,7 @@ struct LocalTypeEntry {
 void collect_fixups(std::vector<FixupEntry>& rows);
 void collect_problems(std::vector<ProblemEntry>& rows);
 void collect_signatures(std::vector<SignatureEntry>& rows);
+void collect_available_signatures(std::vector<AvailableSignature>& rows);
 void collect_local_types(std::vector<LocalTypeEntry>& rows);
 
 CachedTableDef<FixupEntry> define_fixups();
@@ -60,6 +76,7 @@ VTableDef define_hidden_ranges();
 CachedTableDef<ProblemEntry> define_problems();
 VTableDef define_fchunks();
 CachedTableDef<SignatureEntry> define_signatures();
+CachedTableDef<AvailableSignature> define_available_signatures();
 CachedTableDef<LocalTypeEntry> define_local_types();
 VTableDef define_mappings();
 
@@ -69,6 +86,7 @@ struct ExtendedRegistry {
     CachedTableDef<ProblemEntry> problems;
     VTableDef fchunks;
     CachedTableDef<SignatureEntry> signatures;
+    CachedTableDef<AvailableSignature> available_signatures;
     CachedTableDef<LocalTypeEntry> local_types;
     VTableDef mappings;
 

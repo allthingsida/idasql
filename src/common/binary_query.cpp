@@ -13,7 +13,8 @@ const char* default_binary_query() {
 }
 
 std::string format_query_curl_example(const std::string& base_url) {
-    return "curl -X POST " + base_url + "/query -d \"" + std::string(default_binary_query()) + "\"";
+    return "curl -X POST " + base_url + "/query --data-binary \"" +
+           std::string(default_binary_query()) + "\"";
 }
 
 } // namespace idasql

@@ -35,6 +35,7 @@ struct CoreRegistry {
   CachedTableDef<code::FuncRow> funcs;
   CachedTableDef<code::BlockInfo> blocks;
   CachedTableDef<code::FunctionChunkInfo> function_chunks;
+  GeneratorTableDef<code::FuncAtRow> func_at;
   CachedTableDef<code::InstructionRow> instructions;
   CachedTableDef<code::InstructionOperandRow> instruction_operands;
   GeneratorTableDef<code::DisasmCallInfo> disasm_calls;
@@ -42,10 +43,17 @@ struct CoreRegistry {
   GeneratorTableDef<code::CallGraphRow> call_graph;
   GeneratorTableDef<code::ShortestPathRow> shortest_path;
   GeneratorTableDef<code::CfgEdgeInfo> cfg_edges;
+  GeneratorTableDef<code::SwitchTableInfo> switch_tables;
+  GeneratorTableDef<code::SwitchCaseInfo> switch_cases;
+  GeneratorTableDef<code::FrameInfo> function_frames;
+  GeneratorTableDef<code::DataItemRow> data_items;
+  GeneratorTableDef<code::DominatorRow> dominators;
+  GeneratorTableDef<code::PostDominatorRow> post_dominators;
+  GeneratorTableDef<code::LoopRow> loops;
 
   // symbols domain
   CachedTableDef<symbols::NameRow> names;
-  VTableDef entries;
+  VTableDef exports;
   CachedTableDef<symbols::CommentRow> comments;
   CachedTableDef<symbols::BookmarkRow> bookmarks;
   CachedTableDef<symbols::ImportInfo> imports;
@@ -75,20 +83,21 @@ private:
   void register_index_table(xsql::Database &db, const char *name,
                             const VTableDef *def);
 
+  // Native canonical registration: the vtable module IS the canonical table name
+  // (no ida_ prefix, no alias). The family tools never coexist in one process, so
+  // the prefix disambiguated nothing -- one true name per table.
   template <typename RowData>
   void register_cached_table(xsql::Database &db, const char *name,
                              const CachedTableDef<RowData> *def) {
-    std::string module_name = std::string("ida_") + name;
-    db.register_cached_table(module_name.c_str(), def);
-    db.create_table(name, module_name.c_str());
+    db.register_cached_table(name, def);
+    db.create_table(name, name);
   }
 
   template <typename RowData>
   void register_generator_table(xsql::Database &db, const char *name,
                                 const GeneratorTableDef<RowData> *def) {
-    std::string module_name = std::string("ida_") + name;
-    db.register_generator_table(module_name.c_str(), def);
-    db.create_table(name, module_name.c_str());
+    db.register_generator_table(name, def);
+    db.create_table(name, name);
   }
 };
 

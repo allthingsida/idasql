@@ -18,14 +18,22 @@ namespace core {
 CoreRegistry::CoreRegistry()
     : funcs(code::define_funcs()), blocks(code::define_blocks()),
       function_chunks(code::define_function_chunks()),
+      func_at(code::define_func_at()),
       instructions(code::define_instructions()),
       instruction_operands(code::define_instruction_operands()),
       disasm_calls(code::define_disasm_calls()),
       disasm_loops(code::define_disasm_loops()),
       call_graph(code::define_call_graph()),
       shortest_path(code::define_shortest_path()),
-      cfg_edges(code::define_cfg_edges()), names(symbols::define_names()),
-      entries(symbols::define_entries()), comments(symbols::define_comments()),
+      cfg_edges(code::define_cfg_edges()),
+      switch_tables(code::define_switch_tables()),
+      switch_cases(code::define_switch_cases()),
+      function_frames(code::define_function_frames()),
+      data_items(code::define_data_items()),
+      dominators(code::define_dominators()),
+      post_dominators(code::define_post_dominators()),
+      loops(code::define_loops()), names(symbols::define_names()),
+      exports(symbols::define_exports()), comments(symbols::define_comments()),
       bookmarks(symbols::define_bookmarks()), imports(symbols::define_imports()),
       segments(memory::define_segments()), heads(memory::define_heads()),
       bytes(memory::define_bytes()), strings(memory::define_strings()),
@@ -39,6 +47,7 @@ void CoreRegistry::register_all(xsql::Database &db) {
   register_cached_table(db, "funcs", &funcs);
   register_cached_table(db, "blocks", &blocks);
   register_cached_table(db, "function_chunks", &function_chunks);
+  register_generator_table(db, "func_at", &func_at);
   register_cached_table(db, "instructions", &instructions);
   register_cached_table(db, "instruction_operands", &instruction_operands);
   register_generator_table(db, "disasm_calls", &disasm_calls);
@@ -46,10 +55,17 @@ void CoreRegistry::register_all(xsql::Database &db) {
   register_generator_table(db, "call_graph", &call_graph);
   register_generator_table(db, "shortest_path", &shortest_path);
   register_generator_table(db, "cfg_edges", &cfg_edges);
+  register_generator_table(db, "switch_tables", &switch_tables);
+  register_generator_table(db, "switch_cases", &switch_cases);
+  register_generator_table(db, "function_frames", &function_frames);
+  register_generator_table(db, "data_items", &data_items);
+  register_generator_table(db, "dominators", &dominators);
+  register_generator_table(db, "post_dominators", &post_dominators);
+  register_generator_table(db, "loops", &loops);
 
   // symbols domain
   register_cached_table(db, "names", &names);
-  register_index_table(db, "entries", &entries);
+  register_index_table(db, "entries", &exports);
   register_cached_table(db, "comments", &comments);
   register_cached_table(db, "bookmarks", &bookmarks);
   register_cached_table(db, "imports", &imports);
@@ -130,13 +146,56 @@ void CoreRegistry::create_helper_views(xsql::Database &db) {
         LEFT JOIN names n ON n.addr = x.from_func
         WHERE x.from_func != 0
     )");
+
+  // func_summary view - one triage row per function, from decompiler-free tables.
+  // Every count is a correlated lookup on a func_addr / from_func / to_addr
+  // pushdown, so a WHERE func_addr = X row costs one function's worth of work.
+  // Calls in and callers count call xrefs only (kind = 'call'), not jumps.
+  // No string count: string_refs costs a strings lookup per data xref (about a
+  // third of the whole view on a large database); per function, use the
+  // string_refs view.
+  db.exec(R"(
+        CREATE VIEW IF NOT EXISTS func_summary AS
+        SELECT func_addr, name, size, chunk_count, block_count, edge_count,
+               edge_count - block_count + 2 AS cyclomatic,
+               call_sites_out, callees, call_sites_in, callers, loop_count,
+               switch_count, data_reads, data_writes,
+               frame_size, uses_chkstk
+        FROM (
+            SELECT
+                f.addr AS func_addr,
+                f.name AS name,
+                f.size AS size,
+                f.chunk_count AS chunk_count,
+                (SELECT COUNT(*) FROM blocks b WHERE b.func_addr = f.addr) AS block_count,
+                (SELECT COUNT(*) FROM cfg_edges e WHERE e.func_addr = f.addr) AS edge_count,
+                (SELECT COUNT(*) FROM disasm_calls c WHERE c.func_addr = f.addr) AS call_sites_out,
+                (SELECT COUNT(DISTINCT c.callee_addr) FROM disasm_calls c
+                  WHERE c.func_addr = f.addr) AS callees,
+                (SELECT COUNT(DISTINCT x.from_addr) FROM xrefs x
+                  WHERE x.to_addr = f.addr AND x.kind = 'call') AS call_sites_in,
+                (SELECT COUNT(DISTINCT x.from_func) FROM xrefs x
+                  WHERE x.to_addr = f.addr AND x.kind = 'call') AS callers,
+                (SELECT COUNT(*) FROM loops l WHERE l.func_addr = f.addr) AS loop_count,
+                (SELECT COUNT(*) FROM switch_tables st WHERE st.func_addr = f.addr) AS switch_count,
+                (SELECT COUNT(*) FROM xrefs x
+                  WHERE x.from_func = f.addr AND x.kind = 'read') AS data_reads,
+                (SELECT COUNT(*) FROM xrefs x
+                  WHERE x.from_func = f.addr AND x.kind = 'write') AS data_writes,
+                (SELECT fr.frame_size FROM function_frames fr
+                  WHERE fr.func_addr = f.addr) AS frame_size,
+                (SELECT fr.uses_chkstk FROM function_frames fr
+                  WHERE fr.func_addr = f.addr) AS uses_chkstk
+            FROM funcs f
+        )
+    )");
 }
 
 void CoreRegistry::register_index_table(xsql::Database &db, const char *name,
                                         const VTableDef *def) {
-  std::string module_name = std::string("ida_") + name;
-  db.register_table(module_name.c_str(), def);
-  db.create_table(name, module_name.c_str());
+  // Native canonical registration: module name == table name (no ida_ prefix).
+  db.register_table(name, def);
+  db.create_table(name, name);
 }
 
 } // namespace core

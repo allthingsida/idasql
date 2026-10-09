@@ -37,7 +37,7 @@
 idasql::VTableDef make_user_functions_table() {
     return idasql::table("user_functions")
         // How many rows?
-        .count([]() -> size_t {
+        .row_count([]() -> size_t {
             return get_func_qty();
         })
         // Column definitions - each takes a lambda (row_index) -> value

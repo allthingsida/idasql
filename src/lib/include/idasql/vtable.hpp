@@ -12,18 +12,18 @@
  *
  * Two table patterns are available:
  *
- * 1. Index-based tables (for IDA's indexed access like getn_func):
+ * 1. Index-based tables (for IDA's indexed access like get_nlist_ea):
  *
- *   auto funcs_table = idasql::table("funcs")
- *       .count([]() { return get_func_qty(); })
- *       .column_int64("addr", [](size_t i) { return getn_func(i)->start_ea; })
+ *   auto names_table = idasql::table("names")
+ *       .row_count([]() { return get_nlist_size(); })
+ *       .column_int64("addr", [](size_t i) { return get_nlist_ea(i); })
  *       .build();
  *
  * 2. Cached tables (for enumeration-based data, cache freed after query):
  *
  *   auto xrefs_table = idasql::cached_table<XrefInfo>("xrefs")
  *       .estimate_rows([]() { return get_func_qty() * 10; })
- *       .count([]() { return get_xref_qty(); })  // Optional COUNT(*) fast path
+ *       .row_count([]() { return get_xref_qty(); })  // Optional COUNT(*) fast path
  *       .cache_builder([](auto& cache) { ... populate ... })
  *       .column_int64("from_addr", [](const XrefInfo& r) { return r.from_ea; })
  *       .build();

@@ -1,8 +1,9 @@
 {
+  "$schema": "https://hcli.docs.hex-rays.com/schemas/ida-plugin.json",
   "IDAMetadataDescriptorVersion": 1,
   "plugin": {
     "name": "IDASQL",
-    "version": "@TOOL_VERSION_MAJOR@.@TOOL_VERSION_MINOR@.@TOOL_VERSION_PATCH@.@TOOL_VERSION_REVISION@",
+    "version": "@TOOL_VERSION_STRING@",
     "entryPoint": "idasql",
     "description": "SQL interface for IDA databases. Query functions, xrefs, strings, types, and more using SQL. Supports local CLI, HTTP REST server, and optional MCP integration.",
     "urls": {

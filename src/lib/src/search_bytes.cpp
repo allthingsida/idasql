@@ -6,6 +6,8 @@
 
 #include "search_bytes.hpp"
 
+#include "core_common.hpp"
+
 #include <algorithm>
 #include <iomanip>
 #include <limits>
@@ -51,15 +53,6 @@ ea_t saturating_next_ea(ea_t ea) {
     return ea + 1;
 }
 
-ea_t as_ea(const xsql::FunctionArg& value) {
-    return static_cast<ea_t>(value.as_int64());
-}
-
-size_t as_size(const xsql::FunctionArg& value) {
-    const int64_t v = value.as_int64();
-    return v > 0 ? static_cast<size_t>(v) : 0;
-}
-
 class EmptyByteSearchGenerator final : public xsql::Generator<ByteSearchResult> {
 public:
     bool next() override { return false; }
@@ -70,44 +63,60 @@ private:
     ByteSearchResult current_{};
 };
 
+// Scans the addr window for a byte pattern in SQL order. The window's unsigned
+// spans (xsql::Int64KeyRange::unsigned_spans) are searched in turn -- the part
+// at or above 2^63 first, since those addresses are negative INTEGERs -- each
+// within the unsigned [start_addr, end_addr) scan bounds. A match belongs to the
+// span its START falls in; bin_search needs the whole match below its end
+// bound, so a span's scan end is widened by the pattern length (saturating at
+// the top of the address space).
 class ByteSearchGenerator final : public xsql::Generator<ByteSearchResult> {
 public:
-    ByteSearchGenerator(std::string pattern, ea_t start_ea, ea_t end_ea, size_t max_results)
-        : start_ea_(start_ea),
-          end_ea_(end_ea),
-          next_ea_(start_ea),
-          max_results_(max_results)
+    ByteSearchGenerator(const std::string& pattern, ea_t start_ea, ea_t end_ea,
+                        const xsql::Int64KeyRange& addr_range, size_t max_results)
+        : max_results_(max_results)
     {
-        if (pattern.empty() || end_ea_ <= start_ea_) {
-            return;
-        }
+        if (pattern.empty() || end_ea <= start_ea) return;
 
         qstring errbuf;
-        if (!parse_binpat_str(&binpat_, start_ea_, pattern.c_str(), 16, PBSENC_DEF1BPU, &errbuf)) {
+        if (!parse_binpat_str(&binpat_, start_ea, pattern.c_str(), 16, PBSENC_DEF1BPU, &errbuf)) {
             return;
         }
-
-        if (binpat_.empty()) {
-            return;
-        }
-
+        if (binpat_.empty()) return;
         pattern_len_ = binpat_[0].bytes.size();
-        valid_ = pattern_len_ > 0;
+        if (pattern_len_ == 0) return;
+
+        const ea_t len = static_cast<ea_t>(pattern_len_);
+        for (const xsql::U64Span& span : addr_range.unsigned_spans()) {
+            const ea_t lo = static_cast<ea_t>(span.lo);
+            const ea_t hi = static_cast<ea_t>(span.hi);
+            const ea_t tail_end = hi >= BADADDR - len ? BADADDR : hi + len;
+            Window window;
+            window.next = std::max(start_ea, lo);
+            window.end = std::min(end_ea, tail_end);
+            window.last_start = hi;
+            if (window.next < window.end) windows_.push_back(window);
+        }
     }
 
     bool next() override {
-        if (!valid_) return false;
         if (max_results_ > 0 && emitted_ >= max_results_) return false;
-        if (next_ea_ >= end_ea_) return false;
-
-        ea_t found = bin_search(next_ea_, end_ea_, binpat_, BIN_SEARCH_FORWARD);
-        if (found == BADADDR) return false;
-
-        fill_match_result(current_, found, pattern_len_);
-        next_ea_ = saturating_next_ea(found);
-        emitted_++;
-        rowid_++;
-        return true;
+        while (window_ < windows_.size()) {
+            Window& window = windows_[window_];
+            if (window.next < window.end) {
+                const ea_t found =
+                    bin_search(window.next, window.end, binpat_, BIN_SEARCH_FORWARD);
+                if (found != BADADDR && found >= window.next && found <= window.last_start) {
+                    fill_match_result(current_, found, pattern_len_);
+                    window.next = saturating_next_ea(found);
+                    emitted_++;
+                    rowid_++;
+                    return true;
+                }
+            }
+            ++window_;
+        }
+        return false;
     }
 
     const ByteSearchResult& current() const override {
@@ -119,89 +128,78 @@ public:
     }
 
 private:
+    struct Window {
+        ea_t next = BADADDR;        // where the scan resumes
+        ea_t end = BADADDR;         // bin_search's exclusive end bound
+        ea_t last_start = BADADDR;  // the last address a match may start at
+    };
+
     compiled_binpat_vec_t binpat_;
-    ea_t start_ea_ = BADADDR;
-    ea_t end_ea_ = BADADDR;
-    ea_t next_ea_ = BADADDR;
+    std::vector<Window> windows_;
+    size_t window_ = 0;
     size_t pattern_len_ = 0;
     size_t max_results_ = 0;
     size_t emitted_ = 0;
     int64_t rowid_ = 0;
-    bool valid_ = false;
     ByteSearchResult current_{};
 };
 
 std::unique_ptr<xsql::Generator<ByteSearchResult>> make_byte_search_generator(
     const std::vector<xsql::GeneratorConstraintArg>& args)
 {
+    // Every constraint here is omit=1. The inputs (pattern, start_addr,
+    // end_addr, max_results) take a value only when a native column of their
+    // type would equal it -- NULL, 4096.5 or a blob pattern requests nothing
+    // -- and the addr bounds are compared the way SQLite compares the INTEGER
+    // addr column (xsql::Int64KeyRange).
     std::string pattern;
     ea_t start_ea = inf_get_min_ea();
     ea_t end_ea = inf_get_max_ea();
     size_t max_results = 0;
+    xsql::Int64KeyRange addr_range;
 
     for (const auto& arg : args) {
+        if (arg.column_index == BYTE_SEARCH_ADDRESS) {
+            if (arg.op == xsql::ConstraintOp::Like) continue;
+            addr_range.constrain(arg.op, arg.value);
+            continue;
+        }
+        if (arg.op != xsql::ConstraintOp::Eq) continue;
         switch (arg.column_index) {
-            case BYTE_SEARCH_PATTERN:
-                if (arg.op == xsql::ConstraintOp::Eq) {
-                    const char* text = arg.value.as_c_str();
-                    pattern = text ? text : "";
-                }
+            case BYTE_SEARCH_PATTERN: {
+                const std::optional<std::string> text = xsql::exact_text(arg.value);
+                if (!text) return std::make_unique<EmptyByteSearchGenerator>();
+                pattern = *text;
                 break;
+            }
             case BYTE_SEARCH_START_EA:
-                if (arg.op == xsql::ConstraintOp::Eq) {
-                    start_ea = std::max(start_ea, as_ea(arg.value));
-                }
-                break;
             case BYTE_SEARCH_END_EA:
-                if (arg.op == xsql::ConstraintOp::Eq) {
-                    end_ea = std::min(end_ea, as_ea(arg.value));
+            case BYTE_SEARCH_MAX_RESULTS: {
+                const std::optional<int64_t> value = xsql::exact_int64(arg.value);
+                if (!value) return std::make_unique<EmptyByteSearchGenerator>();
+                if (arg.column_index == BYTE_SEARCH_START_EA) {
+                    start_ea = std::max(start_ea, core::normalize_sql_ea(*value));
+                } else if (arg.column_index == BYTE_SEARCH_END_EA) {
+                    end_ea = std::min(end_ea, core::normalize_sql_ea(*value));
+                } else {
+                    max_results = *value > 0 ? static_cast<size_t>(*value) : 0;
                 }
                 break;
-            case BYTE_SEARCH_MAX_RESULTS:
-                if (arg.op == xsql::ConstraintOp::Eq) {
-                    max_results = as_size(arg.value);
-                }
-                break;
-            case BYTE_SEARCH_ADDRESS:
-                if (arg.op == xsql::ConstraintOp::Ge) {
-                    start_ea = std::max(start_ea, as_ea(arg.value));
-                } else if (arg.op == xsql::ConstraintOp::Gt) {
-                    start_ea = std::max(start_ea, saturating_next_ea(as_ea(arg.value)));
-                } else if (arg.op == xsql::ConstraintOp::Lt) {
-                    end_ea = std::min(end_ea, as_ea(arg.value));
-                } else if (arg.op == xsql::ConstraintOp::Le) {
-                    end_ea = std::min(end_ea, saturating_next_ea(as_ea(arg.value)));
-                }
-                break;
+            }
             default:
                 break;
         }
     }
 
-    if (pattern.empty()) {
+    if (pattern.empty() || addr_range.empty()) {
         return std::make_unique<EmptyByteSearchGenerator>();
     }
 
-    return std::make_unique<ByteSearchGenerator>(std::move(pattern), start_ea, end_ea, max_results);
+    return std::make_unique<ByteSearchGenerator>(pattern, start_ea, end_ea, addr_range,
+                                                 max_results);
 }
 
 } // namespace
-
-size_t find_byte_pattern(
-    const char* pattern,
-    ea_t start_ea,
-    ea_t end_ea,
-    std::vector<ByteSearchResult>& results,
-    size_t max_results)
-{
-    results.clear();
-
-    ByteSearchGenerator generator(pattern ? pattern : "", start_ea, end_ea, max_results);
-    while (generator.next()) {
-        results.push_back(generator.current());
-    }
-    return results.size();
-}
 
 xsql::GeneratorTableDef<ByteSearchResult> define_byte_search() {
     return xsql::generator_table<ByteSearchResult>("byte_search")
@@ -244,8 +242,8 @@ xsql::GeneratorTableDef<ByteSearchResult> define_byte_search() {
 
 bool register_byte_search(xsql::Database& db) {
     static auto byte_search = define_byte_search();
-    return db.register_generator_table("ida_byte_search", &byte_search) &&
-           db.create_table("byte_search", "ida_byte_search");
+    return db.register_generator_table("byte_search", &byte_search) &&
+           db.create_table("byte_search", "byte_search");
 }
 
 } // namespace search

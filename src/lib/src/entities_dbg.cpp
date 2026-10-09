@@ -7,6 +7,9 @@
 #include "entities_dbg.hpp"
 
 #include "dirtree_utils.hpp"
+#include "address_resolution.hpp"
+
+#include <climits>
 
 namespace idasql {
 namespace debugger {
@@ -105,7 +108,7 @@ std::string safe_bpt_loc_symbol(const bpt_t& bpt) {
 
 VTableDef define_breakpoints() {
     return table("breakpoints")
-        .count([]() { return static_cast<size_t>(get_bpt_qty()); })
+        .row_count([]() { return static_cast<size_t>(get_bpt_qty()); })
         // Column 0: address (R)
         .column_int64("addr", [](size_t i) -> int64_t {
             bpt_t bpt;
@@ -361,6 +364,23 @@ VTableDef define_breakpoints() {
                 return argv[col].as_int64();
             };
 
+            // Every integer value is exact (no '0x10' text read as 0, no 1.9
+            // read as 1) before anything is added.
+            static constexpr struct { int col; const char* name; int64_t lo; int64_t hi; } kInts[] = {
+                {1, "enabled", INT_MIN, INT_MAX},    {2, "type", INT_MIN, INT_MAX},
+                {4, "size", INT_MIN, INT_MAX},       {5, "flags", INT64_MIN, INT64_MAX},
+                {6, "pass_count", INT_MIN, INT_MAX}, {12, "offset", INT64_MIN, INT64_MAX},
+                {14, "line", INT_MIN, INT_MAX},
+            };
+            for (const auto& c : kInts) {
+                if (is_non_null(c.col) &&
+                    !idasql::write_int(argv[c.col], "breakpoints", c.name, c.lo, c.hi))
+                    return false;
+            }
+            ea_t insert_ea = BADADDR;
+            if (is_non_null(0) && !idasql::write_address(argv[0], "breakpoints", "addr", insert_ea))
+                return false;
+
             bool ok = false;
 
             // Identity of the breakpoint we are about to insert, so the
@@ -369,7 +389,7 @@ VTableDef define_breakpoints() {
             // relative / source branches the bpt list is location-ordered (not
             // newest-last), so we must match by location.
             bool match_by_ea = is_non_null(0);
-            ea_t target_ea = match_by_ea ? static_cast<ea_t>(get_int64(0)) : BADADDR;
+            ea_t target_ea = match_by_ea ? insert_ea : BADADDR;
             bpt_location_t target_loc;
 
             if (is_non_null(11)) {
@@ -403,7 +423,7 @@ VTableDef define_breakpoints() {
                 target_loc = bpt.loc;
                 ok = add_bpt(bpt);
             } else if (is_non_null(0)) {
-                ea_t ea = static_cast<ea_t>(get_int64(0));
+                ea_t ea = insert_ea;
                 int sz = get_int(4, 0);
                 bpttype_t tp = static_cast<bpttype_t>(get_int(2, BPT_SOFT));
                 ok = add_bpt(ea, sz, tp);
@@ -510,8 +530,8 @@ DebuggerRegistry::DebuggerRegistry()
 {}
 
 void DebuggerRegistry::register_all(xsql::Database& db) {
-    db.register_table("ida_breakpoints", &breakpoints);
-    db.create_table("breakpoints", "ida_breakpoints");
+    db.register_table("breakpoints", &breakpoints);
+    db.create_table("breakpoints", "breakpoints");
 }
 
 } // namespace debugger

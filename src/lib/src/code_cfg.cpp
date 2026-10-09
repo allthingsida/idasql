@@ -8,11 +8,81 @@
 
 #include "address_resolution.hpp"
 #include "decompiler.hpp"
+#include "function_rowid.hpp"
 
 using namespace idasql::core;
 
 namespace idasql {
 namespace code {
+
+namespace {
+
+bool cfg_scan_interrupted() {
+  if (!xsql::vtab_interrupted())
+    return false;
+  xsql::set_vtab_error("query interrupted while scanning cfg_edges");
+  return true;
+}
+
+// The label of edge j out of two-way block i, from addresses, never successor
+// order: the successor that starts where the block ends is the fall-through
+// ("false"), the other the branch target ("true") -- the convention bnsql
+// (TrueBranch/FalseBranch) and ghidrasql (CONDITIONAL_JUMP/FALL_THROUGH) follow.
+// Block-end rather than "the instruction after the jump" also holds for
+// delay-slot ISAs. A two-target switch is not a condition.
+const char *two_way_edge_type(const idasql_flow_chart &fc, int i, int j) {
+  const auto &b = fc.blocks[i];
+  const ea_t last = prev_head(b.end_ea, b.start_ea);
+  switch_info_t si;
+  if (last != BADADDR && get_switch_info(&si, last) > 0)
+    return "normal";
+  const int s0 = fc.succ(i, 0);
+  const int s1 = fc.succ(i, 1);
+  if (s0 == s1)  // a conditional jump to the next instruction
+    return j == 0 ? "false" : "true";
+  const bool f0 = fc.blocks[s0].start_ea == b.end_ea;
+  const bool f1 = fc.blocks[s1].start_ea == b.end_ea;
+  if (f0 == f1)  // neither or both fall through: no polarity to report
+    return "normal";
+  return ((j == 0) ? f0 : f1) ? "false" : "true";
+}
+
+// The edges of one function, in block order. False when the query was interrupted.
+bool collect_cfg_edges(ea_t func_ea, std::vector<CfgEdgeInfo> &out) {
+  out.clear();
+  if (cfg_scan_interrupted())
+    return false;
+  idasql_flow_chart fc;
+  fc.create_func(func_ea, FC_NOEXT);
+  if (cfg_scan_interrupted())
+    return false;
+  for (int i = 0; i < fc.size(); i++) {
+    if ((i & 1023) == 0 && cfg_scan_interrupted()) {
+      out.clear();
+      return false;
+    }
+    const int nsucc = fc.nsucc(i);
+    for (int j = 0; j < nsucc; j++) {
+      const int succ_idx = fc.succ(i, j);
+      if (succ_idx < 0 || succ_idx >= fc.size())
+        continue;
+      CfgEdgeInfo edge;
+      edge.func_ea = func_ea;
+      edge.from_addr = fc.blocks[i].start_ea;
+      edge.to_addr = fc.blocks[succ_idx].start_ea;
+      // One successor is plain flow; three or more is a switch.
+      edge.edge_type = nsucc == 2 ? two_way_edge_type(fc, i, j) : "normal";
+      out.push_back(std::move(edge));
+    }
+  }
+  if (cfg_scan_interrupted()) {
+    out.clear();
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
 
 class CfgEdgesInFuncIterator : public xsql::RowIterator {
   std::vector<CfgEdgeInfo> edges_;
@@ -21,37 +91,9 @@ class CfgEdgesInFuncIterator : public xsql::RowIterator {
 
 public:
   explicit CfgEdgesInFuncIterator(ea_t func_ea) {
-    func_t *pfn = get_func(func_ea);
-    if (!pfn)
+    if (!idasql_is_func_start(func_ea))
       return;
-
-    qflow_chart_t fc;
-    fc.create("", pfn, pfn->start_ea, pfn->end_ea, FC_NOEXT);
-
-    for (int i = 0; i < fc.size(); i++) {
-      int nsucc = fc.nsucc(i);
-      for (int j = 0; j < nsucc; j++) {
-        int succ_idx = fc.succ(i, j);
-        if (succ_idx < 0 || succ_idx >= fc.size())
-          continue;
-
-        CfgEdgeInfo edge;
-        edge.func_ea = pfn->start_ea;
-        edge.from_block = fc.blocks[i].start_ea;
-        edge.to_block = fc.blocks[succ_idx].start_ea;
-
-        if (nsucc == 1) {
-          edge.edge_type = "normal";
-        } else if (nsucc == 2) {
-          edge.edge_type = (j == 0) ? "true" : "false";
-        } else {
-          // Switch/multi-way branch
-          edge.edge_type = "normal";
-        }
-
-        edges_.push_back(std::move(edge));
-      }
-    }
+    (void)collect_cfg_edges(func_ea, edges_);
   }
 
   bool next() override {
@@ -83,10 +125,10 @@ public:
       ctx.result_int64(static_cast<int64_t>(e.func_ea));
       break;
     case 1:
-      ctx.result_int64(static_cast<int64_t>(e.from_block));
+      ctx.result_int64(static_cast<int64_t>(e.from_addr));
       break;
     case 2:
-      ctx.result_int64(static_cast<int64_t>(e.to_block));
+      ctx.result_int64(static_cast<int64_t>(e.to_addr));
       break;
     case 3:
       ctx.result_text(e.edge_type);
@@ -97,7 +139,11 @@ public:
     }
   }
 
-  int64_t rowid() const override { return static_cast<int64_t>(idx_); }
+  int64_t rowid() const override {
+    return idx_ < edges_.size()
+               ? idasql::detail::pack_function_rowid(edges_[idx_].func_ea, idx_)
+               : -1;
+  }
 };
 
 class CfgEdgesGenerator : public xsql::Generator<CfgEdgeInfo> {
@@ -108,34 +154,14 @@ class CfgEdgesGenerator : public xsql::Generator<CfgEdgeInfo> {
   bool load_next_func() {
     size_t func_qty = get_func_qty();
     while (func_idx_ < func_qty) {
-      func_t *pfn = getn_func(func_idx_++);
-      if (!pfn)
+      if (cfg_scan_interrupted())
+        return false;
+      const ea_t func_ea = idasql_func_ea_by_num(func_idx_++);
+      if (func_ea == BADADDR)
         continue;
 
-      current_edges_.clear();
-      qflow_chart_t fc;
-      fc.create("", pfn, pfn->start_ea, pfn->end_ea, FC_NOEXT);
-
-      for (int i = 0; i < fc.size(); i++) {
-        int nsucc = fc.nsucc(i);
-        for (int j = 0; j < nsucc; j++) {
-          int succ_idx = fc.succ(i, j);
-          if (succ_idx < 0 || succ_idx >= fc.size())
-            continue;
-
-          CfgEdgeInfo edge;
-          edge.func_ea = pfn->start_ea;
-          edge.from_block = fc.blocks[i].start_ea;
-          edge.to_block = fc.blocks[succ_idx].start_ea;
-          if (nsucc == 1)
-            edge.edge_type = "normal";
-          else if (nsucc == 2)
-            edge.edge_type = (j == 0) ? "true" : "false";
-          else
-            edge.edge_type = "normal";
-          current_edges_.push_back(std::move(edge));
-        }
-      }
+      if (!collect_cfg_edges(func_ea, current_edges_))
+        return false;
 
       if (!current_edges_.empty()) {
         edge_idx_ = 0;
@@ -153,30 +179,37 @@ public:
       return true;
     }
     // Load next function
-    return load_next_func();
+    if (load_next_func()) {
+      return true;
+    }
+    return false;
   }
 
   const CfgEdgeInfo &current() const override {
     return current_edges_[edge_idx_];
   }
   int64_t rowid() const override {
-    return static_cast<int64_t>(current_edges_[edge_idx_].from_block);
+    return idasql::detail::pack_function_rowid(
+        current_edges_[edge_idx_].func_ea, edge_idx_);
   }
 };
 
 GeneratorTableDef<CfgEdgeInfo> define_cfg_edges() {
   return xsql::generator_table<CfgEdgeInfo>("cfg_edges")
+      .generator([]() -> std::unique_ptr<xsql::Generator<CfgEdgeInfo>> {
+        return std::make_unique<CfgEdgesGenerator>();
+      })
       .column_int64("func_addr",
                     [](const CfgEdgeInfo &r) -> int64_t {
                       return static_cast<int64_t>(r.func_ea);
                     })
-      .column_int64("from_block",
+      .column_int64("from_addr",
                     [](const CfgEdgeInfo &r) -> int64_t {
-                      return static_cast<int64_t>(r.from_block);
+                      return static_cast<int64_t>(r.from_addr);
                     })
-      .column_int64("to_block",
+      .column_int64("to_addr",
                     [](const CfgEdgeInfo &r) -> int64_t {
-                      return static_cast<int64_t>(r.to_block);
+                      return static_cast<int64_t>(r.to_addr);
                     })
       .column_text(
           "edge_type",
@@ -247,7 +280,8 @@ bool register_disasm_views(xsql::Database &db) {
             l.back_edge_block_end
         FROM disasm_calls c
         JOIN disasm_loops l ON l.func_addr = c.func_addr
-        WHERE c.addr >= l.header_addr AND c.addr < l.back_edge_block_end
+        WHERE c.addr >= MIN(l.header_addr, l.back_edge_block_addr)
+          AND c.addr < MAX(l.header_end_addr, l.back_edge_block_end)
     )";
   db.exec(v_calls_in_loops);
 

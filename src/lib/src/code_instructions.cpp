@@ -6,6 +6,11 @@
 
 #include "code_instructions.hpp"
 
+#include "function_rowid.hpp"
+
+#include <unordered_map>
+#include <unordered_set>
+
 using namespace idasql::core;
 
 namespace idasql {
@@ -52,7 +57,12 @@ void instruction_column_common(xsql::FunctionContext &ctx, ea_t ea,
     return;
   }
   if (col == kInstructionFuncAddrCol) {
-    ctx.result_int64(func_addr);
+    // NULL for code outside every function (as xrefs.from_func): 0 would be a
+    // key no func_addr pushdown can find, and a real function may start at 0.
+    if (func_addr != BADADDR)
+      ctx.result_int64(static_cast<int64_t>(func_addr));
+    else
+      ctx.result_null();
     return;
   }
   if (col >= kInstructionClassBaseCol &&
@@ -100,28 +110,61 @@ void instruction_column_common(xsql::FunctionContext &ctx, ea_t ea,
 }
 
 // ============================================================================
+// INSTRUCTIONS Table - Row identity
+// ============================================================================
+
+// The (owner, address) behind every rowid this table reported. A rowid packs
+// the owner's function ordinal and the address's position in that function's
+// chunk layout, and a DELETE changes both: once instructions are undefined IDA
+// shrinks or drops the function, so the remaining rowids of the same statement
+// stop decoding live ("row 6 not found in instructions" for a range DELETE over
+// a whole function), and a decode against a renumbered function list could even
+// land on another function's instruction. SQLite hands xUpdate only rowids its
+// scan of the same statement just reported, so resolving through this map names
+// exactly the row the scan saw. Refreshed on every report; cleared with
+// deleted_instruction_heads() when a writing statement commits or rolls back
+// (the table's transaction hooks), never by a scan: a statement can scan the
+// table more than once (an IN subquery, a self-join).
+static std::unordered_map<int64_t, std::pair<ea_t, ea_t>> &
+reported_instruction_rows() {
+  static std::unordered_map<int64_t, std::pair<ea_t, ea_t>> rows;
+  return rows;
+}
+
+static int64_t report_instruction_rowid(ea_t owner, ea_t ea) {
+  const int64_t rowid = idasql::detail::pack_owned_address_rowid(owner, ea);
+  if (rowid >= 0)
+    reported_instruction_rows()[rowid] = {owner, ea};
+  return rowid;
+}
+
+// ============================================================================
 // INSTRUCTIONS Table - Iterators
 // ============================================================================
 
 InstructionsInFuncIterator::InstructionsInFuncIterator(ea_t func_addr)
     : func_addr_(func_addr) {
-  pfn_ = get_func(func_addr_);
+  if (!idasql_is_func_start(func_addr_))
+    return;
+  // Scoped: the iterator's function lock is released before any row is used.
+  idasql_func_item_iterator fii;
+  for (bool ok = fii.set(func_addr_); ok; ok = fii.next_code()) {
+    const ea_t ea = fii.current();
+    if (is_code(get_flags(ea)))
+      eas_.push_back(ea);
+  }
 }
 
 bool InstructionsInFuncIterator::next() {
-  if (!pfn_)
-    return false;
-
   if (!started_) {
     started_ = true;
-    valid_ = fii_.set(pfn_);
-    if (valid_)
-      current_ea_ = fii_.current();
+    idx_ = 0;
   } else if (valid_) {
-    valid_ = fii_.next_code();
-    if (valid_)
-      current_ea_ = fii_.current();
+    ++idx_;
   }
+  valid_ = idx_ < eas_.size();
+  if (valid_)
+    current_ea_ = eas_[idx_];
   return valid_;
 }
 
@@ -132,31 +175,64 @@ void InstructionsInFuncIterator::column(xsql::FunctionContext &ctx, int col) {
 }
 
 int64_t InstructionsInFuncIterator::rowid() const {
-  return static_cast<int64_t>(current_ea_);
+  return report_instruction_rowid(func_addr_, current_ea_);
 }
 
-InstructionAtAddressIterator::InstructionAtAddressIterator(ea_t ea) : ea_(ea) {}
+// The functions an instruction is reported under: every owner of its chunk, or
+// a single BADADDR entry (func_addr NULL) for code outside every function.
+static std::vector<ea_t> instruction_owners(ea_t ea) {
+  std::vector<ea_t> owners;
+  idasql_for_each_owner_of(ea, [&](ea_t owner) { owners.push_back(owner); });
+  if (owners.empty())
+    owners.push_back(BADADDR);
+  return owners;
+}
+
+// func_addr as SQL sees it: the owner, or NULL outside every function.
+static void result_owner(xsql::FunctionContext &ctx, ea_t owner) {
+  if (owner != BADADDR)
+    ctx.result_int64(static_cast<int64_t>(owner));
+  else
+    ctx.result_null();
+}
+
+// Instructions this table deleted. A shared-tail instruction is one row per
+// owner, so `DELETE ... WHERE addr = X` deletes it through the first owner's
+// row and then reaches the other owners' rows: those resolve as already gone
+// (a no-op) instead of failing the statement. Cleared when the statement ends.
+static std::unordered_set<ea_t> &deleted_instruction_heads() {
+  static std::unordered_set<ea_t> heads;
+  return heads;
+}
+
+InstructionAtAddressIterator::InstructionAtAddressIterator(ea_t ea) : ea_(ea) {
+  if (ea_ != BADADDR && is_code(get_flags(ea_)))
+    owners_ = instruction_owners(ea_);
+}
 
 bool InstructionAtAddressIterator::next() {
   if (!started_) {
     started_ = true;
-    valid_ = (ea_ != BADADDR) && is_code(get_flags(ea_));
-    return valid_;
+    idx_ = 0;
+  } else if (valid_) {
+    ++idx_;
   }
-  valid_ = false;
-  return false;
+  valid_ = idx_ < owners_.size();
+  return valid_;
 }
 
 bool InstructionAtAddressIterator::eof() const { return started_ && !valid_; }
 
 void InstructionAtAddressIterator::column(xsql::FunctionContext &ctx, int col) {
-  func_t *f = get_func(ea_);
-  ea_t func_addr = f ? f->start_ea : 0;
-  instruction_column_common(ctx, ea_, func_addr, col);
+  if (!valid_) {
+    ctx.result_null();
+    return;
+  }
+  instruction_column_common(ctx, ea_, owners_[idx_], col);
 }
 
 int64_t InstructionAtAddressIterator::rowid() const {
-  return static_cast<int64_t>(ea_);
+  return valid_ ? report_instruction_rowid(owners_[idx_], ea_) : 0;
 }
 
 // ============================================================================
@@ -177,7 +253,8 @@ void collect_instruction_rows(std::vector<InstructionRow> &rows) {
       return;
     }
     if (is_code(get_flags(ea))) {
-      rows.push_back({ea});
+      for (ea_t owner : instruction_owners(ea))
+        rows.push_back({ea, owner});
     }
     ea = next_head(ea, max_ea);
   }
@@ -187,29 +264,59 @@ CachedTableDef<InstructionRow> define_instructions() {
   auto builder =
       cached_table<InstructionRow>("instructions")
           .no_shared_cache()
-          .estimate_rows(
-              []() -> size_t { return static_cast<size_t>(get_nlist_size()); })
+          .estimate_rows([]() -> size_t { return estimate_code_heads(); })
           .cache_builder([](std::vector<InstructionRow> &rows) {
             collect_instruction_rows(rows);
           })
-          // Stable rowid = the instruction's address, matching the `addr` column
-          // and both filter iterators (InstructionAtAddressIterator /
-          // InstructionsInFuncIterator both report ea as rowid). This makes the
-          // full-scan rowid agree with the filtered rowids, so a multi-row
-          // UPDATE/DELETE resolves each row by its own address -- deleting the
-          // instruction at one ea never shifts another row's rowid.
+          // The row bookkeeping lives for one writing statement (or explicit
+          // transaction): released when it commits or rolls back.
+          .transaction_hooks([] {
+            xsql::TransactionHooks hooks;
+            hooks.commit = [](const xsql::TransactionHooks::State &) {
+              reported_instruction_rows().clear();
+              deleted_instruction_heads().clear();
+            };
+            hooks.rollback = hooks.commit;
+            return hooks;
+          }())
+          // Stable rowid = (owning function, address): the full scan and both
+          // filter iterators report the same key for the same row. The owner is
+          // part of it because an instruction in a tail shared by functions A
+          // and C is two rows, and SQLite de-duplicates a MULTI-INDEX OR plan by
+          // rowid -- an address-only rowid dropped C's rows from
+          // `func_addr = A OR (func_addr = C AND ...)`. The key is a byte
+          // position, not an instruction ordinal, but a DELETE can still reshape
+          // the function under it, so UPDATE/DELETE resolve it through
+          // reported_instruction_rows() first.
           .rowid([](const InstructionRow &row) -> int64_t {
-            return static_cast<int64_t>(row.ea);
+            return report_instruction_rowid(row.owner, row.ea);
           })
           .row_lookup([](InstructionRow &row, int64_t rowid) -> bool {
-            // rowid is an instruction address (see .rowid above): resolve by ea,
-            // position-independent. No positional fallback -- with rowid_fn set,
-            // every scan (full or filtered) produces an ea, never a cache index.
-            if (rowid < 0)
-              return false;
-            const ea_t ea = static_cast<ea_t>(rowid);
-            if (ea != BADADDR && is_code(get_flags(ea))) {
+            // Resolve the key back to (owner, ea). No positional fallback --
+            // with rowid_fn set, every scan reports a key, never a cache index.
+            ea_t owner = BADADDR;
+            ea_t ea = BADADDR;
+            const auto &reported = reported_instruction_rows();
+            if (auto it = reported.find(rowid); it != reported.end()) {
+              owner = it->second.first;
+              ea = it->second.second;
+            } else {
+              uint32_t sub = 0;
+              if (!idasql::detail::unpack_owned_address_rowid(rowid, 0, owner,
+                                                              ea, sub))
+                return false;
+            }
+            if (ea != BADADDR && is_code(get_flags(ea)) &&
+                get_item_head(ea) == ea) {
               row.ea = ea;
+              row.owner = owner;
+              row.gone = false;
+              return true;
+            }
+            if (owner != BADADDR && deleted_instruction_heads().count(ea) != 0) {
+              row.ea = ea;
+              row.owner = owner;
+              row.gone = true;
               return true;
             }
             return false;
@@ -254,10 +361,10 @@ CachedTableDef<InstructionRow> define_instructions() {
                      tag_remove(&line);
                      return line.c_str();
                    })
-      .column_int64("func_addr", [](const InstructionRow &row) -> int64_t {
-        func_t *f = get_func(row.ea);
-        return f ? f->start_ea : 0;
-      });
+      .column("func_addr", xsql::ColumnType::Integer,
+              [](xsql::FunctionContext &ctx, const InstructionRow &row) {
+                result_owner(ctx, row.owner);
+              });
 
   for (int opnum = 0; opnum < kInstructionOperandCount; ++opnum) {
     const std::string class_col = "operand" + std::to_string(opnum) + "_class";
@@ -317,6 +424,10 @@ CachedTableDef<InstructionRow> define_instructions() {
         [opnum](InstructionRow &row, xsql::FunctionArg val) -> bool {
           if (val.is_nochange() || val.is_null()) {
             return true;
+          }
+          if (row.gone) {
+            xsql::set_vtab_error("instruction was deleted earlier in this statement");
+            return false;
           }
           const std::string spec = val.as_text();
           if (spec.empty()) {
@@ -508,11 +619,36 @@ CachedTableDef<InstructionRow> define_instructions() {
 
   builder
       .deletable([](InstructionRow &row) -> bool {
+        if (row.gone)
+          return true; // deleted through another owner's row of this statement
         idasql_auto_wait();
         asize_t sz = get_item_size(row.ea);
         bool ok = del_items(row.ea, DELIT_SIMPLE, sz);
         idasql_auto_wait();
-        return ok;
+        if (!ok) {
+          char buf[64];
+          qsnprintf(buf, sizeof(buf), "0x%llX",
+                    static_cast<unsigned long long>(row.ea));
+          xsql::set_vtab_error(
+              std::string("IDA refused to undefine the instruction at ") + buf);
+          return false;
+        }
+        // del_items succeeds, and auto-analysis re-creates an instruction that
+        // code still flows into (the one before it falls through, or a jump
+        // lands on it). Report that instead of a deleted row.
+        if (is_code(get_flags(row.ea))) {
+          char buf[64];
+          qsnprintf(buf, sizeof(buf), "0x%llX",
+                    static_cast<unsigned long long>(row.ea));
+          xsql::set_vtab_error(
+              std::string("instructions: the instruction at ") + buf +
+              " was re-created by auto-analysis, because code still flows into "
+              "it; delete the instructions that reach it in the same statement "
+              "(e.g. the whole function's range) or undefine the function first");
+          return false;
+        }
+        deleted_instruction_heads().insert(row.ea);
+        return true;
       })
       .filter_eq(
           "addr",
@@ -536,8 +672,11 @@ CachedTableDef<InstructionRow> define_instructions() {
 // INSTRUCTION_OPERANDS Table - One decoded operand per row
 // ============================================================================
 
-static int64_t instruction_operand_rowid(ea_t ea, int opnum) {
-  return static_cast<int64_t>(ea) * kInstructionOperandCount + opnum;
+// (owning function, address, operand number): see the instructions rowid.
+static_assert(UA_MAXOP <= 8, "operand number must fit the 3-bit rowid field");
+static int64_t instruction_operand_rowid(ea_t owner, ea_t ea, int opnum) {
+  return idasql::detail::pack_owned_address_rowid(
+      owner, ea, static_cast<uint32_t>(opnum), 3);
 }
 
 static int64_t operand_value_for_row(const op_t &op) {
@@ -557,7 +696,7 @@ static int64_t operand_value_for_row(const op_t &op) {
 }
 
 void instruction_operand_column_common(xsql::FunctionContext &ctx, ea_t ea,
-                                       int opnum, int col) {
+                                       ea_t func_addr, int opnum, int col) {
   insn_t insn;
   op_t op;
   if (!decode_operand(ea, opnum, insn, op, nullptr)) {
@@ -569,11 +708,9 @@ void instruction_operand_column_common(xsql::FunctionContext &ctx, ea_t ea,
   case 0:
     ctx.result_int64(ea);
     break;
-  case 1: {
-    func_t *f = get_func(ea);
-    ctx.result_int64(f ? f->start_ea : 0);
+  case 1:
+    result_owner(ctx, func_addr);
     break;
-  }
   case 2:
     ctx.result_int(opnum);
     break;
@@ -627,6 +764,7 @@ void collect_instruction_operand_rows(std::vector<InstructionOperandRow> &rows) 
     if (is_code(get_flags(ea))) {
       insn_t insn;
       if (decode_insn(&insn, ea) > 0) {
+        const std::vector<ea_t> owners = instruction_owners(ea);
         for (int opnum = 0; opnum < UA_MAXOP; ++opnum) {
           // Skip void slots but keep scanning all UA_MAXOP operands: some IDPs
           // leave gaps (a real operand after a void), and the pushdown
@@ -634,7 +772,8 @@ void collect_instruction_operand_rows(std::vector<InstructionOperandRow> &rows) 
           // full-scan and filtered results disagree.
           if (insn.ops[opnum].type == o_void)
             continue;
-          rows.push_back({ea, opnum});
+          for (ea_t owner : owners)
+            rows.push_back({ea, opnum, owner});
         }
       }
     }
@@ -654,16 +793,30 @@ bool InstructionOperandsAtAddressIterator::advance_to_next_operand() {
   return false;
 }
 
+// Operands of the instruction once per owner: all operands under the first
+// owner, then all under the next.
 bool InstructionOperandsAtAddressIterator::next() {
   if (!started_) {
     started_ = true;
     decoded_ = (ea_ != BADADDR) && is_code(get_flags(ea_)) &&
                decode_insn(&insn_, ea_) > 0;
+    if (decoded_)
+      owners_ = instruction_owners(ea_);
+    owner_idx_ = 0;
     valid_ = decoded_ && advance_to_next_operand();
     return valid_;
   }
 
-  valid_ = decoded_ && advance_to_next_operand();
+  if (!decoded_) {
+    valid_ = false;
+    return false;
+  }
+  valid_ = advance_to_next_operand();
+  if (!valid_ && owner_idx_ + 1 < owners_.size()) {
+    ++owner_idx_;
+    opnum_ = -1;
+    valid_ = advance_to_next_operand();
+  }
   return valid_;
 }
 
@@ -673,23 +826,35 @@ bool InstructionOperandsAtAddressIterator::eof() const {
 
 void InstructionOperandsAtAddressIterator::column(xsql::FunctionContext &ctx,
                                                   int col) {
-  instruction_operand_column_common(ctx, ea_, opnum_, col);
+  if (!valid_) {
+    ctx.result_null();
+    return;
+  }
+  instruction_operand_column_common(ctx, ea_, owners_[owner_idx_], opnum_, col);
 }
 
 int64_t InstructionOperandsAtAddressIterator::rowid() const {
-  return instruction_operand_rowid(ea_, opnum_);
+  return valid_ ? instruction_operand_rowid(owners_[owner_idx_], ea_, opnum_)
+                : 0;
 }
 
 InstructionOperandsInFuncIterator::InstructionOperandsInFuncIterator(
     ea_t func_addr)
     : func_addr_(func_addr) {
-  pfn_ = get_func(func_addr_);
+  if (!idasql_is_func_start(func_addr_))
+    return;
+  // Scoped: a live function item iterator locks the function, and a cursor
+  // stays open until its statement ends (a subquery cursor of a DELETE would
+  // keep IDA from undefining the function's instructions).
+  idasql_func_item_iterator fii;
+  for (bool ok = fii.set(func_addr_); ok; ok = fii.next_code())
+    eas_.push_back(fii.current());
 }
 
 bool InstructionOperandsInFuncIterator::load_current_instruction() {
-  if (!fii_valid_)
+  if (ea_idx_ >= eas_.size())
     return false;
-  current_ea_ = fii_.current();
+  current_ea_ = eas_[ea_idx_];
   decoded_ = decode_insn(&insn_, current_ea_) > 0;
   opnum_ = -1;
   return decoded_;
@@ -704,21 +869,17 @@ bool InstructionOperandsInFuncIterator::advance_to_next_operand() {
 }
 
 bool InstructionOperandsInFuncIterator::advance_to_next_instruction_with_operand() {
-  while (fii_valid_) {
+  while (ea_idx_ < eas_.size()) {
     if (load_current_instruction() && advance_to_next_operand())
       return true;
-    fii_valid_ = fii_.next_code();
+    ++ea_idx_;
   }
   return false;
 }
 
 bool InstructionOperandsInFuncIterator::next() {
-  if (!pfn_)
-    return false;
-
   if (!started_) {
     started_ = true;
-    fii_valid_ = fii_.set(pfn_);
     valid_ = advance_to_next_instruction_with_operand();
     return valid_;
   }
@@ -726,8 +887,7 @@ bool InstructionOperandsInFuncIterator::next() {
   if (valid_ && advance_to_next_operand())
     return true;
 
-  if (fii_valid_)
-    fii_valid_ = fii_.next_code();
+  ++ea_idx_;
   valid_ = advance_to_next_instruction_with_operand();
   return valid_;
 }
@@ -738,31 +898,34 @@ bool InstructionOperandsInFuncIterator::eof() const {
 
 void InstructionOperandsInFuncIterator::column(xsql::FunctionContext &ctx,
                                                int col) {
-  instruction_operand_column_common(ctx, current_ea_, opnum_, col);
+  // The queried function, not the tail's primary owner: a shared tail's
+  // operands belong to every owner, and the pushdown is asked for this one.
+  instruction_operand_column_common(ctx, current_ea_, func_addr_, opnum_, col);
 }
 
 int64_t InstructionOperandsInFuncIterator::rowid() const {
-  return instruction_operand_rowid(current_ea_, opnum_);
+  return instruction_operand_rowid(func_addr_, current_ea_, opnum_);
 }
 
 CachedTableDef<InstructionOperandRow> define_instruction_operands() {
   return cached_table<InstructionOperandRow>("instruction_operands")
       .no_shared_cache()
-      .estimate_rows([]() -> size_t {
-        return static_cast<size_t>(get_nlist_size()) * 2;
-      })
+      .estimate_rows([]() -> size_t { return estimate_code_heads() * 2; })
       .cache_builder([](std::vector<InstructionOperandRow> &rows) {
         collect_instruction_operand_rows(rows);
+      })
+      .rowid([](const InstructionOperandRow &row) -> int64_t {
+        return instruction_operand_rowid(row.owner, row.ea, row.opnum);
       })
       .column_int64("addr",
                     [](const InstructionOperandRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
                     })
-      .column_int64("func_addr", [](const InstructionOperandRow &row) -> int64_t {
-        func_t *f = get_func(row.ea);
-        return f ? f->start_ea : 0;
-      })
-      .column_int("opnum", [](const InstructionOperandRow &row) -> int {
+      .column("func_addr", xsql::ColumnType::Integer,
+              [](xsql::FunctionContext &ctx, const InstructionOperandRow &row) {
+                result_owner(ctx, row.owner);
+              })
+      .column_int("operand_index", [](const InstructionOperandRow &row) -> int {
         return row.opnum;
       })
       .column_text("text", [](const InstructionOperandRow &row) -> std::string {

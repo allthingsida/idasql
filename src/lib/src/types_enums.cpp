@@ -5,6 +5,7 @@
 // See LICENSE.
 
 #include "types_enums.hpp"
+#include "address_resolution.hpp"
 
 namespace idasql {
 namespace types {
@@ -336,7 +337,9 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
                 return false;
             }
 
-            uint32_t ordinal = static_cast<uint32_t>(argv[0].as_int());
+            const auto ord = idasql::write_int(argv[0], "types_enum_values", "type_ordinal", 1, UINT32_MAX);
+            if (!ord) return false;
+            uint32_t ordinal = static_cast<uint32_t>(*ord);
             const char* value_name = argv[3].as_c_str();
             if (!value_name || !value_name[0]) {
                 xsql::set_vtab_error(
@@ -358,7 +361,9 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
             edm_t new_edm;
             new_edm.name = value_name;
             if (argc > 4 && !argv[4].is_null()) {
-                new_edm.value = static_cast<uint64_t>(argv[4].as_int64());
+                const auto v = idasql::write_int(argv[4], "types_enum_values", "value", INT64_MIN, INT64_MAX);
+                if (!v) return false;
+                new_edm.value = static_cast<uint64_t>(*v);
             } else if (is_bitmask) {
                 // Bitmask enums treat each member value as its own single-bit mask
                 // (DEFMASK64 below). 0 is an invalid mask and a sequential back()+1
@@ -394,10 +399,14 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
             }
 
             // On a bitmask enum, add the member via add_edm so IDA forms the
-            // bitmask group. DEFMASK64 means "the member's value is its own mask"
-            // (flat flag) -- the common case.
+            // bitmask group, with the member's value as its own mask (a flat
+            // flag) -- the common case. The mask is passed explicitly: IDA 9.1+
+            // read DEFMASK64 as "use the value", but 9.0 takes it literally and
+            // files every member under one all-ones group with a synthetic
+            // MM_FFFFFFFFh mask member. bmask == value is the same group on all.
             if (is_bitmask) {
-                const tinfo_code_t code = ref.tif.add_edm(new_edm, DEFMASK64);
+                const tinfo_code_t code =
+                    ref.tif.add_edm(new_edm, static_cast<bmask64_t>(new_edm.value));
                 if (code != TERR_OK) {
                     xsql::set_vtab_error(
                         "types_enum_values: failed to add bitmask member '" +

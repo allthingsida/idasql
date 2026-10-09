@@ -23,6 +23,34 @@
 
 namespace idasql {
 
+// What an MCP client (Claude Code, Claude Desktop, Codex...) shows its model when it
+// connects. Kept short: clients load it into every session. The link rule matters
+// because a raw link in tool output is never clickable; only a markdown link the
+// model writes into its reply is. The deep_links table exists only on IDA 9.4+
+// builds, so the link guidance is given only when it does.
+std::string mcp_server_instructions(bool deep_links) {
+    std::string s = "idasql answers SQL about the IDA database open in this server.";
+    if (deep_links) {
+        s += " When results name functions, addresses, strings or types, make them clickable: "
+             "take the uri column of the deep_links table, with view='pseudocode' for "
+             "functions and view='disasm' for addresses, and write [exact_name](uri) in your "
+             "reply, outside code blocks. Never build an ida:// link by hand. Navigate IDA "
+             "(SELECT ida_open_link(uri)) only when asked.";
+    }
+    return s;
+}
+
+std::string mcp_query_tool_description(bool deep_links) {
+    std::string s = "Execute a SQL query or semicolon-separated script against the IDA "
+                    "database and return results.";
+    if (deep_links) {
+        s += " For clickable links to IDA locations, JOIN deep_links (e.g. JOIN deep_links dl "
+             "ON dl.resource='functions' AND dl.addr=f.addr AND dl.view='pseudocode') and "
+             "render its uri as [name](uri).";
+    }
+    return s;
+}
+
 using Json = nlohmann::json;
 
 static bool starts_with_text(const std::string& value, const char* prefix) {
@@ -61,7 +89,8 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
         std::lock_guard<std::mutex> lock(queue_mutex_);
         const size_t max_queue = idasql::runtime_settings().max_queue();
         if (max_queue > 0 && pending_commands_.size() >= max_queue) {
-            return {false, "Error: MCP queue is full (raise PRAGMA idasql.max_queue)"};
+            return {false, "Error: MCP queue is full (raise max_queue via "
+                           "UPDATE runtime_settings SET value=... WHERE key='max_queue')"};
         }
         pending_commands_.push_back(cmd);
     }
@@ -104,7 +133,7 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
                         pending_commands_.erase(it);
                     }
                 }
-                return {false, "Error: MCP request timed out in queue (raise PRAGMA idasql.queue_admission_timeout_ms)"};
+                return {false, "Error: MCP request timed out in queue (raise queue_admission_timeout_ms via UPDATE runtime_settings SET value=... WHERE key='queue_admission_timeout_ms')"};
             }
         }
     }
@@ -113,7 +142,7 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
         if (!running_.load()) {
             return {false, "Error: MCP server stopped"};
         }
-        return {false, "Error: MCP request timed out in queue (raise PRAGMA idasql.queue_admission_timeout_ms)"};
+        return {false, "Error: MCP request timed out in queue (raise queue_admission_timeout_ms via UPDATE runtime_settings SET value=... WHERE key='queue_admission_timeout_ms')"};
     }
 
     // Convention: query callbacks return textual error markers on failure.
@@ -159,7 +188,21 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
         query_input_schema,
         Json(),
         [this](const Json& args) -> Json {
-            std::string query = args.value("query", "");
+            // An abandoned server (plugin teardown) keeps its threads; once
+            // stopped it answers without touching the callback.
+            if (!running_.load()) {
+                return Json{
+                    {"content", Json::array({
+                        Json{{"type", "text"}, {"text", "Error: MCP server stopped"}}
+                    })},
+                    {"isError", true}
+                };
+            }
+            // value() would throw for a present but non-string "query".
+            std::string query;
+            if (const auto it = args.find("query"); it != args.end() && it->is_string()) {
+                query = it->get<std::string>();
+            }
             if (query.empty()) {
                 return Json{
                     {"content", Json::array({
@@ -200,18 +243,21 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
             };
         }
     };
-    sql_query_tool.set_description("Execute a SQL query or semicolon-separated script against the IDA database and return results");
+    const std::string tool_description = mcp_query_tool_description(deep_links_);
+    sql_query_tool.set_description(tool_description);
     impl_->tool_manager.register_tool(sql_query_tool);
 
     std::unordered_map<std::string, std::string> descriptions = {
-        {"idasql_query", "Execute a SQL query or semicolon-separated script against the IDA database and return results"}
+        {"idasql_query", tool_description}
     };
 
     auto handler = fastmcpp::mcp::make_mcp_handler(
         "idasql",
         IDASQL_VERSION_STRING,
         impl_->tool_manager,
-        descriptions
+        descriptions,
+        {},
+        mcp_server_instructions(deep_links_)
     );
 
     impl_->server = std::make_unique<fastmcpp::server::SseServerWrapper>(
@@ -317,6 +363,15 @@ void IDAMCPServer::stop() {
     port_ = 0;  // no stale endpoint after stop; next start() assigns a fresh one
 }
 
+void IDAMCPServer::abandon() {
+    running_.store(false);
+    queue_cv_.notify_all();
+    complete_pending_commands("Error: MCP server stopped");
+    // Deliberately released, not destroyed: destroying it would join.
+    (void)impl_.release();
+    port_ = 0;
+}
+
 void IDAMCPServer::complete_pending_commands(const std::string& result) {
     std::deque<std::shared_ptr<MCPPendingCommand>> pending;
     {
@@ -355,10 +410,6 @@ std::string format_mcp_info(int port) {
 std::string format_mcp_info(int port, const std::string& bind_addr) {
     const std::string rendered_host = xsql::thinclient::format_url_host(bind_addr);
     return "IDASQL MCP server: http://" + rendered_host + ":" + std::to_string(port) + "/sse\n";
-}
-
-std::string format_mcp_status(int port, bool running) {
-    return format_mcp_status(port, running, "127.0.0.1");
 }
 
 std::string format_mcp_status(int port, bool running, const std::string& bind_addr) {

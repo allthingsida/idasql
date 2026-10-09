@@ -7,7 +7,9 @@
 #include "types_member_xrefs.hpp"
 
 #include "types_members.hpp" // get_type_ordinal_by_name
+#include "xrefs.hpp"
 
+#include <algorithm>
 #include <set>
 
 namespace idasql {
@@ -30,27 +32,6 @@ struct LeafMember {
   int64_t offset_bits;     // cumulative bit offset within the queried type
   tid_t member_id;
 };
-
-// Human-readable xref kind from xrefblk_t's iscode + (masked) type.
-std::string xref_kind_str(bool iscode, uchar type) {
-  const uchar t = static_cast<uchar>(type & XREF_MASK);
-  if (iscode) {
-    switch (t) {
-      case fl_CF: case fl_CN: return "call";
-      case fl_JF: case fl_JN: return "jump";
-      case fl_F:              return "flow";
-      default:                return "code";
-    }
-  }
-  switch (t) {
-    case dr_O: return "offset";
-    case dr_W: return "write";
-    case dr_R: return "read";
-    case dr_T: return "text";
-    case dr_I: return "info";
-    default:   return "data";
-  }
-}
 
 // Recursively collect a type's members (and embedded value struct/union members)
 // into `out`. `tif` is the type currently being walked; `top_*` stay constant.
@@ -139,6 +120,95 @@ std::vector<LeafMember> resolve_by_member_id(tid_t tid) {
   return leaves;
 }
 
+// The structure offset an operand's value encodes: the immediate for o_imm, the
+// displacement for o_displ/o_mem, 0 for a bare register phrase.
+adiff_t stroff_operand_value(const op_t &op) {
+  switch (op.type) {
+    case o_imm: return static_cast<adiff_t>(op.value);
+    case o_phrase: return 0;
+    default: return static_cast<adiff_t>(op.addr);
+  }
+}
+
+// From byte offset `off` inside `cur`, walk member offsets down to member
+// `want`. A union member is chosen by the next selector (`sel`, `nsel`: the
+// stroff path's union selections); a union with no selector left is ambiguous.
+// Fills the byte offset of the access inside `want`.
+bool walk_to_member(tinfo_t cur, int64_t off, const tid_t *sel, int nsel, tid_t want,
+                    int64_t &off_in_member) {
+  for (int depth = 0; depth <= kMaxNestDepth && off >= 0; ++depth) {
+    udm_t udm;
+    tid_t member_tid = BADADDR;
+    if (cur.is_union()) {
+      if (nsel <= 0) return false;
+      tinfo_t owner;
+      if (get_udm_by_tid(&owner, &udm, *sel) < 0) return false;
+      member_tid = *sel++;
+      --nsel;
+    } else {
+      udm.offset = static_cast<uint64>(off) * 8;
+      const int idx = cur.find_udm(&udm, STRMEM_OFFSET);
+      if (idx < 0) return false;
+      member_tid = cur.get_udm_tid(idx);
+    }
+    const int64_t member_byte = static_cast<int64_t>(udm.offset / 8);
+    if (member_tid == want) {
+      off_in_member = off - member_byte;
+      return true;
+    }
+    if (!(udm.type.is_struct() || udm.type.is_union())) return false;
+    off -= member_byte;
+    cur = udm.type;
+  }
+  return false;
+}
+
+// Does operand n's struct-offset expression land on member `want`? The path
+// IDA stores starts at the accessed structure (get_stroff_path: ids[0] is the
+// structure; further ids only select union members), so the member is found by
+// walking offsets down from that root: value + delta is the offset inside it.
+// Fills the byte offset of the access inside the member and the root type's name.
+bool stroff_hits_member(const insn_t &insn, int n, tid_t want, int64_t &off_in_member,
+                        qstring &root_name) {
+  tid_t path[kMaxStroffPath];
+  adiff_t delta = 0;
+  const int cnt = get_stroff_path(path, &delta, insn.ea, n);
+  if (cnt <= 0) return false;
+  tinfo_t root;
+  if (!root.get_type_by_tid(path[0])) return false;
+  root.get_type_name(&root_name);
+  const int64_t off =
+      static_cast<int64_t>(stroff_operand_value(insn.ops[n])) + static_cast<int64_t>(delta);
+  return walk_to_member(root, off, path + 1, std::min(cnt, kMaxStroffPath) - 1, want, off_in_member);
+}
+
+// Does stack-variable operand n land on member `want`? The operand names a
+// frame location (calc_stkvar_struc_offset); the frame member there is the
+// variable, and when its type is a structure the walk continues inside it
+// (`[ebp+entry.balance]`). Fills the access's offset inside the member and the
+// variable's type name.
+bool stkvar_hits_member(const insn_t &insn, int n, tid_t want, int64_t &off_in_member,
+                        qstring &root_name) {
+  tinfo_t frame;
+#if IDASQL_HAS_EA_API
+  const ea_t start = get_func_start(insn.ea);
+  if (start == BADADDR || !get_func_frame_ea(&frame, start)) return false;
+  const ea_t frame_off = calc_stkvar_struc_offset_ea(start, insn, n);
+#else
+  func_t *pfn = get_func(insn.ea);
+  if (pfn == nullptr || !get_func_frame(&frame, pfn)) return false;
+  const ea_t frame_off = calc_stkvar_struc_offset(pfn, insn, n);
+#endif
+  if (frame_off == BADADDR) return false;
+  udm_t var;
+  var.offset = static_cast<uint64>(frame_off) * 8;
+  if (frame.find_udm(&var, STRMEM_OFFSET) < 0) return false;
+  if (!(var.type.is_struct() || var.type.is_union())) return false;
+  var.type.get_type_name(&root_name);
+  return walk_to_member(var.type, static_cast<int64_t>(frame_off) - static_cast<int64_t>(var.offset / 8),
+                        nullptr, 0, want, off_in_member);
+}
+
 // Iterator: walks the resolved leaf members, and for each enumerates xrefs to
 // its member tid. Leaves with no xrefs are skipped (produce no rows).
 class MemberXrefsIterator : public xsql::RowIterator {
@@ -186,7 +256,9 @@ public:
       case 14: op_ok_ ? ctx.result_int(op_index_) : ctx.result_null(); break;
       case 15: insn_ok_ ? ctx.result_text(insn_text_.c_str()) : ctx.result_null(); break;
       case 16: op_ok_ ? ctx.result_int64(access_off_) : ctx.result_null(); break;
-      case 17: op_ok_ ? ctx.result_int64(access_size_) : ctx.result_null(); break;
+      case 17: op_ok_ && access_size_ >= 0 ? ctx.result_int64(access_size_) : ctx.result_null(); break;
+      case 18: op_ok_ && !access_root_.empty() ? ctx.result_text(access_root_.c_str())
+                                               : ctx.result_null(); break;
       default: ctx.result_null(); break;
     }
   }
@@ -213,10 +285,9 @@ private:
   // Compute per-row context (function + best-effort operand/access/disasm).
   void populate_row() {
     frm_ = xb_.from;
-    func_t *f = get_func(frm_);
-    func_ea_ = f ? f->start_ea : BADADDR;
+    func_ea_ = idasql_func_start(frm_);
     func_name_.qclear();
-    if (f) get_func_name(&func_name_, frm_);
+    if (func_ea_ != BADADDR) get_func_name(&func_name_, frm_);
     kind_ = xref_kind_str(xb_.iscode, xb_.type);
 
     insn_ok_ = false;
@@ -224,6 +295,7 @@ private:
     op_index_ = -1;
     access_off_ = -1;
     access_size_ = -1;
+    access_root_.qclear();
     insn_text_.qclear();
 
     insn_t insn;
@@ -233,21 +305,24 @@ private:
       tag_remove(&insn_text_);
 
       const tid_t mtid = leaves_[leaf_idx_].member_id;
-      for (int n = 0; n < UA_MAXOP; ++n) {
-        if (insn.ops[n].type == o_void) break;
-        tid_t path[kMaxStroffPath];
-        adiff_t delta = 0;
-        const int cnt = get_stroff_path(path, &delta, frm_, n);
-        for (int k = 0; k < cnt && k < kMaxStroffPath; ++k) {
-          if (path[k] == mtid) {
-            op_ok_ = true;
-            op_index_ = n;
-            access_off_ = static_cast<int64_t>(delta);
-            access_size_ = static_cast<int64_t>(get_dtype_size(insn.ops[n].dtype));
-            break;
-          }
+      const flags64_t flags = get_flags(frm_);
+      for (int n = 0; n < UA_MAXOP && insn.ops[n].type != o_void; ++n) {
+        int64_t in_member = 0;
+        const bool hit =
+            (is_stroff(flags, n) && stroff_hits_member(insn, n, mtid, in_member, access_root_)) ||
+            (is_stkvar(flags, n) && stkvar_hits_member(insn, n, mtid, in_member, access_root_));
+        if (hit) {
+          op_ok_ = true;
+          op_index_ = n;
+          access_off_ = in_member;
+          // Taking the member's address (an offset-of immediate, an lea) touches
+          // no memory: no access size.
+          access_size_ = insn.ops[n].type == o_imm || xb_.type == dr_O
+                             ? -1
+                             : static_cast<int64_t>(get_dtype_size(insn.ops[n].dtype));
+          break;
         }
-        if (op_ok_) break;
+        access_root_.qclear();
       }
     }
   }
@@ -269,22 +344,20 @@ private:
   int op_index_ = -1;
   int64_t access_off_ = -1;
   int64_t access_size_ = -1;
+  qstring access_root_;
   qstring insn_text_;
 };
 
 } // namespace
 
-CachedTableDef<MemberXrefRow> define_struct_member_xrefs() {
-  return cached_table<MemberXrefRow>("struct_member_xrefs")
-      .no_shared_cache()
+GeneratorTableDef<MemberXrefRow> define_struct_member_xrefs() {
+  return generator_table<MemberXrefRow>("struct_member_xrefs")
       .estimate_rows([]() -> size_t { return 64; })
       // Unfiltered full scan is rejected: enumerating every member of every type
       // is the expensive pattern this table's filters exist to avoid. Require an entry filter.
-      .cache_builder([](std::vector<MemberXrefRow> &) {
-        xsql::set_vtab_error(
-            "struct_member_xrefs requires a filter on type_ordinal, type_name, "
-            "or member_id (e.g. WHERE type_name = 'MyStruct').");
-      })
+      .full_scan_error(
+          "struct_member_xrefs requires a filter on type_ordinal, type_name, "
+          "or member_id (e.g. WHERE type_name = 'MyStruct').")
       .column_int("type_ordinal",
                   [](const MemberXrefRow &r) { return static_cast<int>(r.type_ordinal); })
       .column_text("type_name", [](const MemberXrefRow &r) { return r.type_name; })
@@ -304,6 +377,11 @@ CachedTableDef<MemberXrefRow> define_struct_member_xrefs() {
       .column_text("instruction_text", [](const MemberXrefRow &r) { return r.instruction_text; })
       .column_int64("access_offset", [](const MemberXrefRow &r) { return r.access_offset; })
       .column_int64("access_size", [](const MemberXrefRow &r) { return r.access_size; })
+      // The structure the operand's offset expression starts from. A nested row
+      // (member_path a.b) is an access through the queried type only when this
+      // equals type_name; otherwise it is an xref to the embedded type's member
+      // from elsewhere.
+      .column_text("access_root_type", [](const MemberXrefRow &r) { return r.access_root_type; })
       .filter_eq(
           "type_ordinal",
           [](int64_t ord) -> std::unique_ptr<xsql::RowIterator> {

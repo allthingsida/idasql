@@ -9,116 +9,92 @@
 #include <xsql/runtime_settings.hpp>
 
 #include <cstddef>
-#include <mutex>
+#include <limits>
+#include <string>
 
 namespace idasql {
 
 struct RuntimeSettingsSnapshot {
     // The shared settings (query_timeout_ms / queue_admission_timeout_ms / max_queue
-    // / hints_enabled / timeout_stack_depth) live in the core struct -- the single
-    // source of truth for both the fields AND their default values, so a
-    // default-constructed idasql snapshot can never silently drift from the core.
+    // / hints_enabled / timeout_stack_depth) live in the core -- the single source of
+    // truth for the fields AND their defaults, so an idasql snapshot cannot drift.
     xsql::runtime::RuntimeSettingsSnapshot core;
     // idasql-only knobs:
     bool enable_idapython = false;
     // Max captured IDAPython print output in bytes; 0 == unbounded (the default).
     // When >0, snippet output past the cap is dropped with a truncation marker.
     size_t idapython_output_max = 0;
+    // 'off' or 'statement': every top-level statement that writes gets its own
+    // undo checkpoint.
+    std::string auto_checkpoint = "off";
 };
 
-class RuntimeSettings {
+// auto_checkpoint takes one of two values; the runtime_settings table refuses
+// anything else with this message.
+inline constexpr const char* kAutoCheckpointValueError =
+    "runtime_settings: auto_checkpoint must be 'off' or 'statement'";
+
+inline bool is_auto_checkpoint_value(const std::string& value) {
+    return value == "off" || value == "statement";
+}
+
+
+// idasql's runtime-settings singleton IS-A shared RuntimeSettingsCore: common
+// and product keys use one typed registry and one transactional SQL adapter.
+// Only timeout_push/timeout_pop remain PRAGMAs.
+class RuntimeSettings : public xsql::runtime::RuntimeSettingsCore {
 public:
     static RuntimeSettings& instance() {
         static RuntimeSettings settings;
         return settings;
     }
 
-    RuntimeSettingsSnapshot snapshot() const {
-        RuntimeSettingsSnapshot snap;
-        snap.core = common_.snapshot();
-        snap.enable_idapython = enable_idapython();
-        snap.idapython_output_max = idapython_output_max();
-        return snap;
-    }
-
-    int query_timeout_ms() const {
-        return common_.query_timeout_ms();
-    }
-
-    int queue_admission_timeout_ms() const {
-        return common_.queue_admission_timeout_ms();
-    }
-
-    size_t max_queue() const {
-        return common_.max_queue();
-    }
-
-    bool hints_enabled() const {
-        return common_.hints_enabled();
-    }
-
     bool enable_idapython() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return enable_idapython_;
+        return bool_value("enable_idapython", false);
     }
 
     size_t idapython_output_max() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return idapython_output_max_;
+        return static_cast<size_t>(integer_value("idapython_output_max", 0));
     }
 
-    bool set_query_timeout_ms(int value) {
-        return common_.set_query_timeout_ms(value);
-    }
-
-    bool set_queue_admission_timeout_ms(int value) {
-        return common_.set_queue_admission_timeout_ms(value);
-    }
-
-    bool set_max_queue(size_t value) {
-        return common_.set_max_queue(value);
-    }
-
-    void set_hints_enabled(bool enabled) {
-        common_.set_hints_enabled(enabled);
+    std::string auto_checkpoint() const {
+        const auto current = value("auto_checkpoint");
+        return current ? *current : std::string("off");
     }
 
     void set_enable_idapython(bool enabled) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        enable_idapython_ = enabled;
+        (void)apply("enable_idapython", enabled ? "1" : "0", "idasql");
     }
 
     void set_idapython_output_max(size_t max_bytes) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        idapython_output_max_ = max_bytes;
+        (void)apply("idapython_output_max", std::to_string(max_bytes), "idasql");
     }
 
-    bool timeout_push(int timeout_ms, int* effective_timeout_ms = nullptr) {
-        return common_.timeout_push(timeout_ms, effective_timeout_ms);
+    RuntimeSettingsSnapshot snapshot() const {
+        RuntimeSettingsSnapshot snap;
+        snap.core = xsql::runtime::RuntimeSettingsCore::snapshot();
+        snap.enable_idapython = enable_idapython();
+        snap.idapython_output_max = idapython_output_max();
+        snap.auto_checkpoint = auto_checkpoint();
+        return snap;
     }
 
-    bool timeout_pop(int* effective_timeout_ms = nullptr) {
-        return common_.timeout_pop(effective_timeout_ms);
-    }
-
-    xsql::runtime::RuntimeSettingsCore& common_settings() {
-        return common_;
-    }
-
+    // The object IS the core; kept so callers passing a RuntimeSettingsCore&
+    // remain unchanged.
+    xsql::runtime::RuntimeSettingsCore& common_settings() { return *this; }
     const xsql::runtime::RuntimeSettingsCore& common_settings() const {
-        return common_;
+        return *this;
     }
 
 private:
-    // Cap the client-driven PRAGMA idasql.timeout_push stack (matches bnsql's 64,
-    // which is also the shared-core default). Stated explicitly so the bound is
-    // visible at the adopter and independent of the core's default.
-    RuntimeSettings() : common_(xsql::runtime::RuntimeSettingsCoreOptions{64}) {}
-
-    xsql::runtime::RuntimeSettingsCore common_;
-    mutable std::mutex mutex_;
-    bool enable_idapython_ = false;
-    size_t idapython_output_max_ = 0;  // 0 == unbounded
+    RuntimeSettings()
+        : RuntimeSettingsCore(xsql::runtime::RuntimeSettingsCoreOptions{64}) {
+        (void)register_bool_setting("enable_idapython", false, "idasql");
+        (void)register_integer_setting(
+            "idapython_output_max", 0, 0, (std::numeric_limits<int>::max)(), "idasql");
+        // 'off' | 'statement' (checked by idasql's runtime_settings table).
+        (void)register_string_setting("auto_checkpoint", "off", "idasql");
+    }
 };
 
 inline RuntimeSettings& runtime_settings() {

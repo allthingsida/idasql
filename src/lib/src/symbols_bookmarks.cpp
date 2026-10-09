@@ -5,6 +5,7 @@
 // See LICENSE.
 
 #include "symbols_bookmarks.hpp"
+#include "address_resolution.hpp"
 
 using namespace idasql::core;
 
@@ -167,10 +168,14 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
         return ok;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
-        if (argc < 2 || argv[1].is_null())
+        if (argc < 2 || argv[1].is_null()) {
+          xsql::set_vtab_error("bookmarks: INSERT needs addr");
           return false;
+        }
 
-        ea_t ea = static_cast<ea_t>(argv[1].as_int64());
+        ea_t ea = BADADDR;
+        if (!idasql::write_address(argv[1], "bookmarks", "addr", ea))
+          return false;
 
         const char *desc = "";
         if (argc > 2 && !argv[2].is_null()) {
@@ -186,8 +191,12 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
         lochist_entry_t loc(&place, rinfo);
 
         uint32_t slot = bookmarks_t::size(loc, nullptr);
-        if (argc > 0 && !argv[0].is_null())
-          slot = static_cast<uint32_t>(argv[0].as_int());
+        if (argc > 0 && !argv[0].is_null()) {
+          const auto s = idasql::write_int(argv[0], "bookmarks", "slot", 0, UINT32_MAX - 1);
+          if (!s)
+            return false;
+          slot = static_cast<uint32_t>(*s);
+        }
 
         uint32_t result = bookmarks_t::mark(loc, slot, nullptr, desc, nullptr);
         idasql_auto_wait();

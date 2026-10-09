@@ -7,41 +7,37 @@
 #include "code_loops.hpp"
 
 #include "address_resolution.hpp"
+#include "code_graph_tables.hpp"
 #include "decompiler.hpp"
+#include "function_rowid.hpp"
 
 using namespace idasql::core;
 
 namespace idasql {
 namespace code {
 
-void collect_loops_for_func(std::vector<LoopInfo> &loops, func_t *pfn) {
-  if (!pfn)
+// One row per natural-loop back edge: a latch -> header edge where the header
+// dominates the latch (the `loops` table's definition). Address order is not
+// used: a forward jump into a lower-addressed tail or cold block is not a loop.
+// func_ea must be a function's entry address (a function key, as on every
+// table); loop_id is the header's block index.
+void collect_loops_for_func(std::vector<LoopInfo> &loops, ea_t func_ea) {
+  if (!idasql_is_func_start(func_ea))
     return;
-
-  qflow_chart_t fc;
-  fc.create("", pfn, pfn->start_ea, pfn->end_ea, FC_NOEXT);
-
-  for (int i = 0; i < fc.size(); i++) {
-    const qbasic_block_t &block = fc.blocks[i];
-
-    for (int j = 0; j < fc.nsucc(i); j++) {
-      int succ_idx = fc.succ(i, j);
-      if (succ_idx < 0 || succ_idx >= fc.size())
-        continue;
-
-      const qbasic_block_t &succ = fc.blocks[succ_idx];
-
-      if (succ.start_ea <= block.start_ea) {
-        LoopInfo li;
-        li.func_addr = pfn->start_ea;
-        li.loop_id = succ_idx;
-        li.header_ea = succ.start_ea;
-        li.header_end_ea = succ.end_ea;
-        li.back_edge_block_ea = block.start_ea;
-        li.back_edge_block_end = block.end_ea;
-        loops.push_back(li);
-      }
-    }
+  xsql::graph::DirectedGraph g(0);
+  std::vector<ea_t> addr, end_ea;
+  size_t entry = 0;
+  if (!build_func_graph(func_ea, g, addr, end_ea, entry))
+    return;
+  for (const auto &lp : xsql::graph::natural_loops(g, entry)) {
+    LoopInfo li;
+    li.func_addr = func_ea;
+    li.loop_id = static_cast<int>(lp.header);
+    li.header_ea = addr[lp.header];
+    li.header_end_ea = end_ea[lp.header];
+    li.back_edge_block_ea = addr[lp.latch];
+    li.back_edge_block_end = end_ea[lp.latch];
+    loops.push_back(li);
   }
 }
 
@@ -56,10 +52,7 @@ class LoopsInFuncIterator : public xsql::RowIterator {
 
 public:
   explicit LoopsInFuncIterator(ea_t func_addr) {
-    func_t *pfn = get_func(func_addr);
-    if (pfn) {
-      collect_loops_for_func(loops_, pfn);
-    }
+    collect_loops_for_func(loops_, func_addr);
   }
 
   bool next() override {
@@ -108,7 +101,9 @@ public:
     }
   }
 
-  int64_t rowid() const override { return static_cast<int64_t>(idx_); }
+  int64_t rowid() const override {
+    return idx_ < loops_.size() ? idasql::detail::pack_function_rowid(loops_[idx_].func_addr, idx_) : -1;
+  }
 };
 
 // ============================================================================
@@ -119,18 +114,17 @@ class DisasmLoopsGenerator : public xsql::Generator<LoopInfo> {
   size_t func_idx_ = 0;
   std::vector<LoopInfo> loops_;
   size_t idx_ = 0;
-  int64_t rowid_ = -1;
   bool started_ = false;
 
   bool load_next_func() {
     size_t func_qty = get_func_qty();
     while (func_idx_ < func_qty) {
-      func_t *pfn = getn_func(func_idx_++);
-      if (!pfn)
+      const ea_t func_ea = idasql_func_ea_by_num(func_idx_++);
+      if (func_ea == BADADDR)
         continue;
 
       loops_.clear();
-      collect_loops_for_func(loops_, pfn);
+      collect_loops_for_func(loops_, func_ea);
       if (!loops_.empty()) {
         idx_ = 0;
         return true;
@@ -143,26 +137,22 @@ public:
   bool next() override {
     if (!started_) {
       started_ = true;
-      if (!load_next_func())
-        return false;
-      rowid_ = 0;
-      return true;
+      return load_next_func();
     }
 
     if (idx_ + 1 < loops_.size()) {
       ++idx_;
-      ++rowid_;
       return true;
     }
 
-    if (!load_next_func())
-      return false;
-    ++rowid_;
-    return true;
+    return load_next_func();
   }
 
   const LoopInfo &current() const override { return loops_[idx_]; }
-  int64_t rowid() const override { return rowid_; }
+  // (function, back edge index): the same on the full scan and the pushdown.
+  int64_t rowid() const override {
+    return idasql::detail::pack_function_rowid(loops_[idx_].func_addr, idx_);
+  }
 };
 
 // ============================================================================

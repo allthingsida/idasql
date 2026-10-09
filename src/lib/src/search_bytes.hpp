@@ -29,13 +29,6 @@ struct ByteSearchResult {
     std::string matched_hex;
 };
 
-size_t find_byte_pattern(
-    const char* pattern,
-    ea_t start_ea,
-    ea_t end_ea,
-    std::vector<ByteSearchResult>& results,
-    size_t max_results = 0);
-
 xsql::GeneratorTableDef<ByteSearchResult> define_byte_search();
 
 bool register_byte_search(xsql::Database& db);

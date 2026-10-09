@@ -61,10 +61,15 @@ struct Row {
     // a real SQL NULL be distinguished from an empty/"NULL" text value on every
     // output surface (HTTP json/csv/tsv, MCP, -q).
     std::vector<char> nulls;
+    // Per-cell SQLite storage class (SQLITE_INTEGER .. SQLITE_NULL), parallel to
+    // `values`, captured before text conversion. Mirrors xsql::Row::types; empty
+    // when the producer does not track it (type() then reports 0).
+    std::vector<char> types;
 
     const std::string& operator[](size_t i) const { return values[i]; }
     size_t size() const { return values.size(); }
     bool is_null(size_t i) const { return i < nulls.size() && nulls[i] != 0; }
+    int type(size_t i) const { return i < types.size() ? types[i] : 0; }
 };
 
 /**
@@ -167,10 +172,28 @@ public:
     QueryEngine& operator=(const QueryEngine&) = delete;
 
     /**
-     * Execute SQL and return results
+     * Execute SQL and return results.
+     *
+     * The overload without QueryOptions inherits the current
+     * runtime_settings.query_timeout_ms value. The QueryOptions overload is
+     * exact: timeout_ms == 0 explicitly disables the deadline.
      */
     QueryResult query(const std::string& sql) { return query(sql.c_str()); }
+    QueryResult query(const std::string& sql, const xsql::QueryOptions& options) {
+        return query(sql.c_str(), options);
+    }
     QueryResult query(const char* sql);
+    QueryResult query(const char* sql, const xsql::QueryOptions& options);
+
+    /**
+     * Execute ONE statement with its `?` placeholders bound to `params` by
+     * SQLite (text binds by length, so an embedded NUL is kept). The overload
+     * without options inherits runtime_settings.query_timeout_ms, as query()
+     * does. A runtime PRAGMA cannot take parameters.
+     */
+    QueryResult query(const char* sql, const std::vector<xsql::QueryParam>& params);
+    QueryResult query(const char* sql, const std::vector<xsql::QueryParam>& params,
+                      const xsql::QueryOptions& options);
 
     /**
      * Execute SQL, ignoring rows
@@ -222,6 +245,8 @@ public:
 private:
     static QueryResult make_pragma_result(const std::string& key, const std::string& value);
     static QueryResult make_pragma_error(const std::string& error);
+    QueryResult run_query(const char* sql, const std::vector<xsql::QueryParam>* params,
+                          const xsql::QueryOptions& options);
     bool handle_runtime_pragma(const char* sql, QueryResult& out);
     void append_query_hints(const std::string& sql, QueryResult& result) const;
 
@@ -235,6 +260,7 @@ private:
     std::unique_ptr<types::TypesRegistry> types_;
     std::unique_ptr<debugger::DebuggerRegistry> debugger_;
     std::unique_ptr<decompiler::DecompilerRegistry> decompiler_;
+    std::unique_ptr<checkpoints::CheckpointsRegistry> checkpoints_;
 
     void init();
 };
@@ -326,9 +352,15 @@ public:
         return engine_ ? engine_->error() : error_;
     }
 
-    // Delegate query methods to engine (with string overloads)
+    // Delegate queries to the engine. As with QueryEngine, omitting options
+    // inherits runtime_settings.query_timeout_ms; explicit timeout_ms == 0 is
+    // unlimited.
     QueryResult query(const std::string& sql) { return query(sql.c_str()); }
+    QueryResult query(const std::string& sql, const xsql::QueryOptions& options) {
+        return query(sql.c_str(), options);
+    }
     QueryResult query(const char* sql);
+    QueryResult query(const char* sql, const xsql::QueryOptions& options);
 
     xsql::Status exec(const char* sql);
 

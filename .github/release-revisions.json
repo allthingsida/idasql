@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "dependencies": {
+    "ida_cmake": {
+      "repository": "https://github.com/allthingsida/ida-cmake.git",
+      "sha": "6765caede748d01599d634b114914734e37957f7"
+    },
+    "libxsql": {
+      "repository": "https://github.com/0xeb/libxsql.git",
+      "version": "1.0.24",
+      "sha": "e5778514199b81c14d1eba9b2665805ae01fd5c0"
+    },
+    "fastmcpp": {
+      "repository": "https://github.com/0xeb/fastmcpp.git",
+      "sha": "29144985f51f41247584efe0c9cd2064de01b6fa"
+    }
+  },
+  "ida_sdks": {
+    "9.2": {
+      "ref": "v9.2.0-sdk.1",
+      "sha": "7f8fd3100142295bffa5eabb2ce6f5b5ac163c6b"
+    },
+    "9.3": {
+      "ref": "v9.3.0-sdk.3",
+      "sha": "72a4a4b92e4bd2750f8af612df9912d3ff311abe"
+    },
+    "9.4": {
+      "ref": "v9.4.0-release",
+      "sha": "2348615c25f90e357cd2cc72fcfede1ba14ad41a"
+    }
+  }
+}

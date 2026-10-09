@@ -7,7 +7,7 @@
 /**
  * code.hpp - Umbrella header for the idasql::code domain: the static-code view.
  *
- * Functions and structure (funcs, blocks, function_chunks, instructions,
+ * Functions and structure (funcs, func_at, blocks, function_chunks, instructions,
  * instruction_operands + the operand-representation engine) plus the folded
  * disassembly analysis tables (disasm_calls, disasm_loops, call_graph,
  * shortest_path, cfg_edges).
@@ -23,3 +23,7 @@
 #include "code_loops.hpp"
 #include "code_graph.hpp"
 #include "code_cfg.hpp"
+#include "code_switch_tables.hpp"
+#include "code_function_frames.hpp"
+#include "code_data_items.hpp"
+#include "code_graph_tables.hpp"

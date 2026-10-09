@@ -84,7 +84,7 @@ CachedTableDef<string_info_t> define_strings() {
   return cached_table<string_info_t>("strings")
       .no_shared_cache()
       .estimate_rows([]() -> size_t { return get_strlist_qty(); })
-      .count([]() -> size_t { return get_strlist_qty(); })
+      .row_count([]() -> size_t { return get_strlist_qty(); })
       .cache_builder([](std::vector<string_info_t> &cache) {
         size_t n = get_strlist_qty();
         for (size_t i = 0; i < n; i++) {

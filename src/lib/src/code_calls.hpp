@@ -15,11 +15,15 @@
 namespace idasql {
 namespace code {
 
+// A call instruction and the function it is reported under. A call in a tail
+// shared by several functions is one row per owner; owner is BADADDR (and
+// func_addr 0) for a call outside every function.
 struct DisasmCallInfo {
   ea_t func_addr;
   ea_t ea;
   ea_t callee_addr;
   std::string callee_name;
+  ea_t owner = BADADDR;
 };
 
 GeneratorTableDef<DisasmCallInfo> define_disasm_calls();

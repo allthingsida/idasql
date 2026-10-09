@@ -21,29 +21,29 @@ TypesRegistry::TypesRegistry()
 {}
 
 void TypesRegistry::register_all(xsql::Database& db) {
-    db.register_cached_table("ida_types", &types);
-    db.create_table("types", "ida_types");
+    db.register_cached_table("types", &types);
+    db.create_table("types", "types");
 
-    db.register_generator_table("ida_applied_types", &applied_types);
-    db.create_table("applied_types", "ida_applied_types");
+    db.register_generator_table("applied_types", &applied_types);
+    db.create_table("applied_types", "applied_types");
 
-    db.register_cached_table("ida_local_type_bookmarks", &local_type_bookmarks);
-    db.create_table("local_type_bookmarks", "ida_local_type_bookmarks");
+    db.register_cached_table("local_type_bookmarks", &local_type_bookmarks);
+    db.create_table("local_type_bookmarks", "local_type_bookmarks");
 
-    db.register_cached_table("ida_types_members", &types_members);
-    db.create_table("types_members", "ida_types_members");
+    db.register_cached_table("types_members", &types_members);
+    db.create_table("types_members", "types_members");
 
-    db.register_cached_table("ida_struct_member_xrefs", &struct_member_xrefs);
-    db.create_table("struct_member_xrefs", "ida_struct_member_xrefs");
+    db.register_generator_table("struct_member_xrefs", &struct_member_xrefs);
+    db.create_table("struct_member_xrefs", "struct_member_xrefs");
 
-    db.register_cached_table("ida_type_gaps", &type_gaps);
-    db.create_table("type_gaps", "ida_type_gaps");
+    db.register_generator_table("type_gaps", &type_gaps);
+    db.create_table("type_gaps", "type_gaps");
 
-    db.register_cached_table("ida_types_enum_values", &types_enum_values);
-    db.create_table("types_enum_values", "ida_types_enum_values");
+    db.register_cached_table("types_enum_values", &types_enum_values);
+    db.create_table("types_enum_values", "types_enum_values");
 
-    db.register_cached_table("ida_types_func_args", &types_func_args);
-    db.create_table("types_func_args", "ida_types_func_args");
+    db.register_cached_table("types_func_args", &types_func_args);
+    db.create_table("types_func_args", "types_func_args");
 
     // Create views
     create_views(db);

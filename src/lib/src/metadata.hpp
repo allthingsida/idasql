@@ -7,15 +7,18 @@
 /**
  * metadata.hpp - IDA database metadata as virtual tables
  *
- * Tables: db_info, ida_info, binary
+ * Tables: db_info, ida_info, binary, runtime_settings, notepad, ida_config
  */
 
 #pragma once
 
 #include "metadata_binary.hpp"
-#include "metadata_runtime_settings.hpp"
+#include "metadata_config.hpp"
+#include "metadata_notepad.hpp"
+#include <idasql/runtime_settings.hpp>
 #include <idasql/vtable.hpp>
 #include <xsql/database.hpp>
+#include <xsql/runtime_settings_table.hpp>
 
 #include <string>
 
@@ -34,8 +37,10 @@ struct MetadataRegistry {
     CachedTableDef<MetadataItem> db_info;
     CachedTableDef<MetadataItem> ida_info;
     CachedTableDef<MetadataItem> binary;
-    CachedTableDef<RuntimeSettingRow> runtime_settings;
+    CachedTableDef<xsql::runtime::RuntimeSettingEntry> runtime_settings;
     CachedTableDef<TrueBelieverRow> true_believers;
+    CachedTableDef<NotepadRow> notepad;
+    CachedTableDef<ConfigRow> ida_config;
 
     MetadataRegistry();
     void register_all(xsql::Database& db);

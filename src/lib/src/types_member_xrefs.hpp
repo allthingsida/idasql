@@ -44,9 +44,10 @@ struct MemberXrefRow {
   std::string instruction_text;
   int64_t access_offset = -1;
   int64_t access_size = -1;
+  std::string access_root_type;
 };
 
-CachedTableDef<MemberXrefRow> define_struct_member_xrefs();
+GeneratorTableDef<MemberXrefRow> define_struct_member_xrefs();
 
 } // namespace types
 } // namespace idasql

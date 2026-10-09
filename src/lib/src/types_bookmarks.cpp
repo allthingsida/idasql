@@ -6,6 +6,20 @@
 
 #include "types_bookmarks.hpp"
 
+#include <cstdlib>
+#include <limits>
+#include <optional>
+
+// "9.2.250908 ..." -> 9, 2.
+static bool parse_major_minor(const char* text, long& major, long& minor) {
+    char* end = nullptr;
+    major = std::strtol(text, &end, 10);
+    if (end == text || *end != '.') return false;
+    const char* rest = end + 1;
+    minor = std::strtol(rest, &end, 10);
+    return end != rest;
+}
+
 namespace idasql {
 namespace types {
 
@@ -234,7 +248,15 @@ CachedTableDef<LocalTypeBookmarkRow> define_local_type_bookmarks() {
                 xsql::set_vtab_error("local_type_bookmarks: ordinal is required");
                 return false;
             }
-            uint32_t ordinal = static_cast<uint32_t>(argv[1].as_int());
+            // Exact, never truncated: 4294967297 is not ordinal 1.
+            const std::optional<int64_t> ord = xsql::exact_int64(argv[1]);
+            if (!ord || *ord < 1 || *ord > static_cast<int64_t>((std::numeric_limits<uint32_t>::max)())) {
+                xsql::set_vtab_error(
+                    "local_type_bookmarks: no local type with ordinal "
+                    + (ord ? std::to_string(*ord) : std::string(argv[1].as_c_str())));
+                return false;
+            }
+            const uint32_t ordinal = static_cast<uint32_t>(*ord);
 
             til_t* ti = get_idati();
             if (ti == nullptr || get_numbered_type_name(ti, ordinal) == nullptr) {
@@ -251,6 +273,24 @@ CachedTableDef<LocalTypeBookmarkRow> define_local_type_bookmarks() {
                     desc = "";
             }
 
+            // IDA 9.2's idalib crashes inside bookmarks_t::mark() for a
+            // local-type place (reproduced with plain IDAPython on any
+            // database; 9.1 and 9.4 create it). Refuse instead of crashing.
+            // Checked against the running kernel, not the SDK: a plugin built
+            // with another 9.x SDK still loads into a 9.2 idalib.
+            if (!is_idaq()) {
+                char ver[32] = {};
+                get_kernel_version(ver, sizeof(ver));
+                long major = 0, minor = 0;
+                if (parse_major_minor(ver, major, minor) && major == 9 && minor == 2) {
+                    xsql::set_vtab_error(
+                        std::string("local_type_bookmarks: IDA 9.2 crashes creating a local-type "
+                                    "bookmark under idalib; create it in the IDA GUI or with "
+                                    "another IDA version (this is IDA ") + ver + ")");
+                    return false;
+                }
+            }
+
             idasql_auto_wait();
             lochist_entry_t loc = make_ltype_loc(ordinal);
             if (loc.place() == nullptr) {
@@ -260,8 +300,14 @@ CachedTableDef<LocalTypeBookmarkRow> define_local_type_bookmarks() {
             }
 
             uint32_t slot = bookmarks_t::size(loc, nullptr);
-            if (argc > 0 && !argv[0].is_null())
-                slot = static_cast<uint32_t>(argv[0].as_int());
+            if (argc > 0 && !argv[0].is_null()) {
+                const std::optional<int64_t> s = xsql::exact_int64(argv[0]);
+                if (!s || *s < 0 || *s >= static_cast<int64_t>(BOOKMARKS_BAD_INDEX)) {
+                    xsql::set_vtab_error("local_type_bookmarks.slot: expected a slot number >= 0");
+                    return false;
+                }
+                slot = static_cast<uint32_t>(*s);
+            }
 
             uint32_t result = bookmarks_t::mark(loc, slot, nullptr, desc, nullptr);
             idasql_auto_wait();

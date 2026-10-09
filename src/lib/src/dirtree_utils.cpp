@@ -87,6 +87,25 @@ bool ok_or_exists(dterr_t err) {
   return err == DTE_OK || err == DTE_ALREADY_EXISTS;
 }
 
+// IDA names some leaves after their inode and marks that with a leading
+// control byte (a bookmark leaf is "\x01" followed by its hex address), and
+// get_abspath(DTN_FULL_NAME) keeps the marker. The path columns show the
+// printable form: control bytes at the start of a component are dropped.
+// Calls back into the dirtree keep the tree's own spelling (tree_path).
+std::string printable_abspath(const qstring &qpath) {
+  std::string out;
+  out.reserve(qpath.length());
+  bool component_start = true;
+  for (size_t i = 0; i < qpath.length(); ++i) {
+    const unsigned char ch = static_cast<unsigned char>(qpath[i]);
+    if (component_start && ch < 0x20)
+      continue;
+    component_start = (ch == '/');
+    out.push_back(static_cast<char>(ch));
+  }
+  return out;
+}
+
 struct CollectVisitor : public dirtree_visitor_t {
   const StandardTreeInfo &info;
   const dirtree_t &tree;
@@ -102,7 +121,7 @@ struct CollectVisitor : public dirtree_visitor_t {
       return 0;
 
     qstring qpath = tree.get_abspath(cursor, DTN_FULL_NAME);
-    std::string full_path = qpath.empty() ? "/" : std::string(qpath.c_str());
+    std::string full_path = qpath.empty() ? "/" : printable_abspath(qpath);
     if (full_path.empty())
       full_path = "/";
 
@@ -127,6 +146,7 @@ struct CollectVisitor : public dirtree_visitor_t {
     if (!entry.isdir) {
       DirtreePathInfo path_info;
       path_info.full_path = full_path;
+      path_info.tree_path = qpath.c_str();
       auto folder = folder_path_from_full(full_path);
       path_info.folder_path = folder.value_or(std::string());
       inode_paths[static_cast<uint64_t>(entry.idx)] = std::move(path_info);
@@ -137,27 +157,29 @@ struct CollectVisitor : public dirtree_visitor_t {
   }
 };
 
-bool row_matches(const DirtreeEntryRow &row,
-                 const std::string &path_eq,
-                 const std::string &path_like,
-                 const std::string &parent_eq,
-                 bool has_inode,
-                 int64_t inode,
-                 bool has_is_dir,
-                 int is_dir,
-                 bool has_is_file,
-                 int is_file) {
-  if (!path_eq.empty() && row.path != path_eq)
+// Pushed-down dirtree_entries constraints. They are omit=1, so an absent
+// optional means "unconstrained" and a present one must match exactly.
+struct DirtreeEntryFilter {
+  std::optional<std::string> path_eq;
+  std::optional<std::string> path_like;
+  std::optional<std::string> parent_eq;
+  std::optional<int64_t> inode;
+  std::optional<int64_t> is_dir;
+  std::optional<int64_t> is_file;
+};
+
+bool row_matches(const DirtreeEntryRow &row, const DirtreeEntryFilter &filter) {
+  if (filter.path_eq && row.path != *filter.path_eq)
     return false;
-  if (!path_like.empty() && !sqlite_like(row.path, path_like))
+  if (filter.path_like && !sqlite_like(row.path, *filter.path_like))
     return false;
-  if (!parent_eq.empty() && row.parent_path != parent_eq)
+  if (filter.parent_eq && row.parent_path != *filter.parent_eq)
     return false;
-  if (has_inode && row.inode != inode)
+  if (filter.inode && row.inode != *filter.inode)
     return false;
-  if (has_is_dir && row.is_dir != is_dir)
+  if (filter.is_dir && row.is_dir != *filter.is_dir)
     return false;
-  if (has_is_file && row.is_file != is_file)
+  if (filter.is_file && row.is_file != *filter.is_file)
     return false;
   return true;
 }
@@ -384,10 +406,12 @@ int path_depth(std::string_view full_path) {
   return static_cast<int>(std::count(path.begin(), path.end(), '/'));
 }
 
+// SQL's own LIKE: case-insensitive ASCII, no escape character (a LIKE without
+// ESCAPE has none, and SQLite only pushes that form down).
 bool sqlite_like(std::string_view value, std::string_view pattern) {
   std::string v(value);
   std::string p(pattern);
-  return sqlite3_strlike(p.c_str(), v.c_str(), '\\') == 0;
+  return sqlite3_strlike(p.c_str(), v.c_str(), 0) == 0;
 }
 
 std::unordered_map<uint64_t, DirtreePathInfo>
@@ -439,7 +463,8 @@ std::optional<DirtreePathInfo> find_inode_path(dirtree_id_t id, uint64_t inode) 
     return std::nullopt;
 
   DirtreePathInfo result;
-  result.full_path = qpath.c_str();
+  result.full_path = printable_abspath(qpath);
+  result.tree_path = qpath.c_str();
   auto folder = folder_path_from_full(result.full_path);
   result.folder_path = folder.value_or(std::string());
   return result;
@@ -490,13 +515,13 @@ bool move_inode_to_folder(dirtree_id_t id, uint64_t inode,
   std::string folder = normalize_relative_path(raw_folder);
   std::optional<DirtreePathInfo> current = find_inode_path(id, inode);
   std::string name =
-      current ? basename_of_path(current->full_path) : basename_of_path(display_name);
+      current ? basename_of_path(current->tree_path) : basename_of_path(display_name);
   if (name.empty()) {
     xsql::set_vtab_error(std::string(surface_name) + ": object name is empty");
     return false;
   }
 
-  std::string source = current ? normalize_relative_path(current->full_path) : name;
+  std::string source = current ? normalize_relative_path(current->tree_path) : name;
   if (!tree->isfile(source.c_str()) && !tree->isfile(name.c_str())) {
     xsql::set_vtab_error(std::string(surface_name) +
                          ": current dirtree entry not found for inode " +
@@ -702,37 +727,43 @@ bool remove_empty_folder(const StandardTreeInfo &info, std::string_view folder,
 GeneratorTableDef<DirtreeEntryRow> define_dirtree_entries() {
   auto factory = [](const std::vector<xsql::GeneratorConstraintArg> &args)
       -> std::unique_ptr<xsql::Generator<DirtreeEntryRow>> {
+    // Every constraint is omit=1, so a value its column could never hold --
+    // NULL, a blob, is_dir = 0.5, an unknown tree -- matches no row (an
+    // unknown tree used to fall back to every tree).
     const StandardTreeInfo *selected_tree = nullptr;
-    std::string path_eq;
-    std::string path_like;
-    std::string parent_eq;
-    bool has_inode = false;
-    int64_t inode = 0;
-    bool has_is_dir = false;
-    int is_dir = 0;
-    bool has_is_file = false;
-    int is_file = 0;
-
+    DirtreeEntryFilter filter;
     for (const auto &arg : args) {
-      if (arg.column_index == 0 && arg.op == xsql::ConstraintOp::Eq) {
-        selected_tree = find_tree(arg.value.as_c_str() ? arg.value.as_c_str() : "");
-      } else if (arg.column_index == 1 && arg.op == xsql::ConstraintOp::Eq) {
-        path_eq = normalize_absolute_path(arg.value.as_c_str() ? arg.value.as_c_str() : "");
-      } else if (arg.column_index == 1 && arg.op == xsql::ConstraintOp::Like) {
-        path_like = arg.value.as_c_str() ? arg.value.as_c_str() : "";
-        if (!path_like.empty() && path_like[0] != '/')
-          path_like = "/" + path_like;
-      } else if (arg.column_index == 2 && arg.op == xsql::ConstraintOp::Eq) {
-        parent_eq = normalize_absolute_path(arg.value.as_c_str() ? arg.value.as_c_str() : "");
-      } else if (arg.column_index == 6 && arg.op == xsql::ConstraintOp::Eq) {
-        has_inode = true;
-        inode = arg.value.as_int64();
-      } else if (arg.column_index == 4 && arg.op == xsql::ConstraintOp::Eq) {
-        has_is_dir = true;
-        is_dir = arg.value.as_int();
-      } else if (arg.column_index == 5 && arg.op == xsql::ConstraintOp::Eq) {
-        has_is_file = true;
-        is_file = arg.value.as_int();
+      const int column = arg.column_index;
+      if (column == 4 || column == 5 || column == 6) {
+        if (arg.op != xsql::ConstraintOp::Eq)
+          continue;
+        const std::optional<int64_t> value = xsql::exact_int64(arg.value);
+        if (!value)
+          return nullptr;
+        (column == 4 ? filter.is_dir : column == 5 ? filter.is_file : filter.inode) = *value;
+        continue;
+      }
+      if (column > 2)
+        continue;
+      if (arg.op != xsql::ConstraintOp::Eq &&
+          !(column == 1 && arg.op == xsql::ConstraintOp::Like))
+        continue;
+      const std::optional<std::string> text = xsql::exact_text(arg.value);
+      if (!text)
+        return nullptr;
+      if (column == 0) {
+        selected_tree = find_tree(*text);
+        if (!selected_tree)
+          return nullptr;
+      } else if (column == 1 && arg.op == xsql::ConstraintOp::Like) {
+        // These constraints are omit=1 (SQLite does not re-check the rows), so
+        // they compare the raw value exactly as SQL would: no path
+        // normalization, no implicit leading '/'.
+        filter.path_like = *text;
+      } else if (column == 1) {
+        filter.path_eq = *text;
+      } else {
+        filter.parent_eq = *text;
       }
     }
 
@@ -741,8 +772,7 @@ GeneratorTableDef<DirtreeEntryRow> define_dirtree_entries() {
     auto collect_one = [&](const StandardTreeInfo &info) {
       auto tree_rows = collect_entries_for_tree(info, &error);
       for (auto &row : tree_rows) {
-        if (row_matches(row, path_eq, path_like, parent_eq, has_inode, inode,
-                        has_is_dir, is_dir, has_is_file, is_file)) {
+        if (row_matches(row, filter)) {
           rows.push_back(std::move(row));
         }
       }
@@ -788,16 +818,30 @@ GeneratorTableDef<DirtreeEntryRow> define_dirtree_entries() {
 GeneratorTableDef<DirtreeFolderRow> define_dirtree_folders() {
   auto factory = [](const std::vector<xsql::GeneratorConstraintArg> &args)
       -> std::unique_ptr<xsql::Generator<DirtreeFolderRow>> {
+    // omit=1, as for dirtree_entries: a NULL or blob value or an unknown tree
+    // matches no folder. That matters for DELETE, which walks this plan: an
+    // unknown tree, or a path that normalized to the root ('/', ''), used to
+    // select every folder of every tree.
     const StandardTreeInfo *selected_tree = nullptr;
-    std::string path_eq;
-    std::string path_like;
+    std::optional<std::string> path_eq;
+    std::optional<std::string> path_like;
     for (const auto &arg : args) {
-      if (arg.column_index == 0 && arg.op == xsql::ConstraintOp::Eq) {
-        selected_tree = find_tree(arg.value.as_c_str() ? arg.value.as_c_str() : "");
-      } else if (arg.column_index == 1 && arg.op == xsql::ConstraintOp::Eq) {
-        path_eq = normalize_relative_path(arg.value.as_c_str() ? arg.value.as_c_str() : "");
-      } else if (arg.column_index == 1 && arg.op == xsql::ConstraintOp::Like) {
-        path_like = arg.value.as_c_str() ? arg.value.as_c_str() : "";
+      if (arg.column_index > 1)
+        continue;
+      if (arg.op != xsql::ConstraintOp::Eq &&
+          !(arg.column_index == 1 && arg.op == xsql::ConstraintOp::Like))
+        continue;
+      const std::optional<std::string> text = xsql::exact_text(arg.value);
+      if (!text)
+        return nullptr;
+      if (arg.column_index == 0) {
+        selected_tree = find_tree(*text);
+        if (!selected_tree)
+          return nullptr;
+      } else if (arg.op == xsql::ConstraintOp::Like) {
+        path_like = *text;
+      } else {
+        path_eq = *text;  // omit=1: exact SQL equality, see dirtree_entries
       }
     }
 
@@ -806,9 +850,9 @@ GeneratorTableDef<DirtreeFolderRow> define_dirtree_folders() {
     auto collect_one = [&](const StandardTreeInfo &info) {
       auto tree_rows = collect_folders_for_tree(info, &error);
       for (auto &row : tree_rows) {
-        if (!path_eq.empty() && row.path != path_eq)
+        if (path_eq && row.path != *path_eq)
           continue;
-        if (!path_like.empty() && !sqlite_like(row.path, path_like))
+        if (path_like && !sqlite_like(row.path, *path_like))
           continue;
         rows.push_back(std::move(row));
       }

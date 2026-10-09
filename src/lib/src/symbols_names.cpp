@@ -7,6 +7,7 @@
 #include "symbols_names.hpp"
 
 #include "decompiler.hpp"
+#include "address_resolution.hpp"
 
 using namespace idasql::core;
 
@@ -41,6 +42,28 @@ void collect_name_rows(std::vector<NameRow> &rows) {
   }
 }
 
+// Why set_name() refused `name` at `ea`, for the error a failed INSERT or
+// UPDATE reports (SQLite alone would say "SQL logic error"). Asked after the
+// refusal, so it never changes what is accepted.
+static std::string explain_name_refusal(ea_t ea, const char *name) {
+  const std::string where = idasql::format_ea_hex(ea);
+  const std::string quoted = std::string("'") + (name ? name : "") + "'";
+  if (!is_mapped(ea))
+    return where + " is not an address in the database";
+  const ea_t head = get_item_head(ea);
+  if (head != ea)
+    return where + " is inside the item at " + idasql::format_ea_hex(head) +
+           "; name the item's start";
+  const ea_t owner = get_name_ea(BADADDR, name ? name : "");
+  if (owner != BADADDR && owner != ea)
+    return "the name " + quoted + " is already used at " +
+           idasql::format_ea_hex(owner);
+  qstring candidate(name ? name : "");
+  if (!validate_name(&candidate, VNT_IDENT, SN_CHECK | SN_NOWARN))
+    return quoted + " is not a valid name";
+  return "IDA refused the name " + quoted + " at " + where;
+}
+
 bool lookup_name_row(NameRow &row, ea_t ea) {
   if (ea == BADADDR || get_name(ea).empty())
     return false;
@@ -59,10 +82,10 @@ bool lookup_name_row(NameRow &row, ea_t ea) {
 CachedTableDef<NameRow> define_names() {
   return cached_table<NameRow>("names")
       .no_shared_cache()
-      // A full-scan UPDATE rowid is a cache position, but row_lookup() resolves
-      // by ea, so it cannot reconstruct the row by rowid. Reconstruct from the
-      // real argv column values instead (and keep NOCHANGE disabled so the
-      // unchanged ea/name carry real values).
+      // UPDATE reconstructs from the real argv column values (NOCHANGE stays
+      // disabled, so the unchanged ea/name carry real values): the name setter
+      // reads the NEW name from the row. DELETE resolves by rowid (the ea)
+      // through row_lookup().
       .update_from_column_values()
       .estimate_rows([]() -> size_t { return get_nlist_size(); })
       .cache_builder([](std::vector<NameRow> &rows) { collect_name_rows(rows); })
@@ -121,7 +144,7 @@ CachedTableDef<NameRow> define_names() {
                 DIRTREE_NAMES, static_cast<uint64_t>(row.ea));
             const std::string old_folder =
                 old_path ? old_path->folder_path : std::string();
-            bool ok = set_name(row.ea, new_name, SN_CHECK) != 0;
+            bool ok = set_name(row.ea, new_name, SN_CHECK | SN_NOWARN) != 0;
             if (ok) {
               row.name = new_name;
               if (!old_folder.empty()) {
@@ -147,7 +170,8 @@ CachedTableDef<NameRow> define_names() {
               decompiler::invalidate_decompiler_cache(row.ea);
             } else {
               xsql::set_vtab_error("names: failed to rename " +
-                                   idasql::format_ea_hex(row.ea));
+                                   idasql::format_ea_hex(row.ea) + ": " +
+                                   explain_name_refusal(row.ea, new_name));
             }
             idasql_auto_wait();
             return ok;
@@ -202,16 +226,28 @@ CachedTableDef<NameRow> define_names() {
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
         // address (col 0) and name (col 1) are both required
-        if (argc < 2 || argv[0].is_null() || argv[1].is_null())
+        if (argc < 2 || argv[0].is_null() || argv[1].is_null()) {
+          xsql::set_vtab_error("names: INSERT requires addr and name");
           return false;
+        }
 
-        ea_t ea = static_cast<ea_t>(argv[0].as_int64());
-        const char *name = argv[1].as_c_str();
-        if (!name || !name[0])
+        ea_t ea = BADADDR;
+        if (!idasql::write_address(argv[0], "names", "addr", ea))
           return false;
+        const char *name = argv[1].as_c_str();
+        if (!name || !name[0]) {
+          xsql::set_vtab_error(
+              "names: INSERT requires a non-empty name (DELETE removes one)");
+          return false;
+        }
 
         idasql_auto_wait();
-        bool ok = set_name(ea, name, SN_CHECK) != 0;
+        bool ok = set_name(ea, name, SN_CHECK | SN_NOWARN) != 0;
+        if (!ok) {
+          xsql::set_vtab_error("names: cannot name " +
+                               idasql::format_ea_hex(ea) + ": " +
+                               explain_name_refusal(ea, name));
+        }
         if (ok) {
           decompiler::invalidate_decompiler_cache(ea);
           if (argc > 4 && !argv[4].is_null()) {
@@ -227,12 +263,12 @@ CachedTableDef<NameRow> define_names() {
 }
 
 // ============================================================================
-// ENTRIES Table (entry points / exports)
+// ENTRIES Table (entry points / exports — canonical cross-tool name)
 // ============================================================================
 
-VTableDef define_entries() {
+VTableDef define_exports() {
   return table("entries")
-      .count([]() { return get_entry_qty(); })
+      .row_count([]() { return get_entry_qty(); })
       .column_int64("ordinal",
                     [](size_t i) -> int64_t {
                       return static_cast<int64_t>(get_entry_ordinal(i));

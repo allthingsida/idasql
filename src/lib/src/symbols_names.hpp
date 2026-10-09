@@ -6,7 +6,7 @@
 
 /**
  * entities_names.hpp - `names` and `entries` tables (named addresses, entry
- * points).
+ * points / exports).
  */
 
 #pragma once
@@ -28,7 +28,7 @@ struct NameRow {
 void collect_name_rows(std::vector<NameRow> &rows);
 
 CachedTableDef<NameRow> define_names();
-VTableDef define_entries();
+VTableDef define_exports();
 
 } // namespace symbols
 } // namespace idasql

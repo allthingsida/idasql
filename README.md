@@ -117,6 +117,44 @@ Everything above works equally from the IDA GUI. To engage your agent with an op
 
 Now IDASQL and your IDA UI are connected and working together.
 
+### Deep Links (IDA 9.4)
+
+With IDA 9.4, answers can link straight into IDA. The `deep_links` table turns any
+function, address, string or type into an `ida://` link in IDA's own Copy Link format,
+plus one extra parameter, `idb_path`, the database's full path. IDA ignores it; idasql's
+click handler uses it to start IDA on the right database. Function links open the
+decompiler (disassembly without one), other links open disassembly:
+
+```sql
+SELECT f.name, dl.uri
+FROM funcs f
+JOIN deep_links dl ON dl.resource = 'functions' AND dl.addr = f.addr AND dl.view = 'pseudocode'
+ORDER BY f.size DESC LIMIT 5;
+```
+
+A coding agent renders these as clickable names. To make a click open IDA:
+
+```
+idasql link register        # handle ida:// links (a replaced handler, such as hcli's, is saved)
+idasql link unregister      # remove it and restore the saved handler
+idasql link open -- "ida:///sample.exe.i64/functions?rva=0x1130&view=pseudocode"
+idasql link list            # running IDA 9.4 instances and their databases
+```
+
+`idasql link open` steers the running IDA that has the database open. The link's exact
+`idb_path` wins; a running IDA with a same-named database is used only when that file
+is not on this machine. If no IDA has it open, it starts IDA on the database (`.i64` or
+`.idb` only), waits for analysis (`--timeout <seconds>`, 1 to 3600), then navigates. It
+refuses to start a second IDA when a running instance does not answer or the database's
+unpacked `.id0` exists (IDA may already have it open); `--launch-anyway` overrides that.
+A link whose decoded parts hold a control character is refused. `--config <file>` goes
+before the verb (`idasql link --config <file> open ...`). Inside IDA,
+`SELECT ida_open_link(uri)` navigates the current session.
+
+Whether a click reaches the handler is up to the terminal. Windows Terminal asks before
+opening a custom scheme unless it is listed in its `safeUriSchemes` setting
+(`"safeUriSchemes": ["ida"]`).
+
 ## Installation
 
 ### Coding Agent Plugins
@@ -130,7 +168,13 @@ IDASQL skills give your coding agent full control over IDA databases through nat
 #### Prerequisites
 
 1. **IDA Pro** installed with its directory in your PATH (`ida.exe` on Windows, `ida` on macOS/Linux)
-2. **idasql** downloaded from [Releases](https://github.com/allthingsida/idasql/releases) and placed next to the IDA binary
+2. **idasql** downloaded from [Releases](https://github.com/allthingsida/idasql/releases). Choose the `ida92`, `ida93`, or `ida94` artifacts matching your IDA version:
+
+   - `*-plugin.zip` is an HCLI-compatible plugin archive containing Windows x86-64, Linux x86-64, and macOS ARM64 binaries.
+   - `*-cli-manual.zip` contains the standalone CLI executables, organized by host architecture.
+   - `*-arm64-plugin-manual.zip`, available for IDA 9.3 and 9.4, contains Linux ARM64 and, for IDA 9.4, Windows ARM64 plugin binaries for manual installation.
+
+   Plugin binaries are SDK-version-specific; do not reuse an `ida92`, `ida93`, or `ida94` build with another IDA version.
 3. Verify setup: `idasql --version` should work from command line
 
 #### Install (Claude Code)
@@ -180,15 +224,16 @@ then install the `idasql` plugin from that marketplace. See the [idasql-skills R
 $ idasql
 Error: Database path required (-s)
 
-idasql v0.0.18 - SQL interface to IDA databases
+idasql v0.0.19 - SQL interface to IDA databases
+Copyright (c) 2024-2026 Elias Bachaalany
 
 Usage: idasql -s <file> [-q <query>] [-f <file>] [-i] [--export <file>]
 
 Options:
   -s <file>            IDA database (.idb/.i64) OR raw binary (.exe/.dll/firmware/etc.)
-                       — raw binaries trigger fresh idalib analysis and string-list rebuild
-                       — legacy 32-bit .idb files upgrade to .i64 and require an explicit reopen
-  --token <token>      Auth token for HTTP/MCP server mode (if server requires it)
+                       - raw binaries trigger fresh idalib analysis and string-list rebuild
+                       - legacy 32-bit .idb files upgrade to .i64 and require an explicit reopen
+  --token <token>      Auth token for HTTP server mode (MCP has no auth)
   -q <sql>             Execute SQL query or semicolon-separated script
   -f <file>            Execute SQL from file
   -i                   Interactive REPL mode
@@ -202,9 +247,12 @@ Options:
   -h, --help           Show this help
   --version            Show version
 
+  idasql link <verb>   ida:// deep links (no database needed):
+                       open <uri> | list | status | register | unregister | source | config
+                       `idasql link --help` for details
+
 Examples:
   idasql -s test.i64 -q "SELECT name, size FROM funcs LIMIT 10"
-  idasql -s test.i64 -q "SELECT * FROM binary; SELECT COUNT(*) FROM funcs;"
   idasql -s test.i64 -f queries.sql
   idasql -s test.i64 -i
   idasql -s test.i64 --export dump.sql
@@ -212,8 +260,6 @@ Examples:
   idasql -s sample.exe --http            # raw PE: idalib auto-analyzes, then serves SQL (default port 8080)
   idasql -s firmware.bin -q "SELECT * FROM binary"
   idasql -s test.i64 --mcp 9000
-
-Thank you for using IDA. Have a nice day!
 ```
 
 Legacy 32-bit `.idb` inputs are upgraded by idalib to a sibling `.i64`. When that
@@ -244,12 +290,16 @@ Useful CMake switches:
 | `IDASQL_BUILD_CLI` | `ON` | Build the standalone `idasql` command-line tool. |
 | `IDASQL_BUILD_PLUGIN` | `ON` | Build the IDA plugin. |
 | `IDASQL_BUILD_EXAMPLES` | `ON` | Build the example programs under `examples/`. |
+| `IDASQL_TARGET_IDA_VERSION` | `>=9.0` | IDA version or range written to the generated plugin manifest. Release packaging sets an exact version such as `9.3`. |
+| `IDASQL_IDA_CMAKE_GIT_TAG` | `main` | Standalone ida-cmake revision. Release CI supplies the reviewed commit SHA. |
+| `IDASQL_LIBXSQL_GIT_TAG` | `main` | Standalone libxsql revision when no parent or sibling target is available. Release CI supplies the reviewed commit SHA. |
+| `IDASQL_FASTMCPP_GIT_TAG` | `main` | fastmcpp revision when MCP support fetches it. Release CI supplies the reviewed commit SHA. |
 
 Notes:
 
 - Hex-Rays support is always compiled in and detected at runtime. If Hex-Rays is unavailable, decompiler-backed tables/functions are simply not registered.
 - HTTP REST support is always compiled in; use `--http` from the CLI or `.http start` from the REPL/plugin CLI.
-- IDAPython SQL execution is compiled in but disabled by default at runtime. Enable it per session with `PRAGMA idasql.enable_idapython = 1;`.
+- IDAPython SQL execution is compiled in but disabled by default at runtime. Enable it per session with `UPDATE runtime_settings SET value='1' WHERE key='enable_idapython';`.
 - `IDASQL_WITH_MCP=ON` fetches `fastmcpp`; `OFF` removes MCP support and the `--mcp` / `.mcp` commands.
 - `XSQL_WITH_THINCLIENT` is forced `ON`, and `HTTPLIB_USE_OPENSSL_IF_AVAILABLE` is forced `OFF` because IDASQL uses local plain HTTP.
 
@@ -261,16 +311,18 @@ Notes:
 
 | Table | Description |
 |-------|-------------|
-| `funcs` | Functions - name, addr, size, end addr, flags (INSERT/UPDATE/DELETE) |
+| `funcs` | Functions - name, addr, size (all chunks), end addr (entry chunk), flags, chunk_count (INSERT/UPDATE/DELETE) |
 | `segments` | Segments - name, start/end addr, permissions, class (INSERT/UPDATE/DELETE) |
 | `names` | Named locations - addr, name, flags (INSERT/UPDATE/DELETE) |
-| `entries` | Entry points - export/program/tls callbacks (ordinal, addr, name) |
+| `entries` | Entry points / exports - export/program/tls callbacks (ordinal, addr, name) |
 | `imports` | Imports - module, name, addr, ordinal |
 | `xrefs` | Cross-references - from/to addr, type, is_code |
 | `blocks` | Basic blocks - start/end addr, func_addr, size |
-| `fchunks` | Function chunks - split/tail chunks with owner |
+| `function_chunks` | Every chunk of every function, one row per owner (shared tails listed under each owner); fast `WHERE func_addr = X` |
+| `func_at(addr)` | Table-valued: the function(s) owning an address, tail chunks included (`SELECT name FROM func_at(0x401000)`) |
+| `fchunks` | Raw function chunk list - one row per chunk, `owner` = primary owner |
 | `instructions` | Disassembly - addr, mnemonic, operands, itype, func_addr (UPDATE operand format_spec / DELETE) |
-| `instruction_operands` | Normalized instruction operands - opnum, text, type, value; optimized by `addr` and `func_addr` |
+| `instruction_operands` | Normalized instruction operands - operand_index, text, type, value; optimized by `addr` and `func_addr` |
 | `heads` | All head items (code + data) - optimized address lookup/range navigation |
 
 ### Strings & Bytes
@@ -320,10 +372,13 @@ Notes:
 | Table | Description |
 |-------|-------------|
 | `binary` | Database summary/overview - processor, bitness, address range, counts |
+| `deep_links` | IDA 9.4: `ida://` link for a resource + address, or a type name |
+| `deep_link_parse` | IDA 9.4: a link's parts, validated with IDA's rules |
 | `db_info` | Database metadata key-value pairs |
 | `ida_info` | IDA analysis info key-value pairs |
 | `problems` | IDA analysis problems/warnings |
-| `signatures` | FLIRT signature status |
+| `signatures` | FLIRT signatures: list with match counts, `INSERT` applies one, `DELETE` removes a planned one |
+| `available_signatures` | The `.sig` files IDA would find for this processor |
 | `fixups` | Fixup/relocation entries |
 | `mappings` | Address space mappings |
 
@@ -346,7 +401,9 @@ Notes:
 |----------|-------------|
 | `decompile(addr)` | Decompile function at address (returns pseudocode) |
 | `disasm_at(addr)` | Canonical disassembly listing at address |
-| `get_ui_context_json()` | UI context JSON — live in the GUI plugin; a "not applicable" stub under CLI/idalib |
+| `disasm_func(addr)` | Full function listing - every chunk, entry chunk first, tail chunks after a separator line |
+| `get_ui_context_json()` | UI context JSON: live in the GUI plugin; a "not applicable" stub under CLI/idalib |
+| `ida_open_link(uri)` | IDA 9.4: open a deep link (in-process in the GUI plugin, otherwise in the running IDA that has the database open) |
 
 ### Unified Entity Search
 
@@ -393,11 +450,11 @@ idasql -s database.i64 --http 8080
 
 ```bash
 curl http://localhost:8080/status
-curl -X POST http://localhost:8080/query -d "SELECT name FROM funcs LIMIT 5"
-curl -X POST http://localhost:8080/query -d "SELECT * FROM binary; SELECT COUNT(*) FROM funcs;"
+curl -X POST http://localhost:8080/query --data-binary "SELECT name FROM funcs LIMIT 5"
+curl -X POST http://localhost:8080/query --data-binary "SELECT * FROM binary; SELECT COUNT(*) FROM funcs;"
 ```
 
-All `/query` responses use the canonical script envelope — single statement = array of one entry:
+All `/query` responses use the canonical script envelope; a single statement is an array of one entry:
 
 ```
 {
@@ -422,7 +479,7 @@ idasql -s malware.i64 --http 8080
 idasql -s kernel.i64 --http 8082
 ```
 
-Endpoints: `/status`, `/help`, `/query`, `/shutdown`
+Endpoints: `/status`, `/help`, `/query`, `/cancel`, `/shutdown`
 
 #### HTTP Server from REPL
 
@@ -445,12 +502,12 @@ idasql> .http stop
 HTTP server stopped
 ```
 
-The server uses a random port (8100-8199) to avoid conflicts with `--http`.
+The server uses a random port (8100-8999) to avoid conflicts with `--http`.
 
 ### Autostart (Pinning)
 
 `.pin` persists a server preference in the IDB (netnode `$ idasql config`) so the
-**IDA plugin auto-starts** an HTTP or MCP server whenever that database is opened —
+**IDA plugin auto-starts** an HTTP or MCP server whenever that database is opened,
 handy for multi-instance setups where each database keeps a stable, known port.
 
 ```
@@ -461,11 +518,11 @@ idasql> .pin off http             # disable autostart but keep host/port
 idasql> .pin clear all            # remove all pins
 ```
 
-After pinning, reopening the database auto-starts the server — you'll see this
+After pinning, reopening the database auto-starts the server; you'll see this
 in the IDA output window on load:
 
 ```
-IDASQL v0.0.18: Query engine initialized
+IDASQL v0.0.19: Query engine initialized
 IDASQL CLI: Installed
 IDASQL: autostart -> IDASQL HTTP server: http://127.0.0.1:8099
 Type '.http stop' to stop the server.
@@ -519,20 +576,20 @@ Tools: `idasql_query` (direct SQL query or semicolon-separated script)
 IDASQL is part of a family of tools that expose different binary-analysis and
 debug-information platforms through the **same** SQL surface, all built on the
 shared [libxsql](https://github.com/0xeb/libxsql) virtual-table framework. A
-query you learn against one tool largely carries over to the others — e.g. the
+query you learn against one tool largely carries over to the others: the
 same `SELECT name, size FROM funcs ORDER BY size DESC LIMIT 10` runs everywhere.
 
 **Reverse-engineering platforms**
-- **[bnsql](https://github.com/0xeb/bnsql)** — Binary Ninja databases as SQL.
-- **[ghidrasql](https://github.com/0xeb/ghidrasql)** — Ghidra databases as SQL.
+- **[bnsql](https://github.com/0xeb/bnsql)**: Binary Ninja databases as SQL.
+- **[ghidrasql](https://github.com/0xeb/ghidrasql)**: Ghidra databases as SQL.
 
 **Debug info & compiler data**
-- **[pdbsql](https://github.com/0xeb/pdbsql)** — Windows PDB symbol files as SQL.
-- **[dwarfsql](https://github.com/0xeb/dwarfsql)** — DWARF debug information as SQL.
-- **[clangsql](https://github.com/0xeb/clangsql)** — Clang AST as SQL.
+- **[pdbsql](https://github.com/0xeb/pdbsql)**: Windows PDB symbol files as SQL.
+- **[dwarfsql](https://github.com/0xeb/dwarfsql)**: DWARF debug information as SQL.
+- **[clangsql](https://github.com/0xeb/clangsql)**: Clang AST as SQL.
 
 **Core**
-- **[libxsql](https://github.com/0xeb/libxsql)** — the C++ SQLite virtual-table
+- **[libxsql](https://github.com/0xeb/libxsql)**: the C++ SQLite virtual-table
   framework every tool above is built on.
 
 ## Built With
@@ -540,6 +597,8 @@ same `SELECT name, size FROM funcs ORDER BY size DESC LIMIT 10` runs everywhere.
 - **[libxsql](https://github.com/0xeb/libxsql)** - Header-only C++17 library for exposing C++ data structures as SQLite virtual tables. Provides the fluent builder API for defining tables, constraint pushdown, and HTTP thin-client support.
 
 - **[fastmcpp](https://github.com/0xeb/fastmcpp)** - Optional MCP server implementation used when building with `-DIDASQL_WITH_MCP=ON`.
+
+- **[ida-hcli](https://github.com/HexRaysSA/ida-hcli)** (MIT, Hex-Rays SA) - the `idasql link` IPC client, launch and URL-handler behavior is reimplemented in C++ from hcli's; idasql does not need hcli installed.
 
 ## License and Terms of Use
 

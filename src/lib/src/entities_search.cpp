@@ -120,17 +120,17 @@ bool EntityGenerator::advance_current_source() {
 bool EntityGenerator::advance_functions() {
     size_t count = get_func_qty();
     while (current_index_ < count) {
-        func_t* fn = getn_func(current_index_++);
-        if (!fn) continue;
+        const ea_t fn_start = idasql_func_ea_by_num(current_index_++);
+        if (fn_start == BADADDR) continue;
 
         qstring name;
-        if (get_func_name(&name, fn->start_ea) <= 0) continue;
+        if (get_func_name(&name, fn_start) <= 0) continue;
 
         std::string name_str(name.c_str());
         if (matches(name_str)) {
             current_row_.name = name_str;
             current_row_.kind = "function";
-            current_row_.address = fn->start_ea;
+            current_row_.address = fn_start;
             current_row_.has_address = true;
             current_row_.has_ordinal = false;
             current_row_.parent_name.clear();
@@ -150,8 +150,7 @@ bool EntityGenerator::advance_labels() {
 
         if (!name || !*name) continue;
 
-        func_t* fn = get_func(ea);
-        if (fn && fn->start_ea == ea) continue;
+        if (idasql_is_func_start(ea)) continue;
 
         std::string name_str(name);
         if (matches(name_str)) {
@@ -171,17 +170,17 @@ bool EntityGenerator::advance_labels() {
 bool EntityGenerator::advance_segments() {
     int count = get_segm_qty();
     while (static_cast<int>(current_index_) < count) {
-        segment_t* seg = getnseg(static_cast<int>(current_index_++));
-        if (!seg) continue;
+        const ea_t seg_start = idasql_segment_ea_by_num(static_cast<int>(current_index_++));
+        if (seg_start == BADADDR) continue;
 
         qstring name;
-        if (get_segm_name(&name, seg) <= 0) continue;
+        if (idasql_segment_name(&name, seg_start) <= 0) continue;
 
         std::string name_str(name.c_str());
         if (matches(name_str)) {
             current_row_.name = name_str;
             current_row_.kind = "segment";
-            current_row_.address = seg->start_ea;
+            current_row_.address = seg_start;
             current_row_.has_address = true;
             current_row_.has_ordinal = false;
             current_row_.parent_name.clear();
@@ -393,7 +392,7 @@ int64_t GrepIterator::rowid() const {
 
 VTableDef define_grep() {
     return table("grep")
-        .count([]() -> size_t {
+        .row_count([]() -> size_t {
             return 0;
         })
         .column_text("pattern", [](size_t) -> std::string { return ""; })
@@ -411,7 +410,7 @@ VTableDef define_grep() {
 
 bool register_grep_entities(xsql::Database& db) {
     static VTableDef grep = define_grep();
-    return db.register_table("ida_grep", &grep) && db.create_table("grep", "ida_grep");
+    return db.register_table("grep", &grep) && db.create_table("grep", "grep");
 }
 
 } // namespace search

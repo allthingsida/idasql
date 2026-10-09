@@ -52,7 +52,7 @@ private:
   int idx_ = -1;
 };
 
-CachedTableDef<GapRow> define_type_gaps();
+GeneratorTableDef<GapRow> define_type_gaps();
 
 } // namespace types
 } // namespace idasql

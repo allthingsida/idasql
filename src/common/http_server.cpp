@@ -22,6 +22,7 @@ static std::string build_http_help_text() {
         << "  GET  /         - Server greeting\n"
         << "  GET  /help     - This documentation\n"
         << "  POST /query    - Execute SQL (body = raw SQL, response = JSON)\n"
+        << "  POST /cancel   - Cooperatively cancel the in-flight query\n"
         << "  GET  /status   - Server health check\n"
         << "  POST /shutdown - Stop server\n\n"
         << "Discover Schema:\n"
@@ -33,6 +34,11 @@ static std::string build_http_help_text() {
         << "  {\"success\": true, \"statement_count\": N, \"results\": [{\"columns\": [...], \"rows\": [[...]], \"row_count\": N, \"error\": null}], ...}\n"
         << "  A single statement returns a one-element results[]. Use ?format=text|csv|tsv for non-JSON output.\n"
         << "  Error: {\"success\": false, \"error\": \"message\"} (request-level) or per-statement results[i].error\n\n"
+        << "Authentication (if enabled):\n"
+        << "  Header: Authorization: Bearer <token>\n"
+        << "  Or:     X-XSQL-Token: <token>\n\n"
+        << "Per-request deadline:\n"
+        << "  Header: X-XSQL-Timeout: <ms> (absent or 0 = the query_timeout_ms setting)\n\n"
         << "Example:\n"
         << "  curl http://localhost:<port>/help\n"
         << "  " << format_query_curl_example("http://localhost:<port>") << "\n";
@@ -69,8 +75,9 @@ int IDAHTTPServer::start(int port, HTTPQueryCallback query_cb,
     config.help_text = build_http_help_text();
     config.port = port;
     config.bind_address = bind_addr_;
-    config.query_fn = std::move(query_cb);
+    config.script_executor = std::move(query_cb);
     config.use_queue = use_queue;
+    config.cancel_fn = [counter = cancel_counter_]() { counter->fetch_add(1); };
     if (!auth_token.empty()) config.auth_token = auth_token;
     config.queue_admission_timeout_ms_fn = []() {
         return idasql::runtime_settings().queue_admission_timeout_ms();
@@ -109,6 +116,16 @@ void IDAHTTPServer::stop() {
         impl_->stop();
         impl_.reset();
     }
+}
+
+void IDAHTTPServer::abandon() {
+    // httplib::Server::stop() only shuts the listening socket (it does not join),
+    // which also ends keep-alive loops. The server object is then released, not
+    // destroyed: destroying it would join the worker that is still running.
+    if (impl_) {
+        if (auto* svr = impl_->http_server()) svr->stop();
+    }
+    (void)impl_.release();
 }
 
 bool IDAHTTPServer::is_running() const {

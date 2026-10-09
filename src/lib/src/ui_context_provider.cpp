@@ -742,24 +742,26 @@ static void populate_code_context_json(const ContextSourceData& source, xsql::js
             {"addr", format_ea_hex(source.current_ea)}
         };
 
-        if (func_t* current_func = get_func(source.current_ea); current_func != nullptr) {
+        if (idasql_func_info_t current_func; idasql_func_info(source.current_ea, &current_func)) {
             qstring func_name;
-            const bool have_func_name = get_func_name(&func_name, current_func->start_ea) > 0;
+            const bool have_func_name = get_func_name(&func_name, current_func.start_ea) > 0;
+            // end = entry-chunk end; size/chunks cover every chunk (entry + tails).
             code_context["function"] = {
                 {"name", have_func_name ? func_name.c_str() : ""},
-                {"start", format_ea_hex(current_func->start_ea)},
-                {"end", format_ea_hex(current_func->end_ea)},
-                {"size", static_cast<uint64>(current_func->end_ea - current_func->start_ea)}
+                {"start", format_ea_hex(current_func.start_ea)},
+                {"end", format_ea_hex(current_func.end_ea)},
+                {"size", static_cast<uint64>(idasql_func_total_size(current_func.start_ea))},
+                {"chunks", static_cast<uint64>(idasql_func_chunk_count(current_func.start_ea))}
             };
         }
 
-        if (segment_t* current_seg = getseg(source.current_ea); current_seg != nullptr) {
+        if (idasql_segment_info_t current_seg; idasql_segment_info(source.current_ea, &current_seg)) {
             qstring seg_name;
-            const bool have_seg_name = get_segm_name(&seg_name, current_seg) > 0;
+            const bool have_seg_name = idasql_segment_name(&seg_name, current_seg.start_ea) > 0;
             code_context["segment"] = {
                 {"name", have_seg_name ? seg_name.c_str() : ""},
-                {"start", format_ea_hex(current_seg->start_ea)},
-                {"end", format_ea_hex(current_seg->end_ea)}
+                {"start", format_ea_hex(current_seg.start_ea)},
+                {"end", format_ea_hex(current_seg.end_ea)}
             };
         }
 

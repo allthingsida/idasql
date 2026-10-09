@@ -9,7 +9,11 @@
 #include "address_resolution.hpp"
 #include "decompiler.hpp"
 
+#include <algorithm>
+#include <climits>
+#include <optional>
 #include <queue>
+#include <string>
 #include <unordered_set>
 
 using namespace idasql::core;
@@ -47,12 +51,8 @@ int clamp_shortest_path_depth(int max_depth) {
 } // namespace
 
 void get_function_callees(ea_t func_addr, std::vector<ea_t> &callees) {
-  func_t *pfn = get_func(func_addr);
-  if (!pfn)
-    return;
-
-  func_item_iterator_t fii;
-  if (!fii.set(pfn))
+  idasql_func_item_iterator fii;
+  if (!fii.set(func_addr))
     return;
 
   std::unordered_set<ea_t> seen(callees.begin(), callees.end());
@@ -63,27 +63,25 @@ void get_function_callees(ea_t func_addr, std::vector<ea_t> &callees) {
     if (decoded && is_call_insn(insn)) {
       ea_t callee = get_first_fcref_from(ea);
       if (callee != BADADDR) {
-        func_t *callee_fn = get_func(callee);
-        if (callee_fn) {
-          append_unique_function(callees, seen, callee_fn->start_ea);
+        const ea_t callee_start = idasql_func_start(callee);
+        if (callee_start != BADADDR) {
+          append_unique_function(callees, seen, callee_start);
         }
       }
     }
 
     xrefblk_t xb;
-    // XREF_NOFLOW: keep call/jump code xrefs but skip ordinary fall-through
-    // flow xrefs, which would otherwise create phantom call edges.
-    for (bool ok = xb.first_from(ea, XREF_NOFLOW); ok; ok = xb.next_from()) {
+    // XREF_FAR: keep call/jump code xrefs but skip ordinary fall-through flow
+    // xrefs, which would otherwise create phantom call edges. IDA 9.1 renamed
+    // this flag to XREF_NOFLOW but retains XREF_FAR as a compatibility alias.
+    for (bool ok = xb.first_from(ea, XREF_FAR); ok; ok = xb.next_from()) {
       if (!xb.iscode)
         continue;
 
-      func_t *callee_fn = get_func(xb.to);
-      if (!callee_fn)
-        continue;
-      if (callee_fn->start_ea != xb.to)
+      if (!idasql_is_func_start(xb.to))
         continue;
 
-      append_unique_function(callees, seen, callee_fn->start_ea);
+      append_unique_function(callees, seen, xb.to);
     }
   };
 
@@ -95,14 +93,15 @@ void get_function_callees(ea_t func_addr, std::vector<ea_t> &callees) {
 
 void get_function_callers(ea_t func_addr, std::vector<ea_t> &callers) {
   xrefblk_t xb;
-  // XREF_NOFLOW: keep call/jump code xrefs but skip ordinary fall-through
-  // flow xrefs, which would otherwise create phantom caller edges.
-  for (bool ok = xb.first_to(func_addr, XREF_NOFLOW); ok; ok = xb.next_to()) {
+  // XREF_FAR is the IDA 9.0 spelling of the no-flow enumeration flag and is
+  // retained as an alias by newer SDKs.
+  for (bool ok = xb.first_to(func_addr, XREF_FAR); ok; ok = xb.next_to()) {
     if (!xb.iscode)
       continue;
-    func_t *caller_fn = get_func(xb.from);
-    if (caller_fn)
-      callers.push_back(caller_fn->start_ea);
+    // A call in a tail shared by several functions is made by each of them, as
+    // xrefs (and the callers view) report it and as the downward walk follows
+    // tails.
+    idasql_for_each_owner_of(xb.from, [&](ea_t owner) { callers.push_back(owner); });
   }
 }
 
@@ -117,10 +116,9 @@ class CallGraphGenerator : public xsql::Generator<CallGraphRow> {
 public:
   CallGraphGenerator(ea_t start, const std::string &direction, int max_depth) {
     // Validate start is a function
-    func_t *start_fn = get_func(start);
-    if (!start_fn)
+    const ea_t start_ea = idasql_func_start(start);
+    if (start_ea == BADADDR)
       return;
-    ea_t start_ea = start_fn->start_ea;
 
     bool go_down = (direction == "down" || direction == "both");
     bool go_up = (direction == "up" || direction == "both");
@@ -186,6 +184,35 @@ make_call_graph_generator(ea_t start, const char *direction, int max_depth) {
       start, direction ? direction : "down", clamp_call_graph_depth(max_depth));
 }
 
+// The call_graph parameters are hidden columns bound with omit=1, so each
+// takes a value only when a native column of its type would equal it: a start
+// or max_depth that no integer equals (NULL, 4096.5, 'a') and a NULL or blob
+// direction yield no rows instead of a truncated or defaulted walk.
+static std::unique_ptr<xsql::Generator<CallGraphRow>>
+call_graph_from_args(const xsql::FunctionArg &start,
+                     const xsql::FunctionArg *direction,
+                     const xsql::FunctionArg *max_depth) {
+  const std::optional<int64_t> start_ea = xsql::exact_int64(start);
+  if (!start_ea)
+    return nullptr;
+  std::string dir = "down";
+  if (direction) {
+    const std::optional<std::string> text = xsql::exact_text(*direction);
+    if (!text)
+      return nullptr;
+    dir = *text;
+  }
+  int depth = 10;
+  if (max_depth) {
+    const std::optional<int64_t> value = xsql::exact_int64(*max_depth);
+    if (!value)
+      return nullptr;
+    depth = static_cast<int>(std::clamp<int64_t>(*value, INT_MIN, INT_MAX));
+  }
+  return make_call_graph_generator(
+      static_cast<ea_t>(static_cast<uint64_t>(*start_ea)), dir.c_str(), depth);
+}
+
 GeneratorTableDef<CallGraphRow> define_call_graph() {
   return xsql::generator_table<CallGraphRow>("call_graph")
       .column_int64("func_addr",
@@ -209,34 +236,28 @@ GeneratorTableDef<CallGraphRow> define_call_graph() {
           {"start", "direction", "max_depth"},
           [](const std::vector<xsql::FunctionArg> &args)
               -> std::unique_ptr<xsql::Generator<CallGraphRow>> {
-            return make_call_graph_generator(
-                static_cast<ea_t>(args[0].as_int64()), args[1].as_c_str(),
-                args[2].as_int());
+            return call_graph_from_args(args[0], &args[1], &args[2]);
           },
           1.0, 100.0)
       .parametric_filter(
           {"start", "direction"},
           [](const std::vector<xsql::FunctionArg> &args)
               -> std::unique_ptr<xsql::Generator<CallGraphRow>> {
-            return make_call_graph_generator(
-                static_cast<ea_t>(args[0].as_int64()), args[1].as_c_str(), 10);
+            return call_graph_from_args(args[0], &args[1], nullptr);
           },
           1.0, 100.0)
       .parametric_filter(
           {"start", "max_depth"},
           [](const std::vector<xsql::FunctionArg> &args)
               -> std::unique_ptr<xsql::Generator<CallGraphRow>> {
-            return make_call_graph_generator(
-                static_cast<ea_t>(args[0].as_int64()), "down",
-                args[1].as_int());
+            return call_graph_from_args(args[0], nullptr, &args[1]);
           },
           1.0, 100.0)
       .parametric_filter(
           {"start"},
           [](const std::vector<xsql::FunctionArg> &args)
               -> std::unique_ptr<xsql::Generator<CallGraphRow>> {
-            return make_call_graph_generator(
-                static_cast<ea_t>(args[0].as_int64()), "down", 10);
+            return call_graph_from_args(args[0], nullptr, nullptr);
           },
           1.0, 100.0)
       .build();
@@ -252,12 +273,10 @@ class ShortestPathGenerator : public xsql::Generator<ShortestPathRow> {
 
 public:
   ShortestPathGenerator(ea_t from_addr, ea_t to_addr, int max_depth) {
-    func_t *from_fn = get_func(from_addr);
-    func_t *to_fn = get_func(to_addr);
-    if (!from_fn || !to_fn)
+    const ea_t from_ea = idasql_func_start(from_addr);
+    const ea_t to_ea = idasql_func_start(to_addr);
+    if (from_ea == BADADDR || to_ea == BADADDR)
       return;
-    ea_t from_ea = from_fn->start_ea;
-    ea_t to_ea = to_fn->start_ea;
 
     // Same function
     if (from_ea == to_ea) {
@@ -394,6 +413,28 @@ make_shortest_path_generator(ea_t from_addr, ea_t to_addr, int max_depth) {
       from_addr, to_addr, clamp_shortest_path_depth(max_depth));
 }
 
+// Same contract as call_graph_from_args: from_addr, to_addr and max_depth
+// are omit=1 hidden inputs, so a value no integer equals yields no rows.
+static std::unique_ptr<xsql::Generator<ShortestPathRow>>
+shortest_path_from_args(const xsql::FunctionArg &from,
+                        const xsql::FunctionArg &to,
+                        const xsql::FunctionArg *max_depth) {
+  const std::optional<int64_t> from_ea = xsql::exact_int64(from);
+  const std::optional<int64_t> to_ea = xsql::exact_int64(to);
+  if (!from_ea || !to_ea)
+    return nullptr;
+  int depth = 20;
+  if (max_depth) {
+    const std::optional<int64_t> value = xsql::exact_int64(*max_depth);
+    if (!value)
+      return nullptr;
+    depth = static_cast<int>(std::clamp<int64_t>(*value, INT_MIN, INT_MAX));
+  }
+  return make_shortest_path_generator(
+      static_cast<ea_t>(static_cast<uint64_t>(*from_ea)),
+      static_cast<ea_t>(static_cast<uint64_t>(*to_ea)), depth);
+}
+
 GeneratorTableDef<ShortestPathRow> define_shortest_path() {
   return xsql::generator_table<ShortestPathRow>("shortest_path")
       .column_int("step",
@@ -412,18 +453,14 @@ GeneratorTableDef<ShortestPathRow> define_shortest_path() {
           {"from_addr", "to_addr", "max_depth"},
           [](const std::vector<xsql::FunctionArg> &args)
               -> std::unique_ptr<xsql::Generator<ShortestPathRow>> {
-            return make_shortest_path_generator(
-                static_cast<ea_t>(args[0].as_int64()),
-                static_cast<ea_t>(args[1].as_int64()), args[2].as_int());
+            return shortest_path_from_args(args[0], args[1], &args[2]);
           },
           1.0, 10.0)
       .parametric_filter(
           {"from_addr", "to_addr"},
           [](const std::vector<xsql::FunctionArg> &args)
               -> std::unique_ptr<xsql::Generator<ShortestPathRow>> {
-            return make_shortest_path_generator(
-                static_cast<ea_t>(args[0].as_int64()),
-                static_cast<ea_t>(args[1].as_int64()), 20);
+            return shortest_path_from_args(args[0], args[1], nullptr);
           },
           1.0, 10.0)
       .build();

@@ -7,6 +7,9 @@
 #include "types_members.hpp"
 
 #include "types_gaps.hpp" // range_overlaps_member (fixed-layout insert guard)
+#include "address_resolution.hpp"
+
+#include <climits>
 
 #include <algorithm>
 #include <cctype>
@@ -29,7 +32,7 @@ std::string trim_copy(std::string value) {
 }
 
 // make_type_declarator() / parse_type_declarator() are array-aware type-string
-// parsers shared with the lvar-type setter (decompiler.cpp).  They are defined
+// parsers shared with the lvar-type setter (decompiler_ctree.cpp). They are defined
 // just below in the named idasql::types namespace so other TUs can link them;
 // see types_members.hpp.  trim_copy() above remains file-local (same TU).
 
@@ -62,7 +65,9 @@ std::string type_error_text(tinfo_code_t code) {
 }
 
 bool parse_nonnegative_int64(xsql::FunctionArg arg, const char* column, int64_t& out) {
-    out = arg.as_int64();
+    const auto v = idasql::write_int(arg, "types_members", column, INT64_MIN, INT64_MAX);
+    if (!v) return false;
+    out = *v;
     if (out < 0) {
         xsql::set_vtab_error(std::string("types_members: ") + column + " cannot be negative");
         return false;
@@ -145,7 +150,7 @@ bool move_member_offset(TypeMemberRef& ref, const MemberEntry& row, int idx, uin
 
     const size_t old_size = ref.tif.get_size();
 
-    const tinfo_code_t del_code = ref.tif.del_udm(static_cast<size_t>(idx));
+    const tinfo_code_t del_code = idasql_udt_del_udm(ref.tif, static_cast<size_t>(idx));
     if (del_code != TERR_OK) {
         xsql::set_vtab_error("types_members: failed to move member offset (delete step: " +
                               member_context(row) + ", code=" + type_error_text(del_code) + ")");
@@ -154,7 +159,7 @@ bool move_member_offset(TypeMemberRef& ref, const MemberEntry& row, int idx, uin
 
     udm_t placed = moved;
     placed.offset = new_bits;
-    const tinfo_code_t add_code = ref.tif.add_udm(placed, ETF_MAY_DESTROY, 1, -1);
+    const tinfo_code_t add_code = idasql_udt_add_udm(ref.tif, placed, ETF_MAY_DESTROY, 1, -1);
     if (add_code != TERR_OK) {
         // Roll back: re-create the member at its original offset so the struct is
         // never left missing the field. Verify the rollback actually succeeded --
@@ -162,7 +167,7 @@ bool move_member_offset(TypeMemberRef& ref, const MemberEntry& row, int idx, uin
         // than report a plain "move failed".
         udm_t restore = moved;
         restore.offset = old_bits;
-        const tinfo_code_t restore_code = ref.tif.add_udm(restore, ETF_MAY_DESTROY, 1, -1);
+        const tinfo_code_t restore_code = idasql_udt_add_udm(ref.tif, restore, ETF_MAY_DESTROY, 1, -1);
         if (restore_code != TERR_OK) {
             xsql::set_vtab_error(
                 "types_members: move failed and rollback ALSO failed; struct may be "
@@ -256,8 +261,13 @@ bool parse_type_declarator(const std::string& type_text, tinfo_t& out_type, std:
     const std::string decl = make_type_declarator(trimmed);
     if (decl.empty()
         || !parse_decl(&parsed_type, &parsed_name, nullptr, decl.c_str(), PT_SIL | PT_VAR)) {
+        // Terminate the type with ';': IDA 9.0 and 9.1 reject every PT_TYP string
+        // without it (even "int"), while 9.0 through 9.4 all accept it with it --
+        // which is what makes abstract declarators such as "int (*)(int)" and
+        // "int (*)[4]" (no name to synthesize) parse on every version.
+        const std::string type_only = trimmed.back() == ';' ? trimmed : trimmed + ";";
         tinfo_t fallback_type;
-        if (!fallback_type.parse(trimmed.c_str(), nullptr, PT_SIL | PT_TYP)) {
+        if (!fallback_type.parse(type_only.c_str(), nullptr, PT_SIL | PT_TYP)) {
             error = "failed to parse " + label + " '" + trimmed + "'";
             return false;
         }
@@ -810,7 +820,7 @@ CachedTableDef<MemberEntry> define_types_members() {
             const bool fixed = !ref.tif.is_union() && ref.tif.is_fixed_struct();
             const size_t old_size = ref.tif.get_size();
 
-            const tinfo_code_t code = ref.tif.del_udm(static_cast<size_t>(idx));
+            const tinfo_code_t code = idasql_udt_del_udm(ref.tif, static_cast<size_t>(idx));
             if (code != TERR_OK) {
                 xsql::set_vtab_error("types_members: failed to delete member (" +
                                       member_context(row) + ", code=" + type_error_text(code) + ")");
@@ -830,9 +840,14 @@ CachedTableDef<MemberEntry> define_types_members() {
                 || argv[3].is_null())
                 return false;
 
-            uint32_t ordinal = static_cast<uint32_t>(argv[0].as_int());
+            const auto ord = idasql::write_int(argv[0], "types_members", "type_ordinal", 1, UINT32_MAX);
+            if (!ord) return false;
+            uint32_t ordinal = static_cast<uint32_t>(*ord);
             const char* member_name = argv[3].as_c_str();
-            if (!member_name || !member_name[0]) return false;
+            if (!member_name || !member_name[0]) {
+                xsql::set_vtab_error("types_members: INSERT needs a member_name");
+                return false;
+            }
 
             TypeMemberRef ref(ordinal);
             if (!ref.valid) {
@@ -888,7 +903,14 @@ CachedTableDef<MemberEntry> define_types_members() {
             // that collides with a real member is rejected with an "overlaps" error,
             // while one that lands wholly in a gap is placed. Do NOT add a byte-
             // alignment guard here — it would defeat that bit-level detection.
-            udm_t new_member(member_name, member_type, offset_bits);
+            // IDA 9.1 added the convenient udm_t(name, type, offset)
+            // constructor. Populate the stable fields directly so this write
+            // path remains source-compatible with the supported 9.0 SDK.
+            udm_t new_member;
+            new_member.offset = offset_bits;
+            new_member.size = type_size_bits(member_type);
+            new_member.name = member_name;
+            new_member.type = member_type;
             if (argc > 11 && !argv[11].is_null()) {
                 const char* cmt = argv[11].as_c_str();
                 if (cmt) new_member.cmt = cmt;
@@ -896,7 +918,9 @@ CachedTableDef<MemberEntry> define_types_members() {
 
             ssize_t insert_index = -1;
             if (argc > 2 && !argv[2].is_null()) {
-                const int idx = argv[2].as_int();
+                const auto exact = idasql::write_int(argv[2], "types_members", "member_index", INT64_MIN, INT_MAX);
+                if (!exact) return false;
+                const int idx = static_cast<int>(*exact);
                 if (idx < 0) {
                     xsql::set_vtab_error("types_members: member_index cannot be negative on INSERT");
                     return false;
@@ -933,7 +957,7 @@ CachedTableDef<MemberEntry> define_types_members() {
             }
             const size_t old_size = ref.tif.get_size();
 
-            const tinfo_code_t code = ref.tif.add_udm(new_member, etf_flags, 1, insert_index);
+            const tinfo_code_t code = idasql_udt_add_udm(ref.tif, new_member, etf_flags, 1, insert_index);
             if (code != TERR_OK) {
                 xsql::set_vtab_error("types_members: failed to insert member (type_ordinal=" +
                                       std::to_string(ordinal) + " member=" + member_name +

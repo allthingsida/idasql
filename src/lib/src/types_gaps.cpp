@@ -121,16 +121,13 @@ int64_t GapsIterator::rowid() const {
        | (static_cast<int64_t>(rows_[idx_].gap_offset) & 0xFFFFFFFF);
 }
 
-CachedTableDef<GapRow> define_type_gaps() {
-  return cached_table<GapRow>("type_gaps")
-      .no_shared_cache()
+GeneratorTableDef<GapRow> define_type_gaps() {
+  return generator_table<GapRow>("type_gaps")
       .estimate_rows([]() -> size_t { return 16; })
       // Unfiltered scan would compute gaps for every type -- require a filter.
-      .cache_builder([](std::vector<GapRow> &) {
-        xsql::set_vtab_error(
-            "type_gaps requires a filter on type_ordinal or type_name "
-            "(e.g. WHERE type_name = 'MyStruct').");
-      })
+      .full_scan_error(
+          "type_gaps requires a filter on type_ordinal or type_name "
+          "(e.g. WHERE type_name = 'MyStruct').")
       .column_int("type_ordinal", [](const GapRow &r) { return static_cast<int>(r.type_ordinal); })
       .column_text("type_name", [](const GapRow &r) { return r.type_name; })
       .column_int64("gap_offset", [](const GapRow &r) { return r.gap_offset; })

@@ -7,6 +7,7 @@
 #include "code_operand_repr.hpp"
 
 #include "decompiler.hpp"
+#include "address_resolution.hpp"
 
 using namespace idasql::core;
 
@@ -46,12 +47,8 @@ bool resolve_ea_spec(const std::string &spec, ea_t &out_ea) {
     out_ea = named;
     return true;
   }
-  int64_t value = 0;
-  if (parse_int64(trimmed, value)) {
-    out_ea = static_cast<ea_t>(value);
-    return true;
-  }
-  return false;
+  // An address is unsigned: the whole 64-bit range, nothing above it.
+  return parse_numeric_ea_text(trimmed, out_ea);
 }
 
 // Recognize a standalone sign/bnot modifier token (,signed / ,unsigned /
@@ -268,12 +265,19 @@ bool parse_operand_format_spec(const char *spec, OperandApplyRequest &out,
       path_part = trim_copy(rest.substr(0, delta_pos));
       const std::string delta_text = trim_copy(rest.substr(delta_pos + 7));
       int64_t delta64 = 0;
-      if (!parse_int64(delta_text, delta64)) {
+      ea_t delta_bits = 0;
+      if (parse_int64(delta_text, delta64)) {
+        delta = static_cast<adiff_t>(delta64);
+      } else if ((delta_text.rfind("0x", 0) == 0 || delta_text.rfind("0X", 0) == 0) &&
+                 parse_numeric_ea_text(delta_text, delta_bits)) {
+        // A hex bit pattern above INT64_MAX is a negative delta in two's
+        // complement (0xFFFFFFFFFFFFFFF8 is -8), as IDA displays it.
+        delta = static_cast<adiff_t>(static_cast<int64_t>(delta_bits));
+      } else {
         if (out_error)
           *out_error = "stroff delta must be an integer";
         return false;
       }
-      delta = static_cast<adiff_t>(delta64);
     }
 
     std::vector<std::string> path_names;
@@ -353,23 +357,40 @@ bool operand_numeric_value(ea_t ea, int opnum, uint64 &out_value,
   }
 }
 
+// tinfo_t::find_edm became get_edm / get_edm_by_value inside IDA 9.0: the 9.0 GA
+// SDK has only find_edm, 9.0 SP1 and later only get_edm, and both say
+// IDA_SDK_VERSION 900. So the member is detected, not the version: the first
+// overload (int) is viable only when get_edm exists.
+template <typename T>
+auto edm_by_name(const T &tif, edm_t *out, const char *name, int)
+    -> decltype(tif.get_edm(out, name)) {
+  return tif.get_edm(out, name);
+}
+template <typename T>
+ssize_t edm_by_name(const T &tif, edm_t *out, const char *name, long) {
+  return tif.find_edm(out, name);
+}
+template <typename T>
+auto edm_by_value(const T &tif, edm_t *out, uint64 value, bmask64_t bmask,
+                  uchar serial, int)
+    -> decltype(tif.get_edm_by_value(out, value, bmask, serial)) {
+  return tif.get_edm_by_value(out, value, bmask, serial);
+}
+template <typename T>
+ssize_t edm_by_value(const T &tif, edm_t *out, uint64 value, bmask64_t bmask,
+                     uchar serial, long) {
+  return tif.find_edm(out, value, bmask, serial);
+}
+
 ssize_t find_enum_member_by_name(const tinfo_t &enum_tif, edm_t *out,
                                  const char *name) {
-#if IDASQL_HAS_GET_EDM
-  return enum_tif.get_edm(out, name);
-#else
-  return enum_tif.find_edm(out, name);
-#endif
+  return edm_by_name(enum_tif, out, name, 0);
 }
 
 ssize_t find_enum_member_by_value(const tinfo_t &enum_tif, edm_t *out,
                                   uint64 value, bmask64_t bmask,
                                   uchar serial) {
-#if IDASQL_HAS_GET_EDM
-  return enum_tif.get_edm_by_value(out, value, bmask, serial);
-#else
-  return enum_tif.find_edm(out, value, bmask, serial);
-#endif
+  return edm_by_value(enum_tif, out, value, bmask, serial, 0);
 }
 
 bool resolve_enum_member_serial(const tinfo_t &enum_tif,

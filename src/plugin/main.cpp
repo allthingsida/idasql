@@ -28,17 +28,31 @@
 #include <idasql/platform.hpp>
 
 // Standard library includes
+#include <atomic>
 #include <memory>
 #include <string>
 #include <functional>
-#include <chrono>
 #include <mutex>
+
+// Pinning the module on an abandoned teardown (GetModuleHandleExW / dlopen).
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
 
 // Platform-specific include order:
 // - Windows: json before IDA (IDA poisons stdlib functions)
 // - macOS/Linux: IDA before json
 #include <idasql/platform_undef.hpp>
 
+// clang-format off
 #ifdef _WIN32
 #include <xsql/json.hpp>
 #include <ida.hpp>
@@ -60,6 +74,7 @@
 #include <idasql/ui_context_provider.hpp>
 #include <xsql/json.hpp>
 #endif
+// clang-format on
 
 // IDASQL CLI (command line interface)
 #include "../common/idasql_cli.hpp"
@@ -84,6 +99,7 @@
 #endif
 
 // HTTP server for .http REPL command
+#include "../common/binary_query.hpp"
 #include "../common/http_server.hpp"
 #include "../common/json_utils.hpp"
 #include "../common/sql_script.hpp"
@@ -104,53 +120,112 @@ struct batch_guard_t {
     ~batch_guard_t() { batch = prev; }
 };
 
-// The engine-serialization mutex is acquired INSIDE execute() (which always runs
-// on the main thread via execute_sync), never around the execute_sync round-trip.
-// Holding it across execute_sync would deadlock: an HTTP worker would keep the
-// lock while blocked waiting for the main thread, and if the main thread (CLI
-// Enter -> process_line) then tries the same path it blocks on the lock and never
-// pumps the worker's queued request -> permanent IDA freeze. Taking it here keeps
-// the two HTTP workers serialized (both funnel through the main thread) without
-// ever holding it off the main thread.
-struct query_request_t : public exec_request_t
+// What a request needs from the plugin once it has been handed to the main
+// thread. Each request holds its own reference, so this outlives the plugin when
+// term has to abandon a server with a request still in flight (see the dtor).
+struct request_gate_t
 {
-    idasql::QueryEngine* engine;
-    std::mutex* exec_mutex;
-    std::string sql;
-    idasql::QueryResult result;
-
-    query_request_t(idasql::QueryEngine* e, std::mutex* m, const std::string& s)
-        : engine(e), exec_mutex(m), sql(s) {}
-
-    virtual ssize_t idaapi execute() override
-    {
-        std::lock_guard<std::mutex> exec_lock(*exec_mutex);
-        batch_guard_t bg;
-        result = engine->query(sql);
-        return result.success ? 0 : -1;
-    }
+    // Serializes engine access. Acquired INSIDE execute() (which always runs on
+    // the main thread via execute_sync), never around the execute_sync round-trip.
+    // Holding it across execute_sync would deadlock: an HTTP worker would keep the
+    // lock while blocked waiting for the main thread, and if the main thread (CLI
+    // Enter -> process_line) then tries the same path it blocks on the lock and
+    // never pumps the worker's queued request -> permanent IDA freeze. Taking it
+    // there keeps the HTTP/MCP workers serialized (all funnel through the main
+    // thread) without ever holding it off the main thread.
+    std::mutex exec_mutex;
+    idasql::QueryEngine* engine = nullptr;
+    std::atomic<int> in_flight{0};
+    std::atomic<bool> closing{false};
 };
+
+xsql::ScriptResult closing_result()
+{
+    xsql::ScriptStatementResult stmt;
+    stmt.error = "IDA is closing";
+    xsql::ScriptResult result;
+    result.statement_count = 1;
+    result.first_error_index = 0;
+    result.results.push_back(std::move(stmt));
+    return result;
+}
 
 struct query_script_request_t : public exec_request_t
 {
-    idasql::QueryEngine* engine;
-    std::mutex* exec_mutex;
+    std::shared_ptr<request_gate_t> gate;
     std::string sql;
+    xsql::ScriptOptions options;
+    // HTTP only: its server's /cancel counter. The request is armed against it
+    // when it starts, not when it was queued behind the main thread.
+    idasql::CancelCounter cancel_counter;
     xsql::ScriptResult result;
 
-    query_script_request_t(idasql::QueryEngine* e, std::mutex* m, const std::string& s)
-        : engine(e), exec_mutex(m), sql(s) {}
+    query_script_request_t(std::shared_ptr<request_gate_t> g, const std::string& s,
+                           const xsql::ScriptOptions& opts, idasql::CancelCounter counter)
+        : gate(std::move(g)), sql(s), options(opts), cancel_counter(std::move(counter)) {}
 
     virtual ssize_t idaapi execute() override
     {
-        std::lock_guard<std::mutex> exec_lock(*exec_mutex);
+        // The plugin may have gone while this waited in IDA's queue.
+        if (gate->closing.load()) {
+            result = closing_result();
+            return -1;
+        }
+        std::lock_guard<std::mutex> exec_lock(gate->exec_mutex);
+        idasql::arm_cancel_at_start(options, cancel_counter);
         batch_guard_t bg;
         result = idasql::run_sql_script(
             sql,
-            [this](const std::string& stmt) { return engine->query(stmt); });
+            [this](const std::string& stmt, const xsql::QueryOptions& query_options) {
+                return gate->engine->query(stmt, query_options);
+            },
+            options);
         return result.success ? 0 : -1;
     }
 };
+
+// Runs a script on the main thread. Server callbacks capture the shared gate, never
+// the plugin: a server abandoned at teardown can still call this after the plugin
+// is gone, and then the gate's `closing` answers "IDA is closing".
+xsql::ScriptResult run_query_script_sync(const std::shared_ptr<request_gate_t>& gate,
+                                         const std::string& sql,
+                                         const xsql::ScriptOptions& options,
+                                         idasql::CancelCounter cancel_counter = {})
+{
+    // Count first, then check: the dtor sets `closing` and then reads the
+    // count, so either it sees this request or this request sees `closing`.
+    gate->in_flight.fetch_add(1);
+    if (gate->closing.load()) {
+        gate->in_flight.fetch_sub(1);
+        return closing_result();
+    }
+    query_script_request_t req(gate, sql, options, std::move(cancel_counter));
+    execute_sync(req, MFF_WRITE);
+    gate->in_flight.fetch_sub(1);
+    return req.result;
+}
+
+xsql::ScriptResult run_query_script_sync(const std::shared_ptr<request_gate_t>& gate,
+                                         const std::string& sql)
+{
+    return run_query_script_sync(gate, sql, idasql::with_default_timeout({}));
+}
+
+// Keep this module loaded for good. Abandoned server threads outlive the plugin
+// and may still run its code after IDA would otherwise unload it.
+void pin_this_module()
+{
+#ifdef _WIN32
+    HMODULE self = nullptr;
+    (void)GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+        reinterpret_cast<LPCWSTR>(&pin_this_module), &self);
+#else
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&pin_this_module), &info) && info.dli_fname)
+        (void)dlopen(info.dli_fname, RTLD_NOW | RTLD_NOLOAD | RTLD_NODELETE);
+#endif
+}
 
 } // anonymous namespace
 
@@ -162,71 +237,29 @@ struct idasql_plugmod_t : public plugmod_t
 {
     std::unique_ptr<idasql::QueryEngine> engine_;
     std::unique_ptr<idasql::IdasqlCLI> cli_;
-    std::mutex query_exec_mutex_;
-    std::mutex query_meta_mutex_;
-    std::string active_query_;
-    std::chrono::steady_clock::time_point active_query_started_{};
+    std::shared_ptr<request_gate_t> gate_ = std::make_shared<request_gate_t>();
     bool idapython_runtime_acquired_ = false;
 
 #ifdef IDASQL_HAS_MCP
-    idasql::IDAMCPServer mcp_server_;
+    // Held by pointer so an abandoned server can be released along with its
+    // threads instead of being destroyed with the plugin (see the dtor).
+    std::unique_ptr<idasql::IDAMCPServer> mcp_server_ = std::make_unique<idasql::IDAMCPServer>();
 #endif
 
     idasql::IDAHTTPServer http_server_;
 
-    idasql::QueryResult run_query_sync(const std::string& sql)
-    {
-        // query_exec_mutex_ is taken inside the request's execute() (on the main
-        // thread), NOT around execute_sync — see the request structs above for
-        // why holding it across the main-thread round-trip deadlocks.
-        {
-            std::lock_guard<std::mutex> lock(query_meta_mutex_);
-            active_query_ = sql;
-            active_query_started_ = std::chrono::steady_clock::now();
-        }
-
-        query_request_t req(engine_.get(), &query_exec_mutex_, sql);
-        execute_sync(req, MFF_WRITE);
-
-        {
-            std::lock_guard<std::mutex> lock(query_meta_mutex_);
-            active_query_.clear();
-            active_query_started_ = std::chrono::steady_clock::time_point{};
-        }
-
-        return req.result;
-    }
-
-    xsql::ScriptResult run_query_script_sync(const std::string& sql)
-    {
-        // query_exec_mutex_ is taken inside the request's execute() (on the main
-        // thread), NOT around execute_sync — see the request structs above for
-        // why holding it across the main-thread round-trip deadlocks.
-        {
-            std::lock_guard<std::mutex> lock(query_meta_mutex_);
-            active_query_ = sql;
-            active_query_started_ = std::chrono::steady_clock::now();
-        }
-
-        query_script_request_t req(engine_.get(), &query_exec_mutex_, sql);
-        execute_sync(req, MFF_WRITE);
-
-        {
-            std::lock_guard<std::mutex> lock(query_meta_mutex_);
-            active_query_.clear();
-            active_query_started_ = std::chrono::steady_clock::time_point{};
-        }
-
-        return req.result;
-    }
-
     idasql_plugmod_t()
     {
         engine_ = std::make_unique<idasql::QueryEngine>();
+        gate_->engine = engine_.get();
         if (engine_->is_valid()) {
             // get_ui_context_json() is now registered by QueryEngine::init()
             // for every runtime (real here in the plugin, a stub under CLI).
             msg("IDASQL v" IDASQL_VERSION_STRING ": Query engine initialized\n");
+
+            // Here ida_open_link() navigates this IDA directly, so the gate
+            // defaults ON (it stays OFF under idalib). No-op before IDA 9.4.
+            idasql::deep_links::enable_navigation_default_for_gui();
 
             std::string py_capture_error;
             idapython_runtime_acquired_ = idasql::idapython::runtime_acquire(&py_capture_error);
@@ -240,8 +273,8 @@ struct idasql_plugmod_t : public plugmod_t
             }
 
             // SQL executor that uses execute_sync for thread safety
-            auto sql_executor = [this](const std::string& sql) -> std::string {
-                xsql::ScriptResult result = run_query_script_sync(sql);
+            auto sql_executor = [gate = gate_](const std::string& sql) -> std::string {
+                xsql::ScriptResult result = run_query_script_sync(gate, sql);
                 return xsql::script_result_to_text(result);
             };
 
@@ -251,8 +284,8 @@ struct idasql_plugmod_t : public plugmod_t
 #ifdef IDASQL_HAS_MCP
             // Setup MCP callbacks
             cli_->session().callbacks().mcp_status = [this]() -> std::string {
-                if (mcp_server_.is_running()) {
-                    return idasql::format_mcp_status(mcp_server_.port(), true, mcp_server_.bind_addr());
+                if (mcp_server_->is_running()) {
+                    return idasql::format_mcp_status(mcp_server_->port(), true, mcp_server_->bind_addr());
                 } else {
                     // Auto-start if not running
                     return start_mcp_server();
@@ -264,8 +297,8 @@ struct idasql_plugmod_t : public plugmod_t
             };
 
             cli_->session().callbacks().mcp_stop = [this]() -> std::string {
-                if (mcp_server_.is_running()) {
-                    mcp_server_.stop();
+                if (mcp_server_->is_running()) {
+                    mcp_server_->stop();
                     return "MCP server stopped";
                 } else {
                     return "MCP server not running";
@@ -328,8 +361,8 @@ struct idasql_plugmod_t : public plugmod_t
 #ifdef IDASQL_HAS_MCP
     std::string start_mcp_server(int req_port = 0, const std::string& bind_addr = "127.0.0.1")
     {
-        if (mcp_server_.is_running()) {
-            return idasql::format_mcp_status(mcp_server_.port(), true, mcp_server_.bind_addr());
+        if (mcp_server_->is_running()) {
+            return idasql::format_mcp_status(mcp_server_->port(), true, mcp_server_->bind_addr());
         }
 
         // With no explicit port, fall back to the pinned host/port (shared
@@ -339,13 +372,14 @@ struct idasql_plugmod_t : public plugmod_t
             idasql::autostart::load().mcp, req_port, addr);
 
         // SQL executor that uses execute_sync for thread safety
-        auto sql_executor = [this](const std::string& sql) -> std::string {
-            xsql::ScriptResult result = run_query_script_sync(sql);
+        auto sql_executor = [gate = gate_](const std::string& sql) -> std::string {
+            xsql::ScriptResult result = run_query_script_sync(gate, sql);
             return xsql::script_result_to_text(result);
         };
 
         // Start MCP server
-        int port = mcp_server_.start(req_port, sql_executor, addr);
+        mcp_server_->set_deep_links_available(IDASQL_HAS_DEEP_LINKS != 0);
+        int port = mcp_server_->start(req_port, sql_executor, addr);
         if (port <= 0) {
             return "Error: Failed to start MCP server on " + addr + ":"
                    + std::to_string(req_port)
@@ -355,9 +389,9 @@ struct idasql_plugmod_t : public plugmod_t
         // Copy the paste-ready MCP client config to the clipboard on a fresh start.
         (void)xsql::thinclient::try_copy_text_to_clipboard_windows(
             xsql::thinclient::build_mcp_clipboard_payload(
-                "idasql", mcp_server_.bind_addr(), port));
+                "idasql", mcp_server_->bind_addr(), port));
 
-        return idasql::format_mcp_info(port, mcp_server_.bind_addr());
+        return idasql::format_mcp_info(port, mcp_server_->bind_addr());
     }
 #endif
 
@@ -375,11 +409,15 @@ struct idasql_plugmod_t : public plugmod_t
         idasql::autostart::apply_pin_fallback(
             idasql::autostart::load().http, req_port, addr, &auth_token);
 
-        // SQL executor that uses execute_sync for thread safety and returns JSON
-        idasql::HTTPQueryCallback sql_cb = [this](const std::string& sql) -> std::string {
-            xsql::ScriptResult result = run_query_script_sync(sql);
-            return xsql::script_result_to_json(result);
-        };
+        // SQL executor that uses execute_sync for thread safety. The request's
+        // own X-XSQL-Timeout wins over query_timeout_ms, and its cancellation is
+        // armed when it starts on the main thread.
+        idasql::HTTPQueryCallback sql_cb =
+            [gate = gate_, counter = http_server_.cancel_counter()](
+                const std::string& sql, const xsql::ScriptOptions& options) {
+                return run_query_script_sync(
+                    gate, sql, idasql::with_default_timeout(options), counter);
+            };
 
         // Start HTTP server, no queue (plugin mode)
         int port = http_server_.start(req_port, sql_cb, addr, /*use_queue=*/false, auth_token);
@@ -389,10 +427,12 @@ struct idasql_plugmod_t : public plugmod_t
                    + " (port may be in use; try a different port or interface).";
         }
 
-        // Copy the paste-ready connection payload to the clipboard on a fresh start.
+        // Copy the paste-ready agent instructions to the clipboard on a fresh
+        // start, with the effective token (explicit or pinned) so the curl works.
         (void)xsql::thinclient::try_copy_text_to_clipboard_windows(
             xsql::thinclient::build_http_clipboard_payload(
-                "idasql", http_server_.bind_addr(), port));
+                "idasql", http_server_.bind_addr(), port,
+                idasql::default_binary_query(), auth_token));
 
         return idasql::format_http_info(
             port, http_server_.bind_addr(), "Type '.http stop' to stop the server.");
@@ -400,15 +440,30 @@ struct idasql_plugmod_t : public plugmod_t
 
     ~idasql_plugmod_t()
     {
+        // Refuse new requests, then see whether one is still in flight. If one is,
+        // it is waiting on this (the main) thread: it is either the request that
+        // called qexit() or one queued behind it, and neither can finish now.
+        // Stopping a server joins its workers, so it would wait for that request
+        // forever (measured: qexit from an HTTP idapython_snippet hung IDA).
+        // Such a server is abandoned to process exit instead.
+        gate_->closing.store(true);
+        const bool abandon = gate_->in_flight.load() > 0;
+        if (abandon) pin_this_module();
 #ifdef IDASQL_HAS_MCP
-        // Stop MCP server before destroying engine
-        if (mcp_server_.is_running()) {
-            mcp_server_.stop();
+        // Stop MCP server before destroying engine. An abandoned one is released
+        // with its threads: its tool callback still points into it.
+        if (mcp_server_->is_running()) {
+            if (abandon) {
+                mcp_server_->abandon();
+                (void)mcp_server_.release();
+            } else {
+                mcp_server_->stop();
+            }
         }
 #endif
         // Stop HTTP server before destroying engine
         if (http_server_.is_running()) {
-            http_server_.stop();
+            if (abandon) http_server_.abandon(); else http_server_.stop();
         }
         if (cli_) cli_->uninstall();
         idasql::ui_context::shutdown_capture_helper();
@@ -416,7 +471,9 @@ struct idasql_plugmod_t : public plugmod_t
             idasql::idapython::runtime_release();
             idapython_runtime_acquired_ = false;
         }
-        engine_.reset();
+        // A request in flight may be the statement that called qexit(), still on
+        // this stack; qexit never returns to it, so leave its engine to exit too.
+        if (abandon) (void)engine_.release(); else engine_.reset();
         msg("IDASQL: Plugin terminated\n");
     }
 

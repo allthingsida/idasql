@@ -15,9 +15,21 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Silence CMake policy warnings from dependencies
 cmake_policy(SET CMP0135 NEW)                     # Use extraction time for DOWNLOAD_EXTRACT_TIMESTAMP
-set(CMAKE_POLICY_DEFAULT_CMP0169 OLD CACHE STRING "" FORCE) # Allow FetchContent_Populate() in dependencies
+if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)                  # Allow FetchContent_Populate() for ida-cmake bootstrap
+endif()
 
 include(FetchContent)
+
+# Default dependency revisions: the reviewed lock, the same one release CI builds,
+# so a source checkout builds what was tested. Pass -DIDASQL_<DEP>_GIT_TAG=main to
+# track upstream instead.
+set(_idasql_lock "${CMAKE_CURRENT_SOURCE_DIR}/.github/release-revisions.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_idasql_lock}")
+file(READ "${_idasql_lock}" _idasql_lock_json)
+string(JSON _idasql_lock_ida_cmake GET "${_idasql_lock_json}" dependencies ida_cmake sha)
+string(JSON _idasql_lock_libxsql   GET "${_idasql_lock_json}" dependencies libxsql sha)
+string(JSON _idasql_lock_fastmcpp  GET "${_idasql_lock_json}" dependencies fastmcpp sha)
 
 # Output directories (only set if building standalone)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -31,10 +43,16 @@ endif()
 # ============================================================================
 
 # Fetch ida-cmake directly — decoupled from ida-sdk's submodule pin.
+set(IDASQL_IDA_CMAKE_GIT_TAG "${_idasql_lock_ida_cmake}" CACHE STRING
+    "ida-cmake revision (default: the reviewed lock)")
+set(_idasql_ida_cmake_shallow TRUE)
+if(IDASQL_IDA_CMAKE_GIT_TAG MATCHES "^[0-9a-fA-F]{40}$")
+    set(_idasql_ida_cmake_shallow FALSE)
+endif()
 FetchContent_Declare(ida_cmake
     GIT_REPOSITORY https://github.com/allthingsida/ida-cmake.git
-    GIT_TAG        main
-    GIT_SHALLOW    TRUE
+    GIT_TAG        "${IDASQL_IDA_CMAKE_GIT_TAG}"
+    GIT_SHALLOW    "${_idasql_ida_cmake_shallow}"
 )
 FetchContent_Populate(ida_cmake)
 
@@ -42,8 +60,8 @@ FetchContent_Populate(ida_cmake)
 include(${ida_cmake_SOURCE_DIR}/bootstrap.cmake)
 find_package(idasdk REQUIRED)
 
-# Refuse to proceed if package resolution escaped the standalone ida-cmake
-# fetched above (IDA SDK 9.4 also carries a bundled CMake implementation).
+# IDA SDK 9.4 also contains a bundled CMake implementation. Refuse to proceed
+# if package resolution escaped the standalone ida-cmake fetched above.
 file(REAL_PATH "${ida_cmake_SOURCE_DIR}" _idasql_fetched_idacmake_dir)
 file(REAL_PATH "${IDA_CMAKE_DIR}" _idasql_active_idacmake_dir)
 if(NOT _idasql_active_idacmake_dir STREQUAL _idasql_fetched_idacmake_dir)
@@ -91,13 +109,38 @@ elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../libxsql/CMakeLists.txt")
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../libxsql ${CMAKE_CURRENT_BINARY_DIR}/libxsql)
     message(STATUS "idasql: Added libxsql from sibling directory")
 else()
-    # Standalone: FetchContent from GitHub
+    # Standalone: the reviewed lock unless overridden.
     message(STATUS "idasql: Fetching libxsql from GitHub...")
+    set(IDASQL_LIBXSQL_GIT_TAG "${_idasql_lock_libxsql}" CACHE STRING
+        "libxsql revision (default: the reviewed lock)")
+    set(_idasql_libxsql_shallow TRUE)
+    if(IDASQL_LIBXSQL_GIT_TAG MATCHES "^[0-9a-fA-F]{40}$")
+        set(_idasql_libxsql_shallow FALSE)
+    endif()
     FetchContent_Declare(libxsql
         GIT_REPOSITORY https://github.com/0xeb/libxsql.git
-        GIT_TAG        d5a210dad0333dc8dbdbfbbb295968cfe1a0950c
+        GIT_TAG        "${IDASQL_LIBXSQL_GIT_TAG}"
+        GIT_SHALLOW    "${_idasql_libxsql_shallow}"
     )
     FetchContent_MakeAvailable(libxsql)
+endif()
+
+# The libxsql API idasql is written against (QueryParam, vtab_write_count,
+# counts_as_write): an older revision fails here instead of mid-compile.
+set(IDASQL_MIN_LIBXSQL_VERSION 1.0.24)
+get_target_property(_idasql_xsql_real xsql::xsql ALIASED_TARGET)
+if(NOT _idasql_xsql_real)
+    set(_idasql_xsql_real xsql::xsql)
+endif()
+get_target_property(_idasql_xsql_defs ${_idasql_xsql_real} INTERFACE_COMPILE_DEFINITIONS)
+string(REGEX MATCH "XSQL_VERSION_STRING=\"?([0-9]+\\.[0-9]+\\.[0-9]+)" _idasql_xsql_match
+       "${_idasql_xsql_defs}")
+if(NOT CMAKE_MATCH_1)
+    message(FATAL_ERROR "idasql: cannot read libxsql's XSQL_VERSION_STRING")
+endif()
+if(CMAKE_MATCH_1 VERSION_LESS IDASQL_MIN_LIBXSQL_VERSION)
+    message(FATAL_ERROR
+        "idasql needs libxsql >= ${IDASQL_MIN_LIBXSQL_VERSION}, got ${CMAKE_MATCH_1}")
 endif()
 
 # Include directories
@@ -118,14 +161,24 @@ if(IDASQL_WITH_MCP)
         # Keep the dependency surface minimal for idasql.
         set(FASTMCPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
         set(FASTMCPP_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(FASTMCPP_BUILD_CLI OFF CACHE BOOL "" FORCE)
         set(FASTMCPP_ENABLE_POST_STREAMING OFF CACHE BOOL "" FORCE)
         set(FASTMCPP_ENABLE_SAMPLING_HTTP_HANDLERS OFF CACHE BOOL "" FORCE)
         set(FASTMCPP_FETCH_CURL OFF CACHE BOOL "" FORCE)
+        # idasql serves MCP; it never uses fastmcpp's client transports.
+        set(FASTMCPP_ENABLE_WINHTTP OFF CACHE BOOL "" FORCE)
 
         message(STATUS "idasql: Fetching fastmcpp from GitHub...")
+        set(IDASQL_FASTMCPP_GIT_TAG "${_idasql_lock_fastmcpp}" CACHE STRING
+            "fastmcpp revision (default: the reviewed lock)")
+        set(_idasql_fastmcpp_shallow TRUE)
+        if(IDASQL_FASTMCPP_GIT_TAG MATCHES "^[0-9a-fA-F]{40}$")
+            set(_idasql_fastmcpp_shallow FALSE)
+        endif()
         FetchContent_Declare(fastmcpp
             GIT_REPOSITORY https://github.com/0xeb/fastmcpp.git
-            GIT_TAG        9a3ee7125b1db9dc85a71f60661beb40ea1e7993
+            GIT_TAG        "${IDASQL_FASTMCPP_GIT_TAG}"
+            GIT_SHALLOW    "${_idasql_fastmcpp_shallow}"
         )
         FetchContent_MakeAvailable(fastmcpp)
     endif()
@@ -155,19 +208,29 @@ string(REGEX MATCH "IDASQL_VERSION_PATCH[ \t]+([0-9]+)" _ "${_idasql_version_con
 set(TOOL_VERSION_PATCH "${CMAKE_MATCH_1}")
 string(REGEX MATCH "IDASQL_VERSION_REVISION[ \t]+([0-9]+)" _ "${_idasql_version_contents}")
 set(TOOL_VERSION_REVISION "${CMAKE_MATCH_1}")
+string(REGEX MATCH "IDASQL_VERSION_STRING[ \t]+\"([0-9]+\\.[0-9]+\\.[0-9]+)\"" _ "${_idasql_version_contents}")
+set(TOOL_VERSION_STRING "${CMAKE_MATCH_1}")
 if(TOOL_VERSION_MAJOR STREQUAL ""
         OR TOOL_VERSION_MINOR STREQUAL ""
         OR TOOL_VERSION_PATCH STREQUAL ""
-        OR TOOL_VERSION_REVISION STREQUAL "")
+        OR TOOL_VERSION_REVISION STREQUAL ""
+        OR TOOL_VERSION_STRING STREQUAL "")
     message(FATAL_ERROR "idasql: failed to parse version from ${_idasql_version_hpp}")
 endif()
+set(_idasql_component_version
+    "${TOOL_VERSION_MAJOR}.${TOOL_VERSION_MINOR}.${TOOL_VERSION_PATCH}")
+if(NOT TOOL_VERSION_STRING STREQUAL _idasql_component_version)
+    message(FATAL_ERROR
+        "idasql: IDASQL_VERSION_STRING (${TOOL_VERSION_STRING}) does not match "
+        "the numeric components (${_idasql_component_version})")
+endif()
 message(STATUS
-    "idasql: version "
-    "${TOOL_VERSION_MAJOR}.${TOOL_VERSION_MINOR}.${TOOL_VERSION_PATCH}.${TOOL_VERSION_REVISION}")
+    "idasql: version ${TOOL_VERSION_STRING} "
+    "(Windows revision ${TOOL_VERSION_REVISION})")
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/versioninfo.cmake)
 
-# Release CI sets this to one exact ABI version (9.2, 9.3, or 9.4). Keep the
-# historical range for ordinary local builds that do not opt into packaging.
+# Release builds set one exact ABI version (9.2, 9.3, or 9.4). Ordinary local
+# builds keep the historical range unless packaging opts into an exact value.
 set(IDASQL_TARGET_IDA_VERSION ">=9.0" CACHE STRING
     "IDA version or range advertised by the generated plugin manifest")
 if(IDASQL_TARGET_IDA_VERSION STREQUAL "")

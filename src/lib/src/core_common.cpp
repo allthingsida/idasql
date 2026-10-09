@@ -6,6 +6,8 @@
 
 #include "core_common.hpp"
 
+#include <cerrno>
+
 namespace idasql {
 namespace core {
 
@@ -13,6 +15,53 @@ namespace core {
 // heads/bytes generator tables.
 ea_t normalize_sql_ea(int64_t value) {
   return static_cast<ea_t>(static_cast<uint64_t>(value));
+}
+
+HeadSpanWalker::HeadSpanWalker(const xsql::Int64KeyRange &range,
+                               bool descending)
+    : spans_(range.unsigned_spans(descending)), descending_(descending) {}
+
+ea_t HeadSpanWalker::first_in_span(const xsql::U64Span &span) const {
+  const ea_t lo = static_cast<ea_t>(span.lo);
+  const ea_t hi = static_cast<ea_t>(span.hi);
+  if (descending_) {
+    if (hi != BADADDR && is_head(get_flags(hi)))
+      return hi;
+    // prev_head(BADADDR, lo) is the highest head: BADADDR is a valid start
+    // for a backward walk.
+    return prev_head(hi, lo);
+  }
+  if (lo != BADADDR && is_head(get_flags(lo)))
+    return lo;
+  return next_head(lo, inf_get_max_ea());
+}
+
+ea_t HeadSpanWalker::next_in_span(const xsql::U64Span &span, ea_t from) const {
+  if (descending_) {
+    if (from <= static_cast<ea_t>(span.lo))
+      return BADADDR;
+    return prev_head(from, static_cast<ea_t>(span.lo));
+  }
+  if (from >= static_cast<ea_t>(span.hi))
+    return BADADDR;
+  return next_head(from, inf_get_max_ea());
+}
+
+ea_t HeadSpanWalker::next() {
+  while (span_ < spans_.size()) {
+    const xsql::U64Span &span = spans_[span_];
+    const ea_t ea = in_span_ ? next_in_span(span, current_) : first_in_span(span);
+    in_span_ = true;
+    if (ea != BADADDR && static_cast<uint64_t>(ea) >= span.lo &&
+        static_cast<uint64_t>(ea) <= span.hi) {
+      current_ = ea;
+      return ea;
+    }
+    ++span_;
+    in_span_ = false;
+  }
+  current_ = BADADDR;
+  return BADADDR;
 }
 
 // ============================================================================
@@ -34,30 +83,48 @@ std::string safe_func_prototype(ea_t ea) {
 }
 
 std::string safe_func_comment(ea_t ea, bool repeatable) {
-  func_t *f = get_func(ea);
-  if (!f)
-    return "";
-
   qstring out;
-  const ssize_t len = get_func_cmt(&out, f, repeatable);
+  const ssize_t len = idasql_get_func_cmt(&out, ea, repeatable);
   if (len <= 0)
     return "";
   return std::string(out.c_str());
 }
 
-std::string safe_segm_name(segment_t *seg) {
-  if (!seg)
-    return "";
+std::string safe_segm_name(ea_t ea) {
   qstring name;
-  get_segm_name(&name, seg);
+  idasql_segment_name(&name, ea);
   return std::string(name.c_str());
 }
 
-std::string safe_segm_class(segment_t *seg) {
-  if (!seg)
-    return "";
+size_t estimate_heads() {
+  uint64_t total = 0;
+  for (int i = 0; i < get_segm_qty(); ++i) {
+    idasql_segment_info_t seg;
+    if (!idasql_segment_info(idasql_segment_ea_by_num(i), &seg) || seg.end_ea <= seg.start_ea)
+      continue;
+    total += static_cast<uint64_t>(seg.end_ea - seg.start_ea);
+  }
+  return static_cast<size_t>(std::max<uint64_t>(total / 4, 1000));
+}
+
+size_t estimate_code_heads() {
+  uint64_t code = 0;
+  uint64_t all = 0;
+  for (int i = 0; i < get_segm_qty(); ++i) {
+    idasql_segment_info_t seg;
+    if (!idasql_segment_info(idasql_segment_ea_by_num(i), &seg) || seg.end_ea <= seg.start_ea)
+      continue;
+    const uint64_t size = static_cast<uint64_t>(seg.end_ea - seg.start_ea);
+    all += size;
+    if (seg.type == SEG_CODE || (seg.perm & SEGPERM_EXEC) != 0)
+      code += size;
+  }
+  return static_cast<size_t>(std::max<uint64_t>((code != 0 ? code : all) / 4, 1000));
+}
+
+std::string safe_segm_class(ea_t ea) {
   qstring cls;
-  get_segm_class(&cls, seg);
+  idasql_segment_class(&cls, ea);
   return std::string(cls.c_str());
 }
 
@@ -155,9 +222,11 @@ bool parse_int64(const std::string &text, int64_t &out_value) {
   const std::string trimmed = trim_copy(text);
   if (trimmed.empty())
     return false;
+  // Out of range is a failure, never a silent clamp to INT64_MIN/MAX.
+  errno = 0;
   char *end_ptr = nullptr;
   const long long value = std::strtoll(trimmed.c_str(), &end_ptr, 0);
-  if (end_ptr == nullptr || *end_ptr != '\0')
+  if (errno == ERANGE || end_ptr == trimmed.c_str() || *end_ptr != '\0')
     return false;
   out_value = static_cast<int64_t>(value);
   return true;

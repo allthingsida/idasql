@@ -16,11 +16,13 @@
 namespace idasql {
 namespace code {
 
-// cfg_edges table row
+// cfg_edges table row. Canonical edge token: from_addr/to_addr (block start
+// addresses); func_addr is the owning function. (Was from_block/to_block; renamed
+// to the ratified from_addr/to_addr edge token — cross-tool convergence.)
 struct CfgEdgeInfo {
   ea_t func_ea;
-  ea_t from_block;
-  ea_t to_block;
+  ea_t from_addr;
+  ea_t to_addr;
   std::string edge_type; // "normal", "true", "false"
 };
 

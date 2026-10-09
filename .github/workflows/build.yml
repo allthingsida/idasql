@@ -3,10 +3,15 @@ name: build
 on:
   push:
     branches: ["**"]
-    tags: ["v*", "V*"]
+    tags: ["v*"]
   pull_request:
     branches: ["**"]
   workflow_dispatch:
+    inputs:
+      track_main:
+        description: "Canary: build against libxsql/fastmcpp/ida-cmake main instead of the reviewed lock (never packaged)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,13 +21,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  preflight:
+    name: Validate reviewed revisions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout IDASQL
+        uses: actions/checkout@v7
+
+      - name: Validate reviewed revision lock
+        shell: bash
+        run: |
+          jq -e '
+            .schema == 1
+              and (.dependencies.ida_cmake.sha | test("^[0-9a-f]{40}$"))
+              and (.dependencies.libxsql.sha | test("^[0-9a-f]{40}$"))
+              and (.dependencies.fastmcpp.sha | test("^[0-9a-f]{40}$"))
+              and (.ida_sdks["9.2"].ref == "v9.2.0-sdk.1")
+              and (.ida_sdks["9.2"].sha | test("^[0-9a-f]{40}$"))
+              and (.ida_sdks["9.3"].ref == "v9.3.0-sdk.3")
+              and (.ida_sdks["9.3"].sha | test("^[0-9a-f]{40}$"))
+              and (.ida_sdks["9.4"].ref == "v9.4.0-release")
+              and (.ida_sdks["9.4"].sha | test("^[0-9a-f]{40}$"))' \
+            .github/release-revisions.json >/dev/null
+
   build:
     name: Build (IDA ${{ matrix.ida_version }}, ${{ matrix.platform }})
+    needs: preflight
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        # Public CI starts at 9.2 because the 9.1 SDK is not public.
         include:
           - ida: "92"
             ida_version: "9.2"
@@ -31,6 +62,8 @@ jobs:
             platform: linux-x86_64
             plugin_ext: .so
             cli_ext: ""
+            linux_arch_regex: "x86-64|x86_64"
+          # The public 9.2 SDK has no arm64_linux_64 stub libraries.
           - ida: "92"
             ida_version: "9.2"
             sdk_ref: v9.2.0-sdk.1
@@ -55,6 +88,15 @@ jobs:
             platform: linux-x86_64
             plugin_ext: .so
             cli_ext: ""
+            linux_arch_regex: "x86-64|x86_64"
+          - ida: "93"
+            ida_version: "9.3"
+            sdk_ref: v9.3.0-sdk.3
+            runner: ubuntu-24.04-arm
+            platform: linux-arm64
+            plugin_ext: .so
+            cli_ext: ""
+            linux_arch_regex: "ARM aarch64|aarch64"
           - ida: "93"
             ida_version: "9.3"
             sdk_ref: v9.3.0-sdk.3
@@ -79,6 +121,15 @@ jobs:
             platform: linux-x86_64
             plugin_ext: .so
             cli_ext: ""
+            linux_arch_regex: "x86-64|x86_64"
+          - ida: "94"
+            ida_version: "9.4"
+            sdk_ref: v9.4.0-release
+            runner: ubuntu-24.04-arm
+            platform: linux-arm64
+            plugin_ext: .so
+            cli_ext: ""
+            linux_arch_regex: "ARM aarch64|aarch64"
           - ida: "94"
             ida_version: "9.4"
             sdk_ref: v9.4.0-release
@@ -113,15 +164,74 @@ jobs:
       - name: Checkout IDASQL
         uses: actions/checkout@v7
 
+      - name: Read IDASQL version
+        shell: bash
+        run: |
+          version="$(
+            sed -nE \
+              's/^#define[[:space:]]+IDASQL_VERSION_STRING[[:space:]]+"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
+              src/common/idasql_version.hpp
+          )"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Could not read a three-component IDASQL_VERSION_STRING" >&2
+            exit 1
+          fi
+          echo "IDASQL_VERSION=${version}" >> "${GITHUB_ENV}"
+
+      - name: Resolve build revisions
+        shell: pwsh
+        run: |
+          # Every build resolves its dependencies from the reviewed lock, so branch
+          # and PR CI compile exactly what a release tag will. Only the manual
+          # track_main canary follows upstream main, and it is never packaged.
+          $sdkFetchRevision = "${{ matrix.sdk_ref }}"
+          $lock = Get-Content -Raw -LiteralPath `
+            ".github/release-revisions.json" | ConvertFrom-Json
+          $sdkPropertyName = "${{ matrix.ida_version }}"
+          $sdkProperty = $lock.ida_sdks.PSObject.Properties[$sdkPropertyName]
+          if ($null -eq $sdkProperty) {
+            throw "No reviewed IDA SDK revision for ${{ matrix.ida_version }}"
+          }
+          $sdk = $sdkProperty.Value
+          if ($sdk.ref -ne "${{ matrix.sdk_ref }}") {
+            throw "Matrix SDK ref ${{ matrix.sdk_ref }} is not reviewed ($($sdk.ref))"
+          }
+          $expectedSdkSha = $sdk.sha
+          $idaCmakeRevision = $lock.dependencies.ida_cmake.sha
+          $libxsqlRevision = $lock.dependencies.libxsql.sha
+          $fastmcppRevision = $lock.dependencies.fastmcpp.sha
+          if ("${{ inputs.track_main }}" -eq "true") {
+            $idaCmakeRevision = "main"
+            $libxsqlRevision = "main"
+            $fastmcppRevision = "main"
+          }
+
+          $revisions = [ordered]@{
+            IDASQL_SDK_FETCH_REVISION = $sdkFetchRevision
+            IDASQL_EXPECTED_SDK_SHA = $expectedSdkSha
+            IDASQL_IDA_CMAKE_GIT_TAG = $idaCmakeRevision
+            IDASQL_LIBXSQL_GIT_TAG = $libxsqlRevision
+            IDASQL_FASTMCPP_GIT_TAG = $fastmcppRevision
+          }
+          $revisions.GetEnumerator() | ForEach-Object {
+            "$($_.Key)=$($_.Value)" >> $env:GITHUB_ENV
+          }
+
       - name: Checkout IDA SDK
         shell: bash
-        run: >-
-          git clone
-          --branch "${{ matrix.sdk_ref }}"
-          --depth 1
-          --single-branch
-          https://github.com/HexRaysSA/ida-sdk.git
-          "${IDASDK}"
+        run: |
+          git init "${IDASDK}"
+          git -C "${IDASDK}" remote add origin \
+            https://github.com/HexRaysSA/ida-sdk.git
+          git -C "${IDASDK}" fetch --depth 1 origin \
+            "${IDASQL_SDK_FETCH_REVISION}"
+          git -C "${IDASDK}" checkout --detach FETCH_HEAD
+          actual_sdk_sha="$(git -C "${IDASDK}" rev-parse HEAD)"
+          if [[ -n "${IDASQL_EXPECTED_SDK_SHA}" &&
+                "${actual_sdk_sha}" != "${IDASQL_EXPECTED_SDK_SHA}" ]]; then
+            echo "IDA SDK resolved to unreviewed revision ${actual_sdk_sha}; expected ${IDASQL_EXPECTED_SDK_SHA}" >&2
+            exit 1
+          fi
 
       - name: Configure (Linux)
         if: runner.os == 'Linux'
@@ -133,6 +243,9 @@ jobs:
             -DIDASDK="${IDASDK}" \
             -DIDABIN="${IDABIN}" \
             -DIDASQL_TARGET_IDA_VERSION="${{ matrix.ida_version }}" \
+            -DIDASQL_IDA_CMAKE_GIT_TAG="${IDASQL_IDA_CMAKE_GIT_TAG}" \
+            -DIDASQL_LIBXSQL_GIT_TAG="${IDASQL_LIBXSQL_GIT_TAG}" \
+            -DIDASQL_FASTMCPP_GIT_TAG="${IDASQL_FASTMCPP_GIT_TAG}" \
             -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Configure (macOS ARM64)
@@ -146,6 +259,9 @@ jobs:
             -DIDASDK="${IDASDK}" \
             -DIDABIN="${IDABIN}" \
             -DIDASQL_TARGET_IDA_VERSION="${{ matrix.ida_version }}" \
+            -DIDASQL_IDA_CMAKE_GIT_TAG="${IDASQL_IDA_CMAKE_GIT_TAG}" \
+            -DIDASQL_LIBXSQL_GIT_TAG="${IDASQL_LIBXSQL_GIT_TAG}" \
+            -DIDASQL_FASTMCPP_GIT_TAG="${IDASQL_FASTMCPP_GIT_TAG}" \
             -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Configure (Windows native)
@@ -157,6 +273,9 @@ jobs:
             "-DIDASDK=$env:IDASDK" `
             "-DIDABIN=$env:IDABIN" `
             "-DIDASQL_TARGET_IDA_VERSION=${{ matrix.ida_version }}" `
+            "-DIDASQL_IDA_CMAKE_GIT_TAG=$env:IDASQL_IDA_CMAKE_GIT_TAG" `
+            "-DIDASQL_LIBXSQL_GIT_TAG=$env:IDASQL_LIBXSQL_GIT_TAG" `
+            "-DIDASQL_FASTMCPP_GIT_TAG=$env:IDASQL_FASTMCPP_GIT_TAG" `
             -DIDASQL_BUILD_EXAMPLES=ON
 
       - name: Build
@@ -187,10 +306,22 @@ jobs:
           Copy-Item -LiteralPath $cliSource -Destination $artifactCli
 
           $idaCmakeDir = Join-Path $PWD "build/_deps/ida_cmake-src"
+          $libxsqlDir = Join-Path $PWD "build/_deps/libxsql-src"
+          $fastmcppDir = Join-Path $PWD "build/_deps/fastmcpp-src"
           $idaCmakeSha = (git -C $idaCmakeDir rev-parse HEAD).Trim()
           $idaCmakeOrigin = (git -C $idaCmakeDir remote get-url origin).Trim()
           if ($idaCmakeOrigin -notmatch "allthingsida/ida-cmake") {
             throw "Unexpected ida-cmake origin: $idaCmakeOrigin"
+          }
+          $libxsqlSha = (git -C $libxsqlDir rev-parse HEAD).Trim()
+          $libxsqlOrigin = (git -C $libxsqlDir remote get-url origin).Trim()
+          if ($libxsqlOrigin -notmatch "0xeb/libxsql") {
+            throw "Unexpected libxsql origin: $libxsqlOrigin"
+          }
+          $fastmcppSha = (git -C $fastmcppDir rev-parse HEAD).Trim()
+          $fastmcppOrigin = (git -C $fastmcppDir remote get-url origin).Trim()
+          if ($fastmcppOrigin -notmatch "0xeb/fastmcpp") {
+            throw "Unexpected fastmcpp origin: $fastmcppOrigin"
           }
           $sdkSha = (git -C $env:IDASDK rev-parse HEAD).Trim()
 
@@ -205,10 +336,16 @@ jobs:
             platform = "${{ matrix.platform }}"
             ida_cmake_origin = $idaCmakeOrigin
             ida_cmake_sha = $idaCmakeSha
+            libxsql_origin = $libxsqlOrigin
+            libxsql_sha = $libxsqlSha
+            fastmcpp_origin = $fastmcppOrigin
+            fastmcpp_sha = $fastmcppSha
           } | ConvertTo-Json | Set-Content -Encoding utf8 `
               (Join-Path $artifact "build-metadata.json")
 
           "ida-cmake: $idaCmakeSha" >> $env:GITHUB_STEP_SUMMARY
+          "libxsql: $libxsqlSha" >> $env:GITHUB_STEP_SUMMARY
+          "fastmcpp: $fastmcppSha" >> $env:GITHUB_STEP_SUMMARY
           "IDA SDK: $sdkSha (${{ matrix.sdk_ref }})" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Validate manifest and imports
@@ -216,11 +353,24 @@ jobs:
         run: |
           $manifestPath = Join-Path $PWD "artifact/plugin/ida-plugin.json"
           $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-          if ($manifest.plugin.version -ne "0.0.18.1") {
+          if ($manifest.plugin.version -ne $env:IDASQL_VERSION) {
             throw "Unexpected plugin version: $($manifest.plugin.version)"
           }
           if ($manifest.plugin.idaVersions -ne "${{ matrix.ida_version }}") {
             throw "Unexpected IDA version: $($manifest.plugin.idaVersions)"
+          }
+          if ($manifest.plugin.entryPoint -ne "idasql") {
+            throw "Unexpected native entry point: $($manifest.plugin.entryPoint)"
+          }
+          $expectedPlatforms = @(
+            "windows-x86_64",
+            "linux-x86_64",
+            "macos-aarch64"
+          )
+          $platformDifference = Compare-Object `
+            $expectedPlatforms @($manifest.plugin.platforms)
+          if ($platformDifference) {
+            throw "Unexpected HCLI platforms: $($manifest.plugin.platforms)"
           }
 
           $binaries = @(
@@ -230,8 +380,8 @@ jobs:
           foreach ($binary in $binaries) {
             $text = [System.Text.Encoding]::ASCII.GetString(
               [System.IO.File]::ReadAllBytes($binary))
-            if (-not $text.Contains("0.0.18.1")) {
-              throw "Version string 0.0.18.1 not found in $binary"
+            if (-not $text.Contains($env:IDASQL_VERSION)) {
+              throw "Version string $env:IDASQL_VERSION not found in $binary"
             }
             if ("${{ matrix.ida }}" -ne "94" -and
                 $text.Contains("lock_func_range_ea")) {
@@ -244,8 +394,10 @@ jobs:
         shell: bash
         run: |
           file artifact/plugin/idasql.so artifact/cli/idasql
-          file artifact/plugin/idasql.so | grep -Eq 'x86-64|x86_64'
-          file artifact/cli/idasql | grep -Eq 'x86-64|x86_64'
+          file artifact/plugin/idasql.so |
+            grep -Eq '${{ matrix.linux_arch_regex }}'
+          file artifact/cli/idasql |
+            grep -Eq '${{ matrix.linux_arch_regex }}'
 
       - name: Validate macOS architecture
         if: runner.os == 'macOS'
@@ -283,11 +435,30 @@ jobs:
 
   package:
     name: Assemble release archives
+    if: ${{ inputs.track_main != true }}
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     steps:
       - name: Checkout IDASQL
         uses: actions/checkout@v7
+
+      - name: Read IDASQL version
+        id: version
+        shell: bash
+        run: |
+          version="$(
+            sed -nE \
+              's/^#define[[:space:]]+IDASQL_VERSION_STRING[[:space:]]+"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' \
+              src/common/idasql_version.hpp
+          )"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Could not read a three-component IDASQL_VERSION_STRING" >&2
+            exit 1
+          fi
+          echo "value=${version}" >> "${GITHUB_OUTPUT}"
 
       - name: Download build artifacts
         uses: actions/download-artifact@v8
@@ -297,7 +468,13 @@ jobs:
 
       - name: Assemble and validate release archives
         shell: bash
-        run: bash .github/scripts/package-release.sh incoming release
+        run: |
+          bash .github/scripts/package-release.sh incoming release \
+            .github/release-revisions.json
+
+      - name: Validate packaged version
+        shell: bash
+        run: test "$(cat release/VERSION.txt)" = "${{ steps.version.outputs.value }}"
 
       - name: Publish package summary
         shell: bash
@@ -306,7 +483,16 @@ jobs:
           echo '```text' >> "${GITHUB_STEP_SUMMARY}"
           cat release/SHA256SUMS.txt >> "${GITHUB_STEP_SUMMARY}"
           echo '```' >> "${GITHUB_STEP_SUMMARY}"
-          echo "ida-cmake: $(cat release/IDA_CMAKE_SHA.txt)" >> "${GITHUB_STEP_SUMMARY}"
+          echo '### Dependency revisions' >> "${GITHUB_STEP_SUMMARY}"
+          echo '```json' >> "${GITHUB_STEP_SUMMARY}"
+          cat release/DEPENDENCY_REVISIONS.json >> "${GITHUB_STEP_SUMMARY}"
+          echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          if [[ -f release/REVIEWED_REVISIONS.json ]]; then
+            echo '### Reviewed release revisions' >> "${GITHUB_STEP_SUMMARY}"
+            echo '```json' >> "${GITHUB_STEP_SUMMARY}"
+            cat release/REVIEWED_REVISIONS.json >> "${GITHUB_STEP_SUMMARY}"
+            echo '```' >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Upload release archive artifact
         uses: actions/upload-artifact@v7
@@ -321,12 +507,13 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: package
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - name: Require the reviewed release tag
         shell: bash
-        run: test "${GITHUB_REF_NAME}" = "v0.0.18.1"
+        run: test "${GITHUB_REF_NAME}" = "v${{ needs.package.outputs.version }}"
 
       - name: Download release archives
         uses: actions/download-artifact@v8
@@ -340,7 +527,12 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: IDASQL ${{ github.ref_name }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
-            release/idasql-v0.0.18.1-ida92.zip
-            release/idasql-v0.0.18.1-ida93.zip
-            release/idasql-v0.0.18.1-ida94.zip
+            release/*.zip
+            release/SHA256SUMS.txt
+            release/VERSION.txt
+            release/IDA_CMAKE_SHA.txt
+            release/DEPENDENCY_REVISIONS.json
+            release/BUILD_METADATA.json
+            release/REVIEWED_REVISIONS.json

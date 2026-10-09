@@ -58,7 +58,19 @@
 // Platform fixup cleanup (undoes platform.hpp macOS typedef redirects)
 #include <idasql/platform_undef.hpp>
 
-// IDA SDK -- full superset used across the library
+// IDA SDK -- full superset used across the library. The SDK's own header code
+// is compiled with its warnings off: deprecations (pro.h uses std::is_pod,
+// deprecated in C++20; MSVC gets the targeted STL switch from CMake instead),
+// and on MSVC the narrowing/sign conversions in hexrays.hpp and pro.h's
+// WIN32_LEAN_AND_MEAN, which the build already defines. idasql's own calls
+// into deprecated SDK APIs stay errors on 9.4+ (see src/lib/CMakeLists.txt).
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#elif defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable: 4005 4018 4244 4267)
+#endif
 #include <ida.hpp>
 #include <idp.hpp>
 #include <auto.hpp>
@@ -75,6 +87,14 @@
 #include <idalib.hpp>
 #include <kernwin.hpp>
 #include <lines.hpp>
+#include <diskio.hpp>
+// FLIRT signature file headers (absent from the 9.0 GA SDK; see
+// IDASQL_HAS_IDASGN_HEADER in ida_compat.hpp).
+#if defined(__has_include)
+#if __has_include(<libfuncs.hpp>)
+#include <libfuncs.hpp>
+#endif
+#endif
 #include <loader.hpp>
 #include <moves.hpp>
 #include <nalt.hpp>
@@ -86,6 +106,11 @@
 #include <typeinf.hpp>
 #include <ua.hpp>
 #include <xref.hpp>
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 // IDA SDK's pro.h defines: #define strtoull _strtoui64  (VS2010 compat shim).
 // Modern MSVC has strtoull natively, and the macro breaks nlohmann/json which
@@ -95,7 +120,8 @@
 #undef strtoull
 #endif
 
-// Cross-SDK feature macros, fallbacks, and inline wrappers (e.g.
-// idasql_auto_wait). Must come AFTER the IDA SDK headers so it can probe
-// for SDK-defined macros (HTI_SEMICOLON, etc.).
+// Cross-SDK feature macros, fallbacks and wrappers (e.g. idasql_auto_wait).
+// Must come AFTER the IDA SDK headers (it probes SDK-defined macros such as
+// HTI_SEMICOLON) and after <hexrays.hpp> (its decompiler wrappers are declared
+// only when that header was included first).
 #include "ida_compat.hpp"
