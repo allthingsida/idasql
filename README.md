@@ -2,6 +2,13 @@
 
 **Give any AI agent the ability to understand compiled binaries.**
 
+<p align="center">
+  <a href="https://github.com/allthingsida/idasql/releases/latest"><img alt="Download IDASQL" src="https://img.shields.io/badge/Download-IDASQL-1e6fd9?style=for-the-badge"></a>
+  <a href="https://paypal.me/EliasBachaalany"><img alt="Donate with PayPal" src="https://img.shields.io/badge/Donate-PayPal-0070e0?style=for-the-badge&logo=paypal&logoColor=white"></a>
+  <a href="https://buymeacoffee.com/0xeb"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy_Me_a_Coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black"></a>
+  <a href="https://github.com/allthingsida/idasql"><img alt="Star IDASQL on GitHub" src="https://img.shields.io/github/stars/allthingsida/idasql?style=for-the-badge&logo=github&label=Star&color=24292f"></a>
+</p>
+
 IDASQL is a SQL interface for IDA Pro databases, created by [Elias Bachaalany](https://github.com/0xeb). It exposes 30+ virtual tables covering functions, cross-references, strings, types, imports, disassembly, and decompilation. Use `/idasql` skills from your coding agent to work fully headlessly -- the agent runs IDA in the background for you -- or open IDA's UI and collaborate with your coding agent to reverse engineer together. No IDAPython. No scripting. Just SQL.
 
 > **Why SQL?** SQL is the universal query language that every AI agent already speaks. IDASQL is agent-agnostic: Claude, ChatGPT, Copilot, Cursor, custom agents, or no agent at all. Any tool that can issue a SQL query can analyze a binary.
@@ -599,6 +606,18 @@ same `SELECT name, size FROM funcs ORDER BY size DESC LIMIT 10` runs everywhere.
 - **[fastmcpp](https://github.com/0xeb/fastmcpp)** - Optional MCP server implementation used when building with `-DIDASQL_WITH_MCP=ON`.
 
 - **[ida-hcli](https://github.com/HexRaysSA/ida-hcli)** (MIT, Hex-Rays SA) - the `idasql link` IPC client, launch and URL-handler behavior is reimplemented in C++ from hcli's; idasql does not need hcli installed.
+
+## Support IDASQL
+
+IDASQL is free to use, including commercially. If it saves you time in IDA, a donation funds the next release, and a star helps other reverse engineers find it.
+
+<p>
+  <a href="https://paypal.me/EliasBachaalany"><img alt="Donate with PayPal" src="https://img.shields.io/badge/Donate-PayPal-0070e0?style=for-the-badge&logo=paypal&logoColor=white"></a>
+  <a href="https://buymeacoffee.com/0xeb"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy_Me_a_Coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black"></a>
+  <a href="https://github.com/allthingsida/idasql"><img alt="Star IDASQL on GitHub" src="https://img.shields.io/github/stars/allthingsida/idasql?style=for-the-badge&logo=github&label=Star&color=24292f"></a>
+</p>
+
+Bug reports with a database and the exact query are just as valuable. Most fixes in this release started that way.
 
 ## License and Terms of Use
 
