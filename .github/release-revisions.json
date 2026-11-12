@@ -3,7 +3,7 @@
   "dependencies": {
     "ida_cmake": {
       "repository": "https://github.com/allthingsida/ida-cmake.git",
-      "sha": "6765caede748d01599d634b114914734e37957f7"
+      "sha": "baa65ce5f170ef49027fea58da3e294f87b4960f"
     },
     "libxsql": {
       "repository": "https://github.com/0xeb/libxsql.git",
