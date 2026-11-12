@@ -16,11 +16,6 @@ using namespace idasql::core;
 namespace idasql {
 namespace code {
 
-// One row per natural-loop back edge: a latch -> header edge where the header
-// dominates the latch (the `loops` table's definition). Address order is not
-// used: a forward jump into a lower-addressed tail or cold block is not a loop.
-// func_ea must be a function's entry address (a function key, as on every
-// table); loop_id is the header's block index.
 void collect_loops_for_func(std::vector<LoopInfo> &loops, ea_t func_ea) {
   if (!idasql_is_func_start(func_ea))
     return;
@@ -40,10 +35,6 @@ void collect_loops_for_func(std::vector<LoopInfo> &loops, ea_t func_ea) {
     loops.push_back(li);
   }
 }
-
-// ============================================================================
-// DisasmCallsInFuncIterator
-// ============================================================================
 
 class LoopsInFuncIterator : public xsql::RowIterator {
   std::vector<LoopInfo> loops_;
@@ -106,10 +97,6 @@ public:
   }
 };
 
-// ============================================================================
-// DisasmLoopsGenerator
-// ============================================================================
-
 class DisasmLoopsGenerator : public xsql::Generator<LoopInfo> {
   size_t func_idx_ = 0;
   std::vector<LoopInfo> loops_;
@@ -149,15 +136,10 @@ public:
   }
 
   const LoopInfo &current() const override { return loops_[idx_]; }
-  // (function, back edge index): the same on the full scan and the pushdown.
   int64_t rowid() const override {
     return idasql::detail::pack_function_rowid(loops_[idx_].func_addr, idx_);
   }
 };
-
-// ============================================================================
-// Table definitions
-// ============================================================================
 
 GeneratorTableDef<LoopInfo> define_disasm_loops() {
   return generator_table<LoopInfo>("disasm_loops")
@@ -189,9 +171,5 @@ GeneratorTableDef<LoopInfo> define_disasm_loops() {
       .build();
 }
 
-// ============================================================================
-// Helper: get callees/callers of a function
-// ============================================================================
-
-} // namespace code
-} // namespace idasql
+}
+}

@@ -12,10 +12,6 @@ using namespace idasql::core;
 namespace idasql {
 namespace symbols {
 
-// ============================================================================
-// COMMENTS Table (with UPDATE/DELETE support)
-// ============================================================================
-
 void collect_comment_rows(std::vector<CommentRow> &rows) {
   rows.clear();
 
@@ -50,7 +46,6 @@ CachedTableDef<CommentRow> define_comments() {
       .cache_builder(
           [](std::vector<CommentRow> &rows) { collect_comment_rows(rows); })
       .row_populator([](CommentRow &row, int argc, xsql::FunctionArg *argv) {
-        // argv[2]=addr, argv[3]=comment, argv[4]=rpt_comment
         if (argc > 2)
           row.ea = static_cast<ea_t>(argv[2].as_int64());
         if (argc > 3 && !argv[3].is_null()) {
@@ -71,8 +66,6 @@ CachedTableDef<CommentRow> define_comments() {
           [](const CommentRow &row) -> std::string { return row.comment; },
           [](CommentRow &row, const char *new_cmt) -> bool {
             const std::string requested = new_cmt ? new_cmt : "";
-            // Idempotent: read current comment from IDA to skip no-ops
-            // (row_populator means row.comment has argv values, not IDA state)
             qstring cur;
             get_cmt(&cur, row.ea, false);
             if (requested == std::string(cur.c_str())) return true;
@@ -157,5 +150,5 @@ CachedTableDef<CommentRow> define_comments() {
       .build();
 }
 
-} // namespace symbols
-} // namespace idasql
+}
+}

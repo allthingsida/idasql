@@ -37,11 +37,6 @@
 namespace idasql {
 namespace functions {
 
-// ============================================================================
-// Disassembly Functions
-// ============================================================================
-
-// Helper: render a generated listing line (with address prefix) for one head.
 static bool render_disasm_line(ea_t addr, int gflags, std::string& out) {
     qstring line;
     if (!generate_disasm_line(&line, addr, gflags)) {
@@ -55,7 +50,6 @@ static bool render_disasm_line(ea_t addr, int gflags, std::string& out) {
     return true;
 }
 
-// Helper: disassemble all heads in [start, end)
 static std::string disasm_range_impl(ea_t start, ea_t end) {
     std::ostringstream result;
     ea_t addr = start;
@@ -72,8 +66,6 @@ static std::string disasm_range_impl(ea_t start, ea_t end) {
     return result.str();
 }
 
-// disasm(address) - Get single disassembly line
-// disasm(address, count) - Get multiple lines
 static void sql_disasm(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
         ctx.result_error("disasm requires at least 1 argument (address)");
@@ -90,7 +82,7 @@ static void sql_disasm(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* 
     }
     int count = static_cast<int>(count_arg);
     if (count < 1) count = 1;
-    if (count > 1000) count = 1000;  // Safety limit
+    if (count > 1000) count = 1000;
 
     std::ostringstream result;
     for (int i = 0; i < count && ea != BADADDR; i++) {
@@ -106,8 +98,6 @@ static void sql_disasm(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* 
     ctx.result_text(str);
 }
 
-// disasm_at(address) - Canonical listing line for containing head (code or data)
-// disasm_at(address, context) - Listing line with +/- context heads
 static void sql_disasm_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1 || argc > 2) {
         ctx.result_error("disasm_at requires 1-2 arguments (address, [context])");
@@ -124,7 +114,7 @@ static void sql_disasm_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
     }
     int context = static_cast<int>(context_arg);
     if (context < 0) context = 0;
-    if (context > 64) context = 64;  // Safety cap
+    if (context > 64) context = 64;
 
     if (ea == BADADDR || ea == 0) {
         ctx.result_null();
@@ -190,7 +180,6 @@ static void sql_disasm_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
     text.empty() ? ctx.result_null() : ctx.result_text(text);
 }
 
-// disasm_range(start, end) - Disassemble all heads in address range [start, end)
 static void sql_disasm_range(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
         ctx.result_error("disasm_range requires 2 arguments (start, end)");
@@ -208,7 +197,6 @@ static void sql_disasm_range(xsql::FunctionContext& ctx, int argc, xsql::Functio
     str.empty() ? ctx.result_null() : ctx.result_text(str);
 }
 
-// disasm_func(address) - Disassemble entire function containing address
 static void sql_disasm_func(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
         ctx.result_error("disasm_func requires 1 argument (address)");
@@ -223,9 +211,6 @@ static void sql_disasm_func(xsql::FunctionContext& ctx, int argc, xsql::Function
         ctx.result_null();
         return;
     }
-    // A function may own tail chunks outside [start_ea, end_ea): walk every
-    // chunk (entry first, then tails in address order) and mark each tail so
-    // the reader sees the discontinuity instead of one contiguous listing.
     const std::string owner_name = core::safe_func_name(owner_ea);
     std::string str;
     idasql_for_each_func_chunk(owner_ea, [&](const range_t& chunk, bool is_entry) {
@@ -246,12 +231,6 @@ static void sql_disasm_func(xsql::FunctionContext& ctx, int argc, xsql::Function
     str.empty() ? ctx.result_null() : ctx.result_text(str);
 }
 
-// ============================================================================
-// Bytes Functions
-// ============================================================================
-
-// load_file_bytes(path, file_offset, address, size [, patchable])
-// Load bytes from a file into the IDB at the target address range.
 static void sql_load_file_bytes(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4 || argc > 5) {
         ctx.result_error("load_file_bytes requires 4-5 arguments (path, file_offset, address, size, [patchable])");
@@ -333,7 +312,6 @@ static uint64_t item_size_or_one(ea_t ea) {
     return static_cast<uint64_t>(sz);
 }
 
-// Try to create one instruction at EA and return decoded size on success.
 static int create_instruction_at(ea_t ea) {
     if (ea == BADADDR || ea == 0) return 0;
 
@@ -368,7 +346,6 @@ static int make_code_range_impl(ea_t start, ea_t end) {
     return created;
 }
 
-// make_code(address) - Create instruction at one address (idempotent).
 static void sql_make_code(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
         ctx.result_error("make_code requires 1 argument (address)");
@@ -395,7 +372,6 @@ static void sql_make_code(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
     ctx.result_int(len > 0 ? 1 : 0);
 }
 
-// make_code_range(start, end) - Create instructions in [start, end).
 static void sql_make_code_range(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
         ctx.result_error("make_code_range requires 2 arguments (start, end)");
@@ -420,8 +396,6 @@ static void sql_make_code_range(xsql::FunctionContext& ctx, int argc, xsql::Func
     ctx.result_int(created);
 }
 
-// parse_decls(text) - Import C declarations into local types
-// Returns: 1 on success, 0 on parse errors
 static void sql_parse_decls(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
         ctx.result_error("parse_decls requires 1 argument (declarations)");
@@ -434,12 +408,10 @@ static void sql_parse_decls(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    // Allow redeclarations while keeping parser behavior deterministic.
-    const int errors = parse_decls(nullptr, decls, nullptr, HTI_DCL | HTI_HIGH | HTI_SEMICOLON);
+    const int errors = parse_decls(nullptr, decls, nullptr, HTI_DCL | HTI_HIGH | HTI_SEMICOLON | HTI_NDC);
     ctx.result_int(errors == 0 ? 1 : 0);
 }
 
-// call_arg_addrs(call_addr) - Get persisted argument-loader addresses for a typed call site
 static void sql_call_arg_addrs(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
         ctx.result_error("call_arg_addrs requires 1 argument (call_addr)");
@@ -465,10 +437,6 @@ static void sql_call_arg_addrs(xsql::FunctionContext& ctx, int argc, xsql::Funct
     ctx.result_text(arr.dump());
 }
 
-// ============================================================================
-// Decompiler Functions (Optional - requires Hex-Rays)
-// ============================================================================
-
 inline bool is_ident_char(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
 }
@@ -481,18 +449,16 @@ inline bool starts_with_keyword(const std::string& s, const char* kw) {
     return std::isspace(static_cast<unsigned char>(s[n])) != 0;
 }
 
-// Extract declaration variable name candidate from a pseudocode line.
-// This is intentionally conservative: it only marks declaration-like lines.
 inline int find_decl_lvar_index(const std::string& line,
                                 const std::unordered_map<std::string, int>& lvar_name_to_idx) {
     size_t semi = line.find(';');
     if (semi == std::string::npos) return -1;
 
     size_t open_paren = line.find('(');
-    if (open_paren != std::string::npos && open_paren < semi) return -1;  // for/if/function sig
+    if (open_paren != std::string::npos && open_paren < semi) return -1;
 
     size_t eq = line.find('=');
-    if (eq != std::string::npos && eq < semi) return -1;  // assignment
+    if (eq != std::string::npos && eq < semi) return -1;
 
     std::string prefix = line.substr(0, semi);
     size_t sl_comment = prefix.find("//");
@@ -518,7 +484,6 @@ inline int find_decl_lvar_index(const std::string& line,
     size_t end = prefix.find_last_not_of(" \t");
     if (end == std::string::npos) return -1;
 
-    // Skip trailing array suffixes.
     while (end > 0 && prefix[end] == ']') {
         size_t lb = prefix.find_last_of('[', end);
         if (lb == std::string::npos || lb == 0) break;
@@ -539,7 +504,6 @@ inline int find_decl_lvar_index(const std::string& line,
     return it->second;
 }
 
-// Render pseudocode lines with ea prefixes and declaration-only lvar idx hints.
 static std::string render_pseudocode(cfuncptr_t& cfunc) {
     const strvec_t& sv = cfunc->get_pseudocode();
     std::ostringstream result;
@@ -589,10 +553,6 @@ static std::string render_pseudocode(cfuncptr_t& cfunc) {
     return result.str();
 }
 
-// decompile(address) - Get decompiled pseudocode (runtime Hex-Rays detection)
-// Uses decompiler::hexrays_available() set during DecompilerRegistry::register_all()
-// microcode_error(func_addr [, maturity]): the Hex-Rays failure that keeps a
-// function out of the microcode tables, or NULL when it lifts.
 static void sql_microcode_error(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     ea_t ea = BADADDR;
     if (!resolve_address_arg(ctx, argv, 0, "func_addr", ea)) {
@@ -619,7 +579,6 @@ static void sql_decompile(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
         return;
     }
 
-    // Check cached Hex-Rays availability (set during DecompilerRegistry::register_all)
     if (!decompiler::hexrays_available()) {
         ctx.result_error("Decompiler not available (requires Hex-Rays license)");
         return;
@@ -648,9 +607,6 @@ static void sql_decompile(xsql::FunctionContext& ctx, int argc, xsql::FunctionAr
     ctx.result_text(str);
 }
 
-// decompile(address, refresh) - Get decompiled pseudocode with optional cache invalidation
-// When refresh=1, invalidates the cached decompilation before decompiling.
-// Use after renaming functions or local variables to get fresh pseudocode.
 static void sql_decompile_2(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
         ctx.result_error("decompile requires 2 arguments (address, refresh)");
@@ -694,11 +650,6 @@ static void sql_decompile_2(xsql::FunctionContext& ctx, int argc, xsql::Function
     ctx.result_text(str);
 }
 
-// ============================================================================
-// File Generation Functions
-// ============================================================================
-
-// Helper: Generate file using ida_loader.gen_file
 static int gen_file_helper(ofile_type_t ofile_type, const char* filepath, ea_t ea1, ea_t ea2, int flags) {
     qstring path(filepath);
     FILE* fp = qfopen(path.c_str(), "w");
@@ -709,7 +660,6 @@ static int gen_file_helper(ofile_type_t ofile_type, const char* filepath, ea_t e
     return result;
 }
 
-// gen_listing(path) - Generate full-database listing file
 static void sql_gen_listing(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc != 1) {
         ctx.result_error("gen_listing requires 1 argument (path)");
@@ -728,7 +678,6 @@ static void sql_gen_listing(xsql::FunctionContext& ctx, int argc, xsql::Function
     ctx.result_int(result);
 }
 
-// gen_cfg_dot(address) - Generate CFG as DOT string
 static void sql_gen_cfg_dot(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
         ctx.result_error("gen_cfg_dot requires 1 argument (func_address)");
@@ -745,7 +694,6 @@ static void sql_gen_cfg_dot(xsql::FunctionContext& ctx, int argc, xsql::Function
         return;
     }
 
-    // Build DOT representation using FlowChart
     idasql_flow_chart fc;
     fc.create_func(func_start, FC_NOEXT);
 
@@ -760,7 +708,6 @@ static void sql_gen_cfg_dot(xsql::FunctionContext& ctx, int argc, xsql::Function
     dot << "  node [shape=box, fontname=\"Courier\"];\n";
     dot << "  label=\"" << func_name.c_str() << "\";\n\n";
 
-    // Emit nodes
     for (int i = 0; i < fc.size(); i++) {
         const qbasic_block_t& bb = fc.blocks[i];
         dot << "  n" << i << " [label=\"";
@@ -770,7 +717,6 @@ static void sql_gen_cfg_dot(xsql::FunctionContext& ctx, int argc, xsql::Function
 
     dot << "\n";
 
-    // Emit edges
     for (int i = 0; i < fc.size(); i++) {
         const qbasic_block_t& bb = fc.blocks[i];
         for (size_t j = 0; j < bb.succ.size(); j++) {
@@ -784,7 +730,6 @@ static void sql_gen_cfg_dot(xsql::FunctionContext& ctx, int argc, xsql::Function
     ctx.result_text(str);
 }
 
-// gen_cfg_dot_file(address, path) - Generate CFG DOT to file
 static void sql_gen_cfg_dot_file(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
         ctx.result_error("gen_cfg_dot_file requires 2 arguments (func_address, path)");
@@ -807,7 +752,6 @@ static void sql_gen_cfg_dot_file(xsql::FunctionContext& ctx, int argc, xsql::Fun
         return;
     }
 
-    // Build DOT using FlowChart
     idasql_flow_chart fc;
     fc.create_func(func_start, FC_NOEXT);
 
@@ -827,7 +771,6 @@ static void sql_gen_cfg_dot_file(xsql::FunctionContext& ctx, int argc, xsql::Fun
     qfprintf(fp, "  node [shape=box, fontname=\"Courier\"];\n");
     qfprintf(fp, "  label=\"%s\";\n\n", func_name.c_str());
 
-    // Emit nodes
     for (int i = 0; i < fc.size(); i++) {
         const qbasic_block_t& bb = fc.blocks[i];
         qfprintf(fp, "  n%d [label=\"0x%llX - 0x%llX\"];\n",
@@ -836,7 +779,6 @@ static void sql_gen_cfg_dot_file(xsql::FunctionContext& ctx, int argc, xsql::Fun
 
     qfprintf(fp, "\n");
 
-    // Emit edges
     for (int i = 0; i < fc.size(); i++) {
         const qbasic_block_t& bb = fc.blocks[i];
         for (size_t j = 0; j < bb.succ.size(); j++) {
@@ -847,7 +789,7 @@ static void sql_gen_cfg_dot_file(xsql::FunctionContext& ctx, int argc, xsql::Fun
     qfprintf(fp, "}\n");
     qfclose(fp);
 
-    ctx.result_int(1);  // Success
+    ctx.result_int(1);
 }
 
 static std::string escape_sql_text(const char* in) {
@@ -860,8 +802,6 @@ static std::string escape_sql_text(const char* in) {
     return escaped;
 }
 
-// gen_schema_dot(db) - Generate DOT diagram of all tables
-// This uses SQLite introspection to build the schema
 static void sql_gen_schema_dot(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     (void)argc;
     (void)argv;
@@ -872,7 +812,6 @@ static void sql_gen_schema_dot(xsql::FunctionContext& ctx, int argc, xsql::Funct
     dot << "  node [shape=record, fontname=\"Helvetica\", fontsize=10];\n";
     dot << "  edge [fontname=\"Helvetica\", fontsize=8];\n\n";
 
-    // Query all tables from sqlite_master
     std::vector<std::string> tables;
     std::string schema_err;
     if (!ctx.query_each(
@@ -884,7 +823,6 @@ static void sql_gen_schema_dot(xsql::FunctionContext& ctx, int argc, xsql::Funct
 
                 tables.push_back(name);
 
-                // Get column info for this table
                 std::string pragma = "PRAGMA table_info('" + escape_sql_text(name.c_str()) + "')";
                 bool emitted = false;
                 bool first = true;
@@ -915,10 +853,8 @@ static void sql_gen_schema_dot(xsql::FunctionContext& ctx, int argc, xsql::Funct
         return;
     }
 
-    // Add relationships based on naming conventions
     dot << "\n  // Relationships (inferred from naming)\n";
 
-    // Common relationships in IDA
     for (const auto& t : tables) {
         if (t == "funcs" || t == "funcs_live") {
             dot << "  segments -> " << t << " [label=\"contains\"];\n";
@@ -947,7 +883,6 @@ static void sql_gen_schema_dot(xsql::FunctionContext& ctx, int argc, xsql::Funct
     ctx.result_text(str);
 }
 
-// trim_copy is now in <idasql/string_utils.hpp>
 using idasql::trim_copy;
 
 static bool parse_int_token(const std::string& token, int& out_value) {
@@ -965,12 +900,12 @@ static bool parse_union_path_spec(const char* spec, intvec_t& out_path, std::str
     out_path.clear();
 
     if (!spec) {
-        return true;  // Empty path clears selection.
+        return true;
     }
 
     const std::string text = trim_copy(spec);
     if (text.empty()) {
-        return true;  // Empty path clears selection.
+        return true;
     }
 
     if (!text.empty() && text[0] == '[') {
@@ -1345,12 +1280,11 @@ static bool synthesize_numform_from_operand_representation(ea_t target_ea, int o
 static bool set_user_numform_at_ea(ea_t requested_func_addr, ea_t target_ea, int opnum, const code::OperandApplyRequest& req) {
     if (!decompiler::hexrays_available()) return false;
     if (opnum < 0 || opnum >= UA_MAXOP) return false;
-    if (req.kind == code::OperandApplyKind::None) return true;  // Explicit no-op for empty spec.
+    if (req.kind == code::OperandApplyKind::None) return true;
 
     ea_t func_addr = BADADDR;
     if (!normalize_func_for_ea(requested_func_addr, target_ea, func_addr)) return false;
 
-    // Keep disassembly and decompiler layers consistent first.
     if (!code::apply_operand_representation(target_ea, opnum, req)) return false;
 
     user_numforms_t* numforms = nullptr;
@@ -1456,8 +1390,6 @@ static std::string numform_to_json(ea_t target_ea, int opnum, const number_forma
     return obj.dump();
 }
 
-// set_union_selection(func_addr, addr, path) - Set/clear union selection path at addr.
-// path format: JSON array (e.g. "[0,1]") or CSV ("0,1"); empty/null clears.
 static void sql_set_union_selection(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
         ctx.result_error("set_union_selection requires 3 arguments (func_addr, addr, path)");
@@ -1485,7 +1417,6 @@ static void sql_set_union_selection(xsql::FunctionContext& ctx, int argc, xsql::
     ctx.result_int(ok ? 1 : 0);
 }
 
-// set_union_selection_item(func_addr, item_id, path) - Set/clear by ctree item id.
 static void sql_set_union_selection_item(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
         ctx.result_error("set_union_selection_item requires 3 arguments (func_addr, item_id, path)");
@@ -1514,7 +1445,6 @@ static void sql_set_union_selection_item(xsql::FunctionContext& ctx, int argc, x
     ctx.result_int(ok ? 1 : 0);
 }
 
-// get_union_selection(func_addr, addr) - Get union path JSON at addr, or NULL if unset.
 static void sql_get_union_selection(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
         ctx.result_error("get_union_selection requires 2 arguments (func_addr, addr)");
@@ -1540,7 +1470,6 @@ static void sql_get_union_selection(xsql::FunctionContext& ctx, int argc, xsql::
     ctx.result_text(union_path_to_json(path));
 }
 
-// get_union_selection_item(func_addr, item_id) - Get union path JSON by ctree item id.
 static void sql_get_union_selection_item(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
         ctx.result_error("get_union_selection_item requires 2 arguments (func_addr, item_id)");
@@ -1572,7 +1501,6 @@ static void sql_get_union_selection_item(xsql::FunctionContext& ctx, int argc, x
     ctx.result_text(union_path_to_json(path));
 }
 
-// set_union_selection_addr_arg(func_addr, addr, arg_idx, path[, callee]) - Resolve arg item by call-site coordinate.
 static void sql_set_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4) {
         ctx.result_error("set_union_selection_addr_arg requires 4-5 arguments (func_addr, addr, arg_idx, path, [callee])");
@@ -1612,7 +1540,6 @@ static void sql_set_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc,
     ctx.result_int(ok ? 1 : 0);
 }
 
-// get_union_selection_addr_arg(func_addr, addr, arg_idx[, callee]) - Resolve arg item and read union selection.
 static void sql_get_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
         ctx.result_error("get_union_selection_addr_arg requires 3-4 arguments (func_addr, addr, arg_idx, [callee])");
@@ -1655,7 +1582,6 @@ static void sql_get_union_selection_ea_arg(xsql::FunctionContext& ctx, int argc,
     ctx.result_text(union_path_to_json(path));
 }
 
-// call_arg_item(func_addr, addr, arg_idx[, callee]) - Resolve call-arg coordinate to explicit ctree arg_item_id.
 static void sql_call_arg_item(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
         ctx.result_error("call_arg_item requires 3-4 arguments (func_addr, addr, arg_idx, [callee])");
@@ -1686,7 +1612,6 @@ static void sql_call_arg_item(xsql::FunctionContext& ctx, int argc, xsql::Functi
     ctx.result_int(resolved.arg_item_id);
 }
 
-// ctree_item_at(func_addr, addr[, op_name[, nth]]) - Resolve generic expression coordinate to ctree item id.
 static void sql_ctree_item_at(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
         ctx.result_error("ctree_item_at requires 2-4 arguments (func_addr, addr, [op_name], [nth])");
@@ -1719,7 +1644,6 @@ static void sql_ctree_item_at(xsql::FunctionContext& ctx, int argc, xsql::Functi
     ctx.result_int(resolved.item_id);
 }
 
-// set_union_selection_addr_expr(func_addr, addr, path[, op_name[, nth]]) - Resolve expr item and set/clear path.
 static void sql_set_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
         ctx.result_error("set_union_selection_addr_expr requires 3-5 arguments (func_addr, addr, path, [op_name], [nth])");
@@ -1761,7 +1685,6 @@ static void sql_set_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc
     ctx.result_int(ok ? 1 : 0);
 }
 
-// get_union_selection_addr_expr(func_addr, addr[, op_name[, nth]]) - Resolve expr item and read union path JSON.
 static void sql_get_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 2) {
         ctx.result_error("get_union_selection_addr_expr requires 2-4 arguments (func_addr, addr, [op_name], [nth])");
@@ -1806,11 +1729,6 @@ static void sql_get_union_selection_ea_expr(xsql::FunctionContext& ctx, int argc
     ctx.result_text(union_path_to_json(path));
 }
 
-// set_numform(func_addr, addr, opnum, spec) - Set/clear decompiler number format at addr/opnum.
-// spec format matches instructions.operand*_format_spec:
-//   clear | plain | none
-//   enum:<enum_name>[,serial=<n>]
-//   stroff:<udt[/nested_udt...]>[,delta=<n>]
 static void sql_set_numform(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4) {
         ctx.result_error("set_numform requires 4 arguments (func_addr, addr, opnum, spec)");
@@ -1842,7 +1760,6 @@ static void sql_set_numform(xsql::FunctionContext& ctx, int argc, xsql::Function
     ctx.result_int(ok ? 1 : 0);
 }
 
-// set_numform_item(func_addr, item_id, opnum, spec) - Set/clear number format by ctree item.
 static void sql_set_numform_item(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4) {
         ctx.result_error("set_numform_item requires 4 arguments (func_addr, item_id, opnum, spec)");
@@ -1881,7 +1798,6 @@ static void sql_set_numform_item(xsql::FunctionContext& ctx, int argc, xsql::Fun
     ctx.result_int(ok ? 1 : 0);
 }
 
-// set_numform_addr_arg(func_addr, addr, arg_idx, opnum, spec[, callee]) - Resolve arg item by call-site coordinate.
 static void sql_set_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 5) {
         ctx.result_error("set_numform_addr_arg requires 5-6 arguments (func_addr, addr, arg_idx, opnum, spec, [callee])");
@@ -1931,7 +1847,6 @@ static void sql_set_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::F
     ctx.result_int(ok ? 1 : 0);
 }
 
-// set_numform_addr_expr(func_addr, addr, opnum, spec[, op_name[, nth]]) - Resolve expr item and set/clear numform.
 static void sql_set_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4) {
         ctx.result_error("set_numform_addr_expr requires 4-6 arguments (func_addr, addr, opnum, spec, [op_name], [nth])");
@@ -1983,7 +1898,6 @@ static void sql_set_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::
     ctx.result_int(ok ? 1 : 0);
 }
 
-// get_numform(func_addr, addr, opnum) - Get decompiler number format JSON at addr/opnum, or NULL if unset.
 static void sql_get_numform(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
         ctx.result_error("get_numform requires 3 arguments (func_addr, addr, opnum)");
@@ -2013,7 +1927,6 @@ static void sql_get_numform(xsql::FunctionContext& ctx, int argc, xsql::Function
     ctx.result_text(numform_to_json(target_ea, opnum, nf));
 }
 
-// get_numform_item(func_addr, item_id, opnum) - Get number format JSON by ctree item, or NULL if unset.
 static void sql_get_numform_item(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
         ctx.result_error("get_numform_item requires 3 arguments (func_addr, item_id, opnum)");
@@ -2050,7 +1963,6 @@ static void sql_get_numform_item(xsql::FunctionContext& ctx, int argc, xsql::Fun
     ctx.result_text(numform_to_json(target_ea, opnum, nf));
 }
 
-// get_numform_addr_arg(func_addr, addr, arg_idx, opnum[, callee]) - Resolve arg item and return numform JSON.
 static void sql_get_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 4) {
         ctx.result_error("get_numform_addr_arg requires 4-5 arguments (func_addr, addr, arg_idx, opnum, [callee])");
@@ -2097,7 +2009,6 @@ static void sql_get_numform_ea_arg(xsql::FunctionContext& ctx, int argc, xsql::F
     ctx.result_text(numform_to_json(item_ea, opnum, nf));
 }
 
-// get_numform_addr_expr(func_addr, addr, opnum[, op_name[, nth]]) - Resolve expr item and return numform JSON.
 static void sql_get_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 3) {
         ctx.result_error("get_numform_addr_expr requires 3-5 arguments (func_addr, addr, opnum, [op_name], [nth])");
@@ -2146,116 +2057,9 @@ static void sql_get_numform_ea_expr(xsql::FunctionContext& ctx, int argc, xsql::
     ctx.result_text(numform_to_json(item_ea, opnum, nf));
 }
 
-// ============================================================================
-// IDAPython Execution Functions
-// ============================================================================
-
-static bool ensure_idapython_enabled(xsql::FunctionContext& ctx) {
-    if (python_bridge::in_bridge_call()) {
-        // This SQL was issued from Python through `import idasql`, i.e. from an
-        // IDC call IDAPython is still inside. Running Python again from here
-        // crashes IDA (measured: access violation), so refuse it.
-        ctx.result_error("idapython_snippet/idapython_file cannot run inside a query issued "
-                         "from Python through `import idasql` (IDAPython is not re-entrant here)");
-        return false;
-    }
-    if (runtime_settings().enable_idapython()) {
-        // Make `import idasql` available to the code about to run: under idalib
-        // IDAPython can load after the engine, so the module is injected lazily.
-        (void)python_bridge::ensure_python_module(nullptr);
-        return true;
-    }
-    ctx.result_error("idapython is disabled (enable via UPDATE runtime_settings "
-                     "SET value='1' WHERE key='enable_idapython')");
-    return false;
-}
-
-static void sql_idapython_snippet(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 1 || argc > 2) {
-        ctx.result_error("idapython_snippet requires 1-2 arguments (code, [sandbox])");
-        return;
-    }
-    if (!ensure_idapython_enabled(ctx)) {
-        return;
-    }
-
-    const char* code = argv[0].as_c_str();
-    if (code == nullptr || code[0] == '\0') {
-        ctx.result_error("idapython_snippet requires non-empty code");
-        return;
-    }
-
-    std::string sandbox;
-    if (argc >= 2 && !argv[1].is_null()) {
-        const char* raw_sandbox = argv[1].as_c_str();
-        if (raw_sandbox != nullptr) {
-            sandbox = raw_sandbox;
-        }
-    }
-
-    idapython::ExecutionResult result = idapython::execute_snippet(code, sandbox);
-    if (!result.success) {
-        ctx.result_error(result.error.empty() ? "idapython_snippet failed" : result.error);
-        return;
-    }
-    ctx.result_text(result.output);
-}
-
-static void sql_idapython_file(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc < 1 || argc > 2) {
-        ctx.result_error("idapython_file requires 1-2 arguments (path, [sandbox])");
-        return;
-    }
-    if (!ensure_idapython_enabled(ctx)) {
-        return;
-    }
-
-    const char* path = argv[0].as_c_str();
-    if (path == nullptr || path[0] == '\0') {
-        ctx.result_error("idapython_file requires non-empty path");
-        return;
-    }
-
-    std::string sandbox;
-    if (argc >= 2 && !argv[1].is_null()) {
-        const char* raw_sandbox = argv[1].as_c_str();
-        if (raw_sandbox != nullptr) {
-            sandbox = raw_sandbox;
-        }
-    }
-
-    idapython::ExecutionResult result = idapython::execute_file(path, sandbox);
-    if (!result.success) {
-        ctx.result_error(result.error.empty() ? "idapython_file failed" : result.error);
-        return;
-    }
-    ctx.result_text(result.output);
-}
-
-// ============================================================================
-// String List Functions
-// ============================================================================
-
-// rebuild_strings() - Rebuild IDA's string list
-// Returns: number of strings found
-//
-// Args (all optional):
-//   min_len: minimum string length (default 5)
-//   types: string types bitmask (default 3 = ASCII + UTF-16)
-//          1 = ASCII (STRTYPE_C)
-//          2 = UTF-16 (STRTYPE_C_16)
-//          4 = UTF-32 (STRTYPE_C_32)
-//          3 = ASCII + UTF-16 (default)
-//          7 = all types
-//
-// Example:
-//   SELECT rebuild_strings();        -- Default: ASCII + UTF-16, minlen 5
-//   SELECT rebuild_strings(4);       -- ASCII + UTF-16, minlen 4
-//   SELECT rebuild_strings(5, 1);    -- ASCII only, minlen 5
-//   SELECT rebuild_strings(5, 7);    -- All types, minlen 5
 static void sql_rebuild_strings(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     int min_len = 5;
-    int types_mask = 3;  // Default: ASCII + UTF-16
+    int types_mask = 3;
 
     if (argc >= 1 && !argv[0].is_null()) {
         int64_t v = 0;
@@ -2274,56 +2078,29 @@ static void sql_rebuild_strings(xsql::FunctionContext& ctx, int argc, xsql::Func
         types_mask = static_cast<int>(v);
     }
 
-    // Get the options pointer - despite 'const', it IS modifiable (same as Python bindings)
     strwinsetup_t* opts = const_cast<strwinsetup_t*>(get_strlist_options());
 
-    // Configure string types based on mask
     opts->strtypes.clear();
-    if (types_mask & 1) opts->strtypes.push_back(STRTYPE_C);      // ASCII
-    if (types_mask & 2) opts->strtypes.push_back(STRTYPE_C_16);   // UTF-16
-    if (types_mask & 4) opts->strtypes.push_back(STRTYPE_C_32);   // UTF-32
+    if (types_mask & 1) opts->strtypes.push_back(STRTYPE_C);
+    if (types_mask & 2) opts->strtypes.push_back(STRTYPE_C_16);
+    if (types_mask & 4) opts->strtypes.push_back(STRTYPE_C_32);
 
-    // Set minimum length
     opts->minlen = min_len;
 
-    // Allow extended ASCII
     opts->only_7bit = 0;
 
-    // Clear and rebuild with new settings
     clear_strlist();
     build_strlist();
 
-    // Cached tables are invalidated by the `mutating` registration wrapper: the
-    // strings table is query-scoped, but its rows live for a whole cursor, so a
-    // later probe in this same statement would otherwise see the old list.
-
-    // Return the count
     size_t count = get_strlist_qty();
     ctx.result_int64(static_cast<int64_t>(count));
 }
 
-// ============================================================================
-// Database Persistence
-// ============================================================================
-
-// save_database() - Persist changes to the IDA database file
-// Returns: 1 on success, 0 on failure
-static void sql_save_database(xsql::FunctionContext& ctx, int /*argc*/, xsql::FunctionArg* /*argv*/) {
-    bool ok = save_database();  // IDA API: save to current file with default flags
+static void sql_save_database(xsql::FunctionContext& ctx, int , xsql::FunctionArg* ) {
+    bool ok = save_database();
     ctx.result_int(ok ? 1 : 0);
 }
 
-// ============================================================================
-// Registration
-// ============================================================================
-
-// Register an ENGINE-mutating function. libxsql keeps a query-scoped table's
-// rows for the life of a SQLite cursor, rebuilding only after a write through
-// the table; a function that changes the IDB behind the tables (creating code,
-// redefining types, changing operand representation, running arbitrary Python)
-// is not such a write. Invalidating every cached table on the connection after
-// it runs keeps a later probe of the same statement from serving pre-change
-// rows -- the same guarantee a write through the table gets.
 static xsql::ScalarFn mutating(void (*fn)(xsql::FunctionContext&, int, xsql::FunctionArg*)) {
     return [fn](xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
         fn(ctx, argc, argv);
@@ -2332,7 +2109,6 @@ static xsql::ScalarFn mutating(void (*fn)(xsql::FunctionContext&, int, xsql::Fun
 }
 
 void register_sql_functions(xsql::Database& db) {
-    // Disassembly
     db.register_function("disasm_at", 1, xsql::ScalarFn(sql_disasm_at));
     db.register_function("disasm_at", 2, xsql::ScalarFn(sql_disasm_at));
     db.register_function("disasm", 1, xsql::ScalarFn(sql_disasm));
@@ -2342,16 +2118,11 @@ void register_sql_functions(xsql::Database& db) {
     db.register_function("make_code", 1, mutating(sql_make_code));
     db.register_function("make_code_range", 2, mutating(sql_make_code_range));
 
-    // load_file_bytes writes a host file's bytes into the IDB at a given
-    // range. Bulk byte reads go through the bytes table (hidden `start_addr`
-    // + `n` input columns).
     db.register_function("load_file_bytes", 4, mutating(sql_load_file_bytes));
     db.register_function("load_file_bytes", 5, mutating(sql_load_file_bytes));
 
-    // Names and types
     db.register_function("parse_decls", 1, mutating(sql_parse_decls));
 
-    // Decompiler (only registered if Hex-Rays is available)
     if (decompiler::hexrays_available()) {
         db.register_function("decompile", 1, xsql::ScalarFn(sql_decompile));
         db.register_function("decompile", 2, xsql::ScalarFn(sql_decompile_2));
@@ -2393,28 +2164,18 @@ void register_sql_functions(xsql::Database& db) {
         db.register_function("get_numform_addr_expr", 5, xsql::ScalarFn(sql_get_numform_ea_expr));
     }
 
-    // File generation
     db.register_function("gen_listing", 1, xsql::ScalarFn(sql_gen_listing));
 
-    // Graph generation
     db.register_function("gen_cfg_dot", 1, xsql::ScalarFn(sql_gen_cfg_dot));
     db.register_function("gen_cfg_dot_file", 2, xsql::ScalarFn(sql_gen_cfg_dot_file));
     db.register_function("gen_schema_dot", 0, xsql::ScalarFn(sql_gen_schema_dot));
 
-    // Python execution
-    db.register_function("idapython_snippet", 1, mutating(sql_idapython_snippet));
-    db.register_function("idapython_snippet", 2, mutating(sql_idapython_snippet));
-    db.register_function("idapython_file", 1, mutating(sql_idapython_file));
-    db.register_function("idapython_file", 2, mutating(sql_idapython_file));
-
-    // String list functions
     db.register_function("rebuild_strings", 0, mutating(sql_rebuild_strings));
     db.register_function("rebuild_strings", 1, mutating(sql_rebuild_strings));
     db.register_function("rebuild_strings", 2, mutating(sql_rebuild_strings));
 
-    // Database persistence
     db.register_function("save_database", 0, xsql::ScalarFn(sql_save_database));
 }
 
-} // namespace functions
-} // namespace idasql
+}
+}

@@ -3,13 +3,7 @@
 //
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
-//
-// In-process `import idasql` for IDAPython. The mechanism (a native IDC
-// function reached through ida_expr.eval_idc_expr, plus a pure-Python module
-// injected with the extlang's eval_snippet) follows the prototype po0p posted
-// with the feature request. See python_bridge.hpp for the surface and rules.
 
-// json before IDA headers (IDA poisons some stdlib functions on Windows).
 #include <xsql/json.hpp>
 #include <xsql/script.hpp>
 
@@ -33,9 +27,6 @@ namespace {
 constexpr int kModuleVersion = 1;
 constexpr const char* kIdcName = "__idasql_bridge";
 
-// Live engines in attach order; the newest is the target. A short-lived engine
-// (an embedder's second QueryEngine) going away hands calls back to the one
-// that was serving before it.
 std::vector<QueryEngine*>& engines() {
     static std::vector<QueryEngine*> list;
     return list;
@@ -49,10 +40,6 @@ QueryEngine* target() {
     return list.empty() ? nullptr : list.back();
 }
 
-// --------------------------------------------------------------------------
-// Python side
-// --------------------------------------------------------------------------
-
 constexpr const char* kModuleSource = R"py(
 import json as _json
 import ida_expr as _ida_expr
@@ -65,7 +52,6 @@ _active = True
 # Captured at import, on the main thread: is_idaq() itself refuses worker-thread callers.
 _IS_GUI = bool(_ida_kernwin.is_idaq())
 
-
 class Error(Exception):
     """An SQL or bridge error. str(e) is the message; e.sql the statement."""
 
@@ -73,7 +59,6 @@ class Error(Exception):
         super().__init__(message)
         self.message = message
         self.sql = sql
-
 
 class Row(tuple):
     """A result row: a tuple that also exposes its columns as attributes."""
@@ -89,12 +74,10 @@ class Row(tuple):
     def as_dict(self):
         return dict(zip(self._columns, self))
 
-
 def _decode(v):
     if isinstance(v, dict) and "$bytes" in v:
         return bytes.fromhex(v["$bytes"])
     return v
-
 
 def _encode(v):
     if v is None or isinstance(v, (str, float)):
@@ -108,7 +91,6 @@ def _encode(v):
     if isinstance(v, (bytes, bytearray, memoryview)):
         return {"$bytes": bytes(v).hex()}
     raise Error("unsupported parameter type: %s" % type(v).__name__)
-
 
 class Result:
     """columns, rows (Row tuples of typed values), warnings, elapsed_ms, timed_out, partial."""
@@ -137,7 +119,6 @@ class Result:
 
     def __repr__(self):
         return "<idasql.Result %d row(s) x %d column(s)>" % (len(self.rows), len(self.columns))
-
 
 def _call(payload):
     if not _active:
@@ -168,7 +149,6 @@ def _call(payload):
         raise Error("idasql bridge unavailable: %s" % err)
     return _json.loads(value.c_str())
 
-
 def available():
     """True when the bridge can reach an open idasql database."""
     try:
@@ -176,13 +156,11 @@ def available():
     except Error:
         return False
 
-
 def _params(params):
     # query(sql, a, b) and sqlite3-style query(sql, [a, b]) / query(sql, (a, b)) both work.
     if len(params) == 1 and isinstance(params[0], (list, tuple)):
         params = params[0]
     return [_encode(p) for p in params]
-
 
 def query(sql, *params):
     """Run ONE statement; `?` placeholders are bound to params by SQLite.
@@ -192,17 +170,14 @@ def query(sql, *params):
         raise Error(env.get("error") or "query failed", sql)
     return Result(env, sql)
 
-
 def rows(sql, *params):
     """query() as a list of dicts."""
     return query(sql, *params).dicts()
-
 
 def scalar(sql, *params):
     """First column of the first row, or None."""
     r = query(sql, *params)
     return r.rows[0][0] if r.rows and r.columns else None
-
 
 def script(sql):
     """Run several statements; returns one Result per statement."""
@@ -243,7 +218,6 @@ const char* kDeactivateSnippet =
     "    _m._active = False\n"
     "del _m\n";
 
-// A fresh lookup (not idapython's cached pointer): teardown can run late.
 bool eval_python(const char* code, std::string* error) {
     extlang_object_t py = find_extlang_by_name("Python");
     if (py == nullptr || py->eval_snippet == nullptr) {
@@ -257,10 +231,6 @@ bool eval_python(const char* code, std::string* error) {
     }
     return true;
 }
-
-// --------------------------------------------------------------------------
-// Late injection: IDAPython can load after the engine (plugin load order).
-// --------------------------------------------------------------------------
 
 struct LateInjector : public event_listener_t {
     bool hooked = false;
@@ -290,10 +260,6 @@ LateInjector& late_injector() {
     static LateInjector injector;
     return injector;
 }
-
-// --------------------------------------------------------------------------
-// Native side: __idasql_bridge(hex_json) -> json
-// --------------------------------------------------------------------------
 
 bool hex_decode(const char* hex, size_t n, std::string& out) {
     auto nibble = [](char c) -> int {
@@ -373,8 +339,6 @@ xsql::json error_json(const std::string& message) {
     return {{"success", false}, {"error", message}};
 }
 
-// A string field of the request, "" when absent or not a string (value() would
-// throw for a present field of another type).
 std::string string_field(const xsql::json& req, const char* key) {
     const auto it = req.find(key);
     return it != req.end() && it->is_string() ? it->get<std::string>() : std::string();
@@ -395,8 +359,6 @@ xsql::json dispatch(QueryEngine& engine, const xsql::json& req) {
                 params.push_back(std::move(qp));
             }
         }
-        // Even with no parameters: a statement with a `?` left unbound must fail
-        // rather than read NULL.
         return result_json(engine.query(sql.c_str(), params));
     }
     if (op == "script") {
@@ -450,7 +412,7 @@ error_t idaapi idc_bridge(idc_value_t* argv, idc_value_t* res) {
 const char kBridgeArgs[] = {VT_STR, 0};
 const ext_idcfunc_t kBridgeFunc = {kIdcName, idc_bridge, kBridgeArgs, nullptr, 0, EXTFUN_BASE};
 
-}  // namespace
+}
 
 void attach(QueryEngine* engine) {
     auto& list = engines();
@@ -470,8 +432,6 @@ void detach(QueryEngine* engine) {
     list.erase(it);
     if (!list.empty())
         return;
-    // Nobody left to serve: drop the IDC entry point (it points into this
-    // binary, which may be unloaded next) and deactivate the module.
     late_injector().stop();
     if (g_idc_registered) {
         del_idc_func(kIdcName);
@@ -501,5 +461,5 @@ bool ensure_python_module(std::string* error) {
     return eval_python(snippet.c_str(), error);
 }
 
-} // namespace python_bridge
-} // namespace idasql
+}
+}

@@ -4,15 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * code.hpp - Umbrella header for the idasql::code domain: the static-code view.
- *
- * Functions and structure (funcs, func_at, blocks, function_chunks, instructions,
- * instruction_operands + the operand-representation engine) plus the folded
- * disassembly analysis tables (disasm_calls, disasm_loops, call_graph,
- * shortest_path, cfg_edges).
- */
-
 #pragma once
 
 #include "code_funcs.hpp"

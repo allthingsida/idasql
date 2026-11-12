@@ -6,7 +6,7 @@
 
 #include "types_gaps.hpp"
 
-#include "types_members.hpp" // get_type_ordinal_by_name
+#include "types_members.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -14,11 +14,6 @@
 namespace idasql {
 namespace types {
 
-// Free ranges are derived from the coverage of *non-gap* members: a gap member
-// (TAFLD_GAP) is placeholder space, so it counts as free, not occupied. This is
-// robust regardless of whether get_udt_details materializes implicit holes as
-// gap members -- both explicit gap members and implicit holes (and trailing
-// space up to total_size) surface as free ranges a field can be inserted into.
 std::vector<GapRow> compute_type_gaps(uint32_t ordinal) {
   std::vector<GapRow> gaps;
   til_t *ti = get_idati();
@@ -27,7 +22,7 @@ std::vector<GapRow> compute_type_gaps(uint32_t ordinal) {
   if (!name) return gaps;
   tinfo_t tif;
   if (!tif.get_numbered_type(ti, ordinal)) return gaps;
-  if (!tif.is_struct()) return gaps; // unions overlay at offset 0 -- no gaps
+  if (!tif.is_struct()) return gaps;
 
   udt_type_data_t udt;
   if (!tif.get_udt_details(&udt)) return gaps;
@@ -36,9 +31,9 @@ std::vector<GapRow> compute_type_gaps(uint32_t ordinal) {
   if (total_bytes == 0 || total_bytes == BADSIZE) return gaps;
   const int64_t total = static_cast<int64_t>(total_bytes);
 
-  std::vector<std::pair<int64_t, int64_t>> occ; // [start, end) in bytes
+  std::vector<std::pair<int64_t, int64_t>> occ;
   for (const udm_t &m : udt) {
-    if (m.is_gap()) continue; // gap members are free space
+    if (m.is_gap()) continue;
     const int64_t start = static_cast<int64_t>(m.offset / 8);
     const int64_t end = static_cast<int64_t>((m.offset + m.size + 7) / 8);
     if (end > start) occ.emplace_back(start, end);
@@ -70,18 +65,16 @@ bool range_overlaps_member(uint32_t ordinal, uint64_t start_bit, uint64_t end_bi
   if (!ti) return false;
   tinfo_t tif;
   if (!tif.get_numbered_type(ti, ordinal)) return false;
-  if (!tif.is_struct()) return false; // unions overlay at 0 -- no fixed gaps
+  if (!tif.is_struct()) return false;
   udt_type_data_t udt;
   if (!tif.get_udt_details(&udt)) return false;
 
-  // Compare in bits: udm_t.offset / .size are bit quantities, so a byte-rounded
-  // check could miss an overlap when the new member starts mid-byte.
   for (const udm_t &m : udt) {
-    if (m.is_gap()) continue; // gap members are free space, not real members
+    if (m.is_gap()) continue;
     const uint64_t s = m.offset;
     const uint64_t e = m.offset + m.size;
     if (e <= s) continue;
-    if (start_bit < e && s < end_bit) return true; // half-open overlap
+    if (start_bit < e && s < end_bit) return true;
   }
   return false;
 }
@@ -114,9 +107,6 @@ void GapsIterator::column(xsql::FunctionContext &ctx, int col) {
 
 int64_t GapsIterator::rowid() const {
   if (idx_ < 0 || static_cast<size_t>(idx_) >= rows_.size()) return 0;
-  // Stable and collision-free: ordinal in the high 32 bits, gap byte offset in
-  // the low 32. A multiply-by-100000 scheme collided once a gap offset reached
-  // 100000 (structs > ~100 KB) with the next ordinal's rowid space.
   return (static_cast<int64_t>(rows_[idx_].type_ordinal) << 32)
        | (static_cast<int64_t>(rows_[idx_].gap_offset) & 0xFFFFFFFF);
 }
@@ -124,7 +114,6 @@ int64_t GapsIterator::rowid() const {
 GeneratorTableDef<GapRow> define_type_gaps() {
   return generator_table<GapRow>("type_gaps")
       .estimate_rows([]() -> size_t { return 16; })
-      // Unfiltered scan would compute gaps for every type -- require a filter.
       .full_scan_error(
           "type_gaps requires a filter on type_ordinal or type_name "
           "(e.g. WHERE type_name = 'MyStruct').")
@@ -135,8 +124,6 @@ GeneratorTableDef<GapRow> define_type_gaps() {
       .filter_eq(
           "type_ordinal",
           [](int64_t ord) -> std::unique_ptr<xsql::RowIterator> {
-            // Type ordinals are uint32; reject anything out of range rather than
-            // truncating (e.g. 4294967297 -> 1 would return ordinal-1's gaps).
             if (ord <= 0 || ord > static_cast<int64_t>(UINT32_MAX))
               return std::make_unique<GapsIterator>(std::vector<GapRow>{});
             return std::make_unique<GapsIterator>(compute_type_gaps(static_cast<uint32_t>(ord)));
@@ -144,7 +131,10 @@ GeneratorTableDef<GapRow> define_type_gaps() {
           1.0, 8.0)
       .filter_eq_text(
           "type_name",
-          [](const char *name) -> std::unique_ptr<xsql::RowIterator> {
+          [](const auto& value) -> std::unique_ptr<xsql::RowIterator> {
+              const std::string full_name(value);
+              if (full_name.find('\0') != std::string::npos) return nullptr;
+              const char* name = full_name.c_str();
             til_t *ti = get_idati();
             const int ord = get_type_ordinal_by_name(ti, name ? name : "");
             return std::make_unique<GapsIterator>(
@@ -154,5 +144,5 @@ GeneratorTableDef<GapRow> define_type_gaps() {
       .build();
 }
 
-} // namespace types
-} // namespace idasql
+}
+}

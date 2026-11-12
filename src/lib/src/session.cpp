@@ -13,6 +13,9 @@
 
 #include "ida_headers.hpp"
 #include "types_bookmarks.hpp"
+#include "rescue_guard.hpp"
+#include "idasql_version.hpp"
+#include "instances.hpp"
 
 namespace idasql {
 
@@ -87,12 +90,9 @@ void close_ida_database_for_session() {
     close_database(false);
 }
 
-} // namespace
+}
 
-// ============================================================================
-// Session
-// ============================================================================
-
+Session::Session() = default;
 Session::~Session() { close(); }
 
 bool Session::open(const char* idb_path) {
@@ -113,12 +113,6 @@ bool Session::open(const char* idb_path) {
         std::error_code ec;
         bool i64_existed_before = fs::exists(i64_path, ec);
         if (!ec && i64_existed_before) {
-            // Freshness guard: only prefer the sibling .i64 when it is at least as
-            // new as the requested .idb. A .i64 older than its .idb is stale (the
-            // .idb was touched after the last upgrade) or unrelated, and silently
-            // making it the database of record would return the wrong analysis.
-            // Refuse and require an explicit choice instead of guessing. (mtime is
-            // a pragmatic freshness signal; it does not prove input-file identity.)
             std::error_code idb_ec, i64_ec;
             auto idb_mtime = fs::last_write_time(requested_path, idb_ec);
             auto i64_mtime = fs::last_write_time(i64_path, i64_ec);
@@ -180,11 +174,8 @@ bool Session::open(const char* idb_path) {
         ida_opened_ = true;
     }
 
-    // Wait for auto-analysis (no-op if the user disabled AA — see ida_compat.hpp)
     idasql_auto_wait();
 
-    // For new analysis (exe/dll/etc), build strings after auto-analysis completes
-    // For existing databases (i64/idb), strings are already saved
     std::string path_lower = to_lower_copy(open_path.string());
     auto ends_with = [](const std::string& s, const std::string& suffix) {
         return s.size() >= suffix.size() &&
@@ -195,18 +186,16 @@ bool Session::open(const char* idb_path) {
         ends_with(path_lower, ".idb")
     );
     if (is_new_analysis) {
-        // Configure and build string list with sensible defaults
         strwinsetup_t* opts = const_cast<strwinsetup_t*>(get_strlist_options());
         opts->strtypes.clear();
-        opts->strtypes.push_back(STRTYPE_C);      // ASCII
-        opts->strtypes.push_back(STRTYPE_C_16);   // UTF-16
+        opts->strtypes.push_back(STRTYPE_C);
+        opts->strtypes.push_back(STRTYPE_C_16);
         opts->minlen = 5;
         opts->only_7bit = 0;
-        clear_strlist();  // Clear before building (like rebuild_strings)
+        clear_strlist();
         build_strlist();
     }
 
-    // Create query engine
     engine_ = std::make_unique<QueryEngine>();
     if (!engine_->is_valid()) {
         error_ = engine_->error();
@@ -215,12 +204,30 @@ bool Session::open(const char* idb_path) {
         return false;
     }
 
+    rescue_guard_ = std::make_unique<rescue::Guard>();
+    const bool armed = rescue_guard_->arm(get_path(PATH_TYPE_IDB));
+
+    instances::Record rec;
+    rec.host = "idalib";
+    char kernel[32] = {0};
+    get_kernel_version(kernel, sizeof(kernel));
+    rec.ida_version = kernel;
+    rec.idasql_version = IDASQL_VERSION_STRING;
+    rec.idb_path = get_path(PATH_TYPE_IDB);
+    rec.rescue = armed;
+    (void)instances::self().start(rec);
+
     error_.clear();
     open_outcome_ = OpenOutcome::Ok;
     return true;
 }
 
 void Session::close() {
+    instances::self().stop();
+    if (rescue_guard_) {
+        (void)rescue_guard_->disarm();
+        rescue_guard_.reset();
+    }
     engine_.reset();
     if (ida_opened_) {
         close_ida_database_for_session();
@@ -289,4 +296,4 @@ std::string Session::info() const {
     return s;
 }
 
-} // namespace idasql
+}

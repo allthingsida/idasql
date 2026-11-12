@@ -267,7 +267,12 @@ idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
 | `--mcp [port]` | Start MCP server (default: random port, use in -i mode) |
 | `-h, --help` | Show help |
 | `--version` | Show version |
-| `link <verb>` | IDA 9.4 builds: `ida://` deep links, no database needed — `open [--no-launch] [--pid N] -- <uri>`, `list`, `status`, `register` (idasql becomes the `ida://` handler; a replaced handler such as hcli's is saved), `unregister` (restores it), `source add\|list\|remove`, `config`. `open` launches IDA on the database when none has it open |
+| `link <verb>` | IDA 9.4+ builds: `ida://` deep links, no database needed — `open [--no-launch] [--pid N] -- <uri>`, `status`, `register` (idasql becomes the `ida://` handler; a replaced handler such as hcli's is saved), `unregister` (restores it), `source add\|list\|remove`, `config`. `open` launches IDA on the database when none has it open |
+| `instances [--json] [--pid N]` | The running IDAs (every IDA version, no database needed): pid, host (`gui`/`idalib`), database, its idasql HTTP/MCP URL (`http_auth`: a token is needed, never listed), `remote` (other processes may start/stop its servers), whether it answers. Use it to find the IDA the user has open (the `connect` skill) |
+| `close <db\|url> --save\|--discard` | End an IDA cleanly: a database path closes the IDA on this machine that has it open (GUI plugin or `idasql -s` server session; no server needed), a URL closes the IDA serving SQL there (`--token` when it has one). `--discard` leaves the database on disk exactly as it was. A frozen IDA cannot run it (exit 3: use `rescue --kill`). Only when the user asks |
+| `http start\|stop <db\|pid>`, `mcp start\|stop <db\|pid>` | Start or stop the HTTP / MCP server of another IDA on this machine, as `.http start` there does; `start` prints the URL. Needs that database's remote control on (exit 4 otherwise). Use it when the IDA the user means serves no SQL, and tell the user what you started |
+| `remote on\|off <db\|pid>` | Switch another IDA's remote control (stored in its database; off by default), as `.remote on\|off` there does. Only for the database the user's request is about |
+| `rescue <db> [--kill]` | Save a copy of the database a **stuck** IDA (GUI or `idasql -s` session) has open as `<db>.rescued-<time>.<ext>`; `--kill` then ends that IDA. Only when the user asks |
 
 ### REPL Commands
 
@@ -283,6 +288,7 @@ idasql -s database.i64 --export dump.sql --export-tables=funcs,segments
 | `.http` | Show HTTP server status (start if not running) |
 | `.pin http\|mcp [bindinterface] [port]` | Pin a server for autostart (IDB-persisted; plugin auto-starts on open). **Omit the port → fresh random port each launch** (stored as `0`, not "unset"); give a port for a fixed one. `.pin set ...` is the explicit form. |
 | `.pin on\|off http\|mcp` / `.pin clear [http\|mcp\|all]` / `.pin status` | Manage autostart pins; `.pin status` shows `<random port each launch>` for a port-omitted pin |
+| `.remote` / `.remote on\|off` | Show / set whether other processes may start and stop this database's servers (stored in the database; off by default) |
 
 ### Performance Strategy
 
@@ -334,7 +340,8 @@ UPDATE runtime_settings SET value='64'     WHERE key='max_queue';               
 UPDATE runtime_settings SET value='1'      WHERE key='hints_enabled';               -- 1/0, on/off
 UPDATE runtime_settings SET value='1'      WHERE key='enable_idapython';            -- enable SQL Python
 UPDATE runtime_settings SET value='0'      WHERE key='idapython_output_max';        -- cap bytes (0 = unbounded)
-UPDATE runtime_settings SET value='1'      WHERE key='enable_deep_link_navigation'; -- let ida_open_link() steer IDA (IDA 9.4 builds; ON in the plugin, OFF in the CLI)
+UPDATE runtime_settings SET value='1'      WHERE key='idapython_echo';              -- show every IDAPython run's output in IDA
+UPDATE runtime_settings SET value='1'      WHERE key='enable_deep_link_navigation'; -- let ida_open_link() steer IDA (IDA 9.4+ builds; ON in the plugin, OFF in the CLI)
 UPDATE runtime_settings SET value='statement' WHERE key='auto_checkpoint';          -- 'statement': an undo checkpoint per writing statement; 'off' (default)
 
 -- timeout_push/timeout_pop are the only PRAGMAs (imperative stack verbs)
@@ -636,6 +643,8 @@ Quick capability matrix:
 | `signatures` | Yes (`name`: applies a FLIRT signature) | — | Yes, planned entries only |
 | `ida_config` | — | `value` (applies `KEY=VALUE`; only `persisted = 1` keys are saved with the database) | — |
 | `checkpoints` | Yes (`label`, optional) | `state`: `'undone'` rolls back to it, `'live'` redoes it | — (refused) |
+| `idapython_runs` | Yes (`code` or `path`; `sandbox`, `show_output` optional): runs IDAPython | — | Yes (forgets runs) |
+| `ui_actions` | — | `args` + `run = 1` runs a row (curated rows take `args`; raw IDA actions none); `quit` quits, `{"save": false}` without saving | — |
 
 Write support is covered by the project's integration and end-to-end test suite.
 
@@ -780,7 +789,7 @@ Full AST of decompiled code. Filter `WHERE func_addr = X`. Schema (30 columns in
 Local variables from decompilation. Writable: `name`, `type`, `comment`. Filter by `func_addr`, key updates on `idx`. A `type` UPDATE is read back and fails when Hex-Rays keeps the old type, which is usual for the result variable (`is_result = 1`), whose type follows the prototype: change the return type with `UPDATE funcs SET prototype = ...`. Schema, mutation guidance, and examples: see the `decompiler` skill.
 
 #### decompiler_splits
-Hex-Rays "Split expression" without a pseudocode window (the window's Split/Unsplit expression, `vdui_t::split_item` in `hexrays.hpp`). A row keeps the decompiler from merging narrower operations into one wider one at `addr`: `*(_QWORD *)a1 = 0x600000001LL;` prints as `*(_DWORD *)a1 = 1; *((_DWORD *)a1 + 1) = 6;` with `piece_size = 4`. Columns: `func_addr`, `addr` (the merged instruction: the `addr` of the assignment in `ctree`), `piece_size` (1, 2, 4 or 8 bytes). `INSERT INTO decompiler_splits(addr, piece_size) VALUES (...)` (`func_addr` optional: the function containing `addr`), `UPDATE ... SET piece_size = ...`, `DELETE` unsplits; the next decompile shows it. IDA's window splits an 8-byte store into 4-byte pieces first, then 2, then 1. Saved with the database, stored exactly as IDA's own Split expression stores it, and undone by checkpoints. A split where nothing merges changes nothing. Refused: a piece size other than 1/2/4/8, an address that is not an instruction start or not in `func_addr`, a second INSERT at the same address (UPDATE it), IDA versions other than 9.0-9.4, and stored split data in a format it does not recognise (never rewritten). Filter by `func_addr`; a full scan reads every function's stored settings without decompiling. See the `decompiler` skill.
+Hex-Rays "Split expression" without a pseudocode window (the window's Split/Unsplit expression, `vdui_t::split_item` in `hexrays.hpp`). A row keeps the decompiler from merging narrower operations into one wider one at `addr`: `*(_QWORD *)a1 = 0x600000001LL;` prints as `*(_DWORD *)a1 = 1; *((_DWORD *)a1 + 1) = 6;` with `piece_size = 4`. Columns: `func_addr`, `addr` (the merged instruction: the `addr` of the assignment in `ctree`), `piece_size` (1, 2, 4 or 8 bytes). `INSERT INTO decompiler_splits(addr, piece_size) VALUES (...)` (`func_addr` optional: the function containing `addr`), `UPDATE ... SET piece_size = ...`, `DELETE` unsplits; the next decompile shows it. IDA's window splits an 8-byte store into 4-byte pieces first, then 2, then 1. Saved with the database, stored exactly as IDA's own Split expression stores it, and undone by checkpoints. A split where nothing merges changes nothing. Refused: a piece size other than 1/2/4/8, an address that is not an instruction start or not in `func_addr`, a second INSERT at the same address (UPDATE it), IDA versions other than 9.0-9.5, and stored split data in a format it does not recognise (never rewritten). Filter by `func_addr`; a full scan reads every function's stored settings without decompiling. See the `decompiler` skill.
 
 #### ctree_call_args
 Flattened call arguments for join-friendly querying. Columns: `func_addr`, `call_item_id`, `call_addr`, `call_obj_name`, `call_helper_name`, `arg_idx`, `arg_item_id`, `arg_op`, `arg_var_name`, `arg_var_is_stk`, `arg_num_value`, `arg_str_value`. See the `decompiler` skill.
@@ -1020,7 +1029,16 @@ Database-level metadata as `key`/`value`/`type` rows (e.g. `processor`, `filetyp
 IDA analysis-flag info as `key`/`value`/`type` rows (e.g. `show_auto`, `show_void`, `wide_hbf`, `demnames`). See `disassembly/references/disassembly-tables.md`.
 
 #### runtime_settings
-Writable discovery view over the runtime controls. Columns: `key`, `value`, `type` (`int`/`bool`/`string`), `scope`, `kind` (`value`/`action`), `settable` (1 only when `UPDATE` is accepted — `scope` cannot answer that, since tunable and read-only keys are both `common`). One row per setting — the shared keys `query_timeout_ms`, `queue_admission_timeout_ms`, `max_queue`, `hints_enabled`, `timeout_stack_depth`, `max_timeout_stack_depth` (scope `common`), `timeout_push`, `timeout_pop` (scope `action`), plus idasql-only `enable_idapython`, `idapython_output_max`, `auto_checkpoint` (`off` or `statement`; scope `idasql`), and on IDA 9.4 builds `enable_deep_link_navigation` (scope `idasql`; ON in the GUI plugin, OFF under the CLI). `SELECT * FROM runtime_settings` enumerates the surface; **change a value setting with `UPDATE runtime_settings SET value='...' WHERE key='<key>'`**. `key`/`type`/`scope`, the read-only rows (`timeout_stack_depth`, `max_timeout_stack_depth`), and the action verbs reject writes; `INSERT`/`DELETE` are rejected. `timeout_push`/`timeout_pop` are PRAGMAs (imperative stack verbs).
+Writable discovery view over the runtime controls. Columns: `key`, `value`, `type` (`int`/`bool`/`string`), `scope`, `kind` (`value`/`action`), `settable` (1 only when `UPDATE` is accepted — `scope` cannot answer that, since tunable and read-only keys are both `common`). One row per setting — the shared keys `query_timeout_ms`, `queue_admission_timeout_ms`, `max_queue`, `hints_enabled`, `timeout_stack_depth`, `max_timeout_stack_depth` (scope `common`), `timeout_push`, `timeout_pop` (scope `action`), plus idasql-only `enable_idapython`, `idapython_output_max`, `idapython_echo`, `auto_checkpoint` (`off` or `statement`; scope `idasql`), and on IDA 9.4+ builds `enable_deep_link_navigation` (scope `idasql`; ON in the GUI plugin, OFF under the CLI). `SELECT * FROM runtime_settings` enumerates the surface; **change a value setting with `UPDATE runtime_settings SET value='...' WHERE key='<key>'`**. `key`/`type`/`scope`, the read-only rows (`timeout_stack_depth`, `max_timeout_stack_depth`), and the action verbs reject writes; `INSERT`/`DELETE` are rejected. `timeout_push`/`timeout_pop` are PRAGMAs (imperative stack verbs).
+
+#### ida_instances
+The running IDAs: what `idasql instances` lists. Columns: `pid`, `host` (`gui` or `idalib`), `ida_version`, `idasql_version`, `idb_path`, `http`, `http_auth`, `mcp`, `mcp_auth`, `rescue`, `idasql` (the idasql plugin or session runs there), `ipc` (found through IDA's own endpoint (9.4+)), `responsive` (0: hung or busy), `self` (this process), `started`, `remote` (1/0: other processes may start/stop its servers; NULL for an `idasql -s` session), and write-only `start` / `stop`. `SELECT pid, idb_path, http FROM ida_instances WHERE self = 0` finds the other IDAs and their SQL URLs. Tokens are never listed. Writes ask that IDA, like `idasql remote|http|mcp ...`: `UPDATE ida_instances SET remote = 1 WHERE pid = N` (only for the database the request is about), `UPDATE ida_instances SET start = 'http' WHERE pid = N`, then read its `http`; `stop = 'mcp'` stops one. One other IDA per statement; this IDA's own row refuses them.
+
+#### ui_actions
+IDA's UI actions, two kinds of rows. **Curated** (`kind` `idasql`: idasql code with arguments; `ida`: a vetted IDA action): `quit {save}`, `jump_to {addr}`, `open_pseudocode {func_addr}`, `open_link {uri}` (9.4+), `batch_mode {on}` (dialogs take their default answer), `toggle_breakpoint {addr}`, `run_to {addr}`, `step_over`, `step_into`. **Raw** (`kind = 'raw'`): every other action the running IDA registers (GUI only), run as is with no arguments: it works on the current context (cursor, focused window), and one that needs input opens its dialog and waits for a person (use `batch_mode` first). Columns: `name`, `kind`, `ida_action`, `description`, `arg_spec` (JSON), `works_in` (`gui` / `gui+server`), `available`, `checked` (toggles, `batch_mode`), write-only `args` (a JSON object) and `run`, `last_result`, `last_error`. Run one with `UPDATE ui_actions SET args = '{"addr": 4198400}', run = 1 WHERE name = 'jump_to'`, then read `last_result`/`last_error`; a failed run also fails the statement. One action per statement (narrow the WHERE to one name). Under idalib only the curated rows are listed; `batch_mode` and `toggle_breakpoint` work there, and `quit` ends an `idasql -s --http/--mcp` session. Quit or close only when the user asked.
+
+#### idapython_runs
+IDAPython runs, one row each (needs `enable_idapython`). Columns: `id` (run number; newest = highest, `last_insert_rowid()` is not set), `code`, `path`, `sandbox`, `show_output`, `output`, `success`, `error`, `started` (UTC ISO 8601), `duration_ms`. `INSERT INTO idapython_runs(code | path [, sandbox, show_output])` runs it and records the run; read it with `SELECT output, success, error FROM idapython_runs ORDER BY id DESC LIMIT 1`. A Python error fails the INSERT with that error, and the run is still recorded. `show_output = 1` also shows the output in IDA's Output window (set it when the user asked for the run; leave 0 for your own probes); the `idapython_echo` setting shows every run. The last 100 runs are kept in memory; `DELETE` forgets them. See "Python Execution" and the `idapython` skill.
 
 #### checkpoints
 Named undo checkpoints over IDA's undo engine (see "Undo Checkpoints" under Database Modification). Columns: `seq` (creation order; the rowid), `label`, `created_at`, `kind` (`user` or `auto`), `writes_since` (changes made after it that are still applied; a count of changes, not rows), `statement` (the SQL that wrote, for `auto`; NULL for `user`), `state` (`live` or `undone`). `INSERT INTO checkpoints(label) VALUES (...)` creates one (empty, duplicate and `auto#` labels are refused); `UPDATE ... SET state = 'undone'` rolls back to it, `'live'` redoes the next undone one. Rows for undone checkpoints stay until a new checkpoint ends IDA's redo branch.
@@ -1059,9 +1077,11 @@ SELECT (SELECT name FROM funcs WHERE addr = func_addr) as func, callee_name
 FROM disasm_v_calls_in_loops;
 ```
 
-### Deep Links (IDA 9.4 builds)
+### Deep Links (IDA 9.4+ builds)
 
-These surfaces exist only when idasql was built for IDA 9.4 or later; if `deep_links` is absent from `pragma_table_list`, emit no links.
+**Connection context first:** a known fully headless target (including a background `idasql -s ... --http/--mcp` process you launched) gets plain symbol names and addresses, without remarking on links or their omission. Do not query `deep_links`, generate or emit `ida://` links, probe navigation, enable its gate, or suggest a handler for it. Retain connection mode per target: an IDA GUI plugin is GUI-connected; HTTP/MCP transport alone proves nothing. If unknown, query `SELECT host FROM ida_instances WHERE self = 1;` on that target once (`gui` / `idalib`); keep unknown mode plain. Do not use an unrelated GUI instance to justify links for a headless target. Re-evaluate when the target changes or the user explicitly asks to open a GUI.
+
+For GUI-connected targets, these surfaces exist only when idasql was built for IDA 9.4 or later; if `deep_links` is absent from `pragma_table_list`, emit no links.
 
 #### deep_links
 Generator: give `resource` plus the target in `WHERE` and get one link back. The target is `addr` (or `rva`), or `name` for `resource = 'types'`. Outputs:
@@ -1369,7 +1389,7 @@ Note: for both `names` and `comments`, `INSERT` at an EA that already has a valu
 | Surface | Description |
 |---------|-------------|
 | `applied_types(addr, decl, ordinal, type_name)` | Read, apply, replace, or clear C declarations at addresses. `addr` accepts EA integers, numeric strings, and symbol names for equality writes/filters. |
-| `parse_decls(text)` | Import C declarations (struct/union/enum/typedef) into local types |
+| `parse_decls(text)` | Import C declarations (struct/union/enum/typedef) into local types, preserving declared type names without symbol decoration |
 
 Preferred SQL write surface for function metadata:
 - `UPDATE funcs SET name = '...', prototype = '...' WHERE addr = ...`
@@ -1377,10 +1397,8 @@ Preferred SQL write surface for function metadata:
 - `prototype` maps to `applied_types` behavior and invalidates decompiler cache.
 
 ### Python Execution
-| Function | Description |
-|----------|-------------|
-| `idapython_snippet(code[, sandbox])` | Execute Python snippet and return captured output text |
-| `idapython_file(path[, sandbox])` | Execute Python file and return captured output text |
+IDAPython runs are rows of the writable `idapython_runs` table (see "Tables Reference"): `INSERT`
+runs, `SELECT` reads the output.
 
 Runtime guard:
 
@@ -1391,19 +1409,22 @@ UPDATE runtime_settings SET value='1' WHERE key='enable_idapython';
 Examples:
 
 ```sql
-SELECT idapython_snippet('print("hello from idapython")');
-SELECT idapython_file('C:/temp/script.py');
-SELECT idapython_snippet('counter = globals().get("counter", 0) + 1; print(counter)', 'alpha');
+INSERT INTO idapython_runs(code) VALUES ('print("hello from idapython")');
+SELECT output, success, error FROM idapython_runs ORDER BY id DESC LIMIT 1;
+INSERT INTO idapython_runs(path) VALUES ('C:/temp/script.py');
+INSERT INTO idapython_runs(code, sandbox) VALUES ('counter = globals().get("counter", 0) + 1; print(counter)', 'alpha');
+INSERT INTO idapython_runs(code, show_output) VALUES ('print("shown in IDA too")', 1);
 ```
 
 Notes:
 - disabled by default until `enable_idapython` is set
-- Python exceptions propagate as SQL errors
+- a Python exception fails the INSERT with that error; the run stays recorded (`success = 0`, `error`)
 - `sandbox` isolates/persists Python globals by sandbox key
+- output is captured, not shown in IDA, unless `show_output = 1` or `idapython_echo` is on
 
 ### Calling idasql from Python (`import idasql`)
 
-Python running in IDA (the console, a script or plugin, or `idapython_snippet`) can query the open
+Python running in IDA (the console, a script or plugin, or an `idapython_runs` row) can query the open
 database directly; no server is involved. idasql does not link Python: the module is injected
 through IDAPython, and without IDAPython every SQL surface works as before.
 
@@ -1427,12 +1448,11 @@ except idasql.Error as e:                            # e.message, e.sql
   parameters are bound by SQLite, inline or as one list/tuple; text keeps embedded NULs.
 - **Main thread only.** In the GUI a call from another thread is forwarded to the main thread and
   waits for it; under idalib (CLI, `--http`, `--mcp`) it fails at once with `idasql.Error`.
-- **Nesting.** Python that idasql runs (`idapython_snippet`) can query again (SQL -> Python -> SQL);
+- **Nesting.** Python that idasql runs (`idapython_runs`) can query again (SQL -> Python -> SQL);
   the inner query shares the outer statement's deadline. Running Python again from such a query
-  (`idapython_*` inside SQL issued through `idasql`) is refused: IDAPython is not re-entrant there.
-- **Settings from Python** follow SQL transactions: an `UPDATE runtime_settings` issued under a
-  read-only statement takes effect at once; under a statement that writes, or inside `BEGIN`, it takes
-  effect when that commits.
+  (an `idapython_runs` INSERT issued through `idasql`) is refused: IDAPython is not re-entrant there.
+- **Settings from Python** follow SQL transactions: an `UPDATE runtime_settings` issued from Python
+  takes effect when the statement that ran it commits (the run's `INSERT`, or the enclosing `BEGIN`).
 - When the engine goes away (database closed, plugin unloaded), a kept reference raises
   `idasql.Error`. A different module already imported as `idasql` is never replaced.
 
@@ -1445,10 +1465,10 @@ except idasql.Error as e:                            # e.message, e.sql
 SELECT get_ui_context_json();
 ```
 
-### Deep Links (IDA 9.4 builds)
+### Deep Links (IDA 9.4+ builds)
 | Function | Description |
 |----------|-------------|
-| `ida_open_link(uri)` | Open an `ida://` link: in-process in the GUI plugin, otherwise in the running IDA 9.4 that has the database open (over IDA's own IPC endpoint). The exact `idb_path` wins; a same-named copy only when that file is not on this machine. Returns 1, or an error with IDA's reason. Gated by `enable_deep_link_navigation`. Never launches IDA (`idasql link open` does) |
+| `ida_open_link(uri)` | Open an `ida://` link: in-process in the GUI plugin, otherwise in the running IDA 9.4+ instance that has the database open (over IDA's own IPC endpoint). The exact `idb_path` wins; a same-named copy only when that file is not on this machine. Returns 1, or an error with IDA's reason. Gated by `enable_deep_link_navigation`. Never launches IDA (`idasql link open` does) |
 
 Links come from the `deep_links` table (see "Deep Links" under Tables Reference), never from a function.
 
@@ -2809,7 +2829,7 @@ WHERE calling_conv = 'fastcall' AND return_is_ptr = 1;
 | View function disassembly | `disasm_func(addr)` (every chunk); `disasm_range(start, end)` for an arbitrary range |
 | View decompiled code | `decompile(addr)` |
 | UI/screen context questions | `get_ui_context_json()` (live UI in the GUI plugin; CLI returns a stub) |
-| Clickable links to IDA locations (IDA 9.4) | `deep_links WHERE resource='functions' AND addr=X`, or JOIN it to `funcs`/`types`/...; render `[name](uri)` |
+| Clickable links to IDA locations (IDA 9.4+) | `deep_links WHERE resource='functions' AND addr=X`, or JOIN it to `funcs`/`types`/...; render `[name](uri)` |
 | Open a result in the user's IDA | `ida_open_link(uri)`, or `idasql link open -- '<uri>'` from a shell |
 | Edit decompiler comments | `Resolve writable pseudocode anchor, then UPDATE pseudocode SET comment = '...' WHERE func_addr = X AND addr = Y` |
 | AST pattern matching | `ctree WHERE func_addr = X` |

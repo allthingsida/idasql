@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * json_utils.hpp - JSON escaping and query result serialization helpers
- */
-
 #pragma once
 
 #include <idasql/database.hpp>
@@ -165,7 +161,6 @@ inline void append_json_string(std::string& out, std::string_view input) {
                         out.append(input.data() + i, seq_len);
                         i += seq_len;
                     } else {
-                        // Preserve non-UTF8 byte values as JSON escapes.
                         append_json_hex_escape(out, c);
                         ++i;
                     }
@@ -243,9 +238,4 @@ inline std::string query_result_to_json_safe(const QueryResult& result) {
     return out;
 }
 
-// Multi-statement JSON emission goes through idasql::run_sql_script (see
-// sql_script.hpp) + xsql::script_result_to_json. The per-statement helper
-// query_result_to_json_safe above is for internal callers working with a
-// raw QueryResult.
-
-} // namespace idasql
+}

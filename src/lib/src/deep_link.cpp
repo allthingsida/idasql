@@ -4,44 +4,14 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * deep_link.cpp - IDA 9.4 ida:// deep links, natively (see deep_link.hpp).
- *
- * Credit: the out-of-process half of this file — discovering IDA's ida_ipc_<pid>
- * endpoints, the JSON commands they accept, matching a link to a running instance,
- * launching IDA and waiting for it, and registering a URL handler per OS — follows
- * the behaviour of Hex-Rays' ida-hcli (https://github.com/HexRaysSA/ida-hcli),
- * reimplemented here in C++ so idasql needs neither Python nor hcli. The link format
- * and parsing rules follow IDA 9.4 itself (its Copy Link output and open_ida_link).
- *
- *   ida-hcli is Copyright (c) 2025 Hex-Rays SA and is distributed under the MIT
- *   License:
- *
- *   Permission is hereby granted, free of charge, to any person obtaining a copy of
- *   this software and associated documentation files (the "Software"), to deal in
- *   the Software without restriction, including without limitation the rights to
- *   use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
- *   the Software, and to permit persons to whom the Software is furnished to do so,
- *   subject to the following conditions: The above copyright notice and this
- *   permission notice shall be included in all copies or substantial portions of
- *   the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- *   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- *   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
- *   EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
- *   OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- *   FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
- *   THE SOFTWARE.
- *
- * Where this deliberately differs from hcli:
- *   - Windows discovery lists \\.\pipe\ instead of opening a pipe per process id, so
- *     finding instances never connects to anything;
- *   - every endpoint is checked to be served by the pid in its name;
- *   - Windows pipe I/O has timeouts;
- *   - several matching instances are an error that names them, not a silent pick;
- *   - after a launch, the wait is for the launched process's own endpoint.
- */
+// Third-party notice: parts of this file reimplement the behaviour of Hex-Rays' ida-hcli
+// (https://github.com/HexRaysSA/ida-hcli), Copyright (c) 2025 Hex-Rays SA, distributed under
+// the MIT License. The full notice is in THIRD-PARTY-NOTICES.md.
 
 #include "deep_link.hpp"
+#include "os.hpp"
+
+#include "../../common/cli_args.hpp"
 
 #include <xsql/json.hpp>
 
@@ -96,10 +66,6 @@ namespace {
 
 using json = xsql::json;
 
-// A field that holds a T, else nullopt. Unlike json::value() it never throws:
-// value() calls get<T>() on a present key, which throws type_error 302 for a null
-// or wrongly typed value -- and these objects come from another process (an IPC
-// reply) or a hand-edited file (links.json).
 template <typename T>
 std::optional<T> field(const json& j, const char* key) {
     if (!j.is_object()) return std::nullopt;
@@ -127,10 +93,6 @@ template <typename T>
 T field_or(const json& j, const char* key, T fallback) {
     return field<T>(j, key).value_or(std::move(fallback));
 }
-
-// ---------------------------------------------------------------------------
-// Small string helpers
-// ---------------------------------------------------------------------------
 
 std::string lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
@@ -166,14 +128,10 @@ std::string strip_idb_extension(std::string name) {
     return name;
 }
 
-// A decoded link field holding a C0 control byte or DEL: %00 would cut a path short
-// at the OS boundary (stat, CreateProcessW), %0A would forge a handler-log line.
 bool has_control_byte(std::string_view s) {
     return std::any_of(s.begin(), s.end(), [](unsigned char c) { return c < 0x20 || c == 0x7F; });
 }
 
-// Unicode bidirectional overrides and isolates (U+202A..U+202E, U+2066..U+2069):
-// in a database path they can make the confirmation dialog show another name.
 bool has_bidi_control(std::string_view s) {
     for (size_t i = 0; i + 2 < s.size(); ++i) {
         const auto b0 = static_cast<unsigned char>(s[i]);
@@ -186,8 +144,6 @@ bool has_bidi_control(std::string_view s) {
     return false;
 }
 
-// Base-0 unsigned parse, like QString::toULongLong(&ok, 0): 0x hex, leading-0 octal,
-// else decimal. The whole string must be consumed.
 std::optional<uint64_t> parse_number(const std::string& text) {
     if (text.empty()) return std::nullopt;
     for (char c : text) {
@@ -253,10 +209,6 @@ std::string path_string(const fs::path& p) {
 #endif
 }
 
-// ---------------------------------------------------------------------------
-// The ida:// resources and the views each one opens in IDA 9.4.
-// ---------------------------------------------------------------------------
-
 struct ResourceInfo {
     const char* name;
     const char* default_view;
@@ -304,7 +256,6 @@ std::string resource_list() {
     return join(names, ", ");
 }
 
-// Checks shared by build() and parse(). Returns the resolved view or sets `error`.
 std::string check_target(const LinkTarget& t, std::string& error) {
     const ResourceInfo* r = find_resource(t.resource);
     if (r == nullptr) {
@@ -327,7 +278,6 @@ std::string check_target(const LinkTarget& t, std::string& error) {
             error = "Types require 'name' parameter";
             return {};
         }
-        // Accept only names build() can hand to IDA, so parse() and build() agree.
         std::string encoded;
         if (!encode_type_name(t.name, encoded, error)) return {};
     } else {
@@ -351,18 +301,10 @@ std::string check_target(const LinkTarget& t, std::string& error) {
     return view;
 }
 
-// ---------------------------------------------------------------------------
-// IPC override seam
-// ---------------------------------------------------------------------------
-
 std::mutex g_override_mutex;
 std::optional<IpcOptions> g_override;
 
-}  // namespace
-
-// ===========================================================================
-// Link model
-// ===========================================================================
+}
 
 const std::vector<std::string>& resources() {
     static const std::vector<std::string> names = [] {
@@ -417,12 +359,6 @@ std::string percent_encode(std::string_view text) {
 }
 
 bool encode_type_name(std::string_view name, std::string& out, std::string& error) {
-    // IDA reads name= with QUrl's PrettyDecoded, which decodes ordinary escapes but
-    // leaves the URL delimiters encoded: a link carrying "tagX%3A%3A%24A" is looked up
-    // as that literal text and IDA answers "Type ... not found". Measured over IDA
-    // 9.4's IPC for : $ ( ) ' (raw resolves, %XX does not). So delimiters travel
-    // raw. '&' and '#' cannot (they end the value) and neither can '%' (its escape
-    // is never decoded), so a name holding one of them has no working link.
     static const char hex[] = "0123456789ABCDEF";
     out.clear();
     for (unsigned char c : name) {
@@ -528,7 +464,6 @@ ParsedLink parse(std::string_view uri) {
         authority = rest.substr(0, slash);
         path = rest.substr(slash);
     }
-    // user@host:port -> host (IDA uses QUrl::host()).
     const size_t at = authority.rfind('@');
     if (at != std::string_view::npos) authority = authority.substr(at + 1);
     const size_t colon = authority.find(':');
@@ -538,7 +473,6 @@ ParsedLink parse(std::string_view uri) {
     if (has_control_byte(*host)) return fail("Control characters are not allowed in the source");
     out.target.source = lower(*host);
 
-    // Query: first value of each key wins, like QUrlQuery::queryItemValue.
     std::map<std::string, std::string> params;
     size_t pos = 0;
     while (pos <= query.size() && !query.empty()) {
@@ -559,14 +493,12 @@ ParsedLink parse(std::string_view uri) {
         pos = amp + 1;
     }
 
-    // Knowledge Exchange links belong to hcli's download flow; recognise, never open.
     if ((out.target.source == "ke" && params.count("url")) ||
         path.find("/api/v1/buckets/") != std::string_view::npos) {
         out.is_ke = true;
         return fail("Knowledge Exchange links are not supported by idasql");
     }
 
-    // Path: fully decoded, then split on '/', empty segments skipped (as IDA does).
     const auto decoded_path = percent_decode(path);
     if (!decoded_path) return fail("Malformed percent-encoding in the path");
     std::vector<std::string> segments;
@@ -640,22 +572,15 @@ std::string screen_untrusted_uri(std::string_view uri) {
     return {};
 }
 
-// ===========================================================================
-// IPC
-// ===========================================================================
-
 namespace {
 constexpr const char* kPipePrefix = "ida_ipc_";
 
-// IDA's replies are well under 1 KiB; anything near this is not IDA.
 constexpr size_t kMaxReplyBytes = size_t{1} << 20;
 
-// A reply is complete once it parses. Only a chunk that brings a '}' can complete
-// it, so the whole buffer is not re-parsed after every read.
 bool json_complete(const std::string& text, std::string_view chunk) {
     return !text.empty() && chunk.find('}') != std::string_view::npos && json::accept(text);
 }
-}  // namespace
+}
 
 std::string Instance::idb_name() const { return idb_path.empty() ? std::string() : basename_of(idb_path); }
 
@@ -682,7 +607,7 @@ std::optional<uint64_t> pid_from_name(std::string_view name) {
         return std::nullopt;
     return parse_number(digits);
 }
-}  // namespace
+}
 
 #ifdef _WIN32
 
@@ -714,9 +639,6 @@ std::vector<BYTE> token_user_sid(HANDLE token) {
     return out;
 }
 
-// The pipe's server runs in this logon session as this user. The pid check alone
-// would trust any process -- another user's, a service -- that names its own pipe
-// ida_ipc_<its pid>. (POSIX checks the peer uid instead.)
 bool served_by_same_user(HANDLE pipe, ULONG server_pid, std::string& why) {
     ULONG server_session = 0;
     DWORD my_session = 0;
@@ -747,7 +669,6 @@ bool served_by_same_user(HANDLE pipe, ULONG server_pid, std::string& why) {
     return true;
 }
 
-// Wait for an overlapped operation; cancels it on timeout.
 bool finish_overlapped(HANDLE h, OVERLAPPED& ov, DWORD& transferred, DWORD timeout_ms, DWORD& err) {
     const DWORD wait = WaitForSingleObject(ov.hEvent, timeout_ms);
     if (wait != WAIT_OBJECT_0) {
@@ -762,7 +683,7 @@ bool finish_overlapped(HANDLE h, OVERLAPPED& ov, DWORD& transferred, DWORD timeo
     }
     return true;
 }
-}  // namespace
+}
 
 std::optional<std::string> request(const Endpoint& endpoint, const std::string& json_request,
                                    std::string& error, const IpcOptions& options) {
@@ -803,7 +724,6 @@ std::optional<std::string> request(const Endpoint& endpoint, const std::string& 
     } event_closer{ov.hEvent};
     const DWORD timeout = static_cast<DWORD>(options.io_timeout_ms);
 
-    // One write: IDA parses the first read it gets and replies once.
     DWORD transferred = 0, err = 0;
     if (!WriteFile(h, json_request.data(), static_cast<DWORD>(json_request.size()), nullptr, &ov) &&
         GetLastError() != ERROR_IO_PENDING) {
@@ -860,7 +780,7 @@ std::optional<std::string> request(const Endpoint& endpoint, const std::string& 
     return response;
 }
 
-#else  // POSIX
+#else
 
 std::vector<Endpoint> discover(const IpcOptions& options) {
     std::vector<Endpoint> out;
@@ -869,9 +789,6 @@ std::vector<Endpoint> discover(const IpcOptions& options) {
         const std::string name = it->path().filename().string();
         const auto pid = pid_from_name(name);
         if (!pid || !pid_wanted(*pid, options)) continue;
-        // A socket whose pid this process cannot see is skipped, never removed: the
-        // pid may live in another PID namespace (a container sharing /tmp), and
-        // discovery must not change the filesystem.
         if (::kill(static_cast<pid_t>(*pid), 0) == 0 || errno == EPERM) {
             out.push_back({*pid, it->path().string()});
         }
@@ -906,7 +823,7 @@ bool peer_is_same_user(int fd) {
     return true;
 #endif
 }
-}  // namespace
+}
 
 std::optional<std::string> request(const Endpoint& endpoint, const std::string& json_request,
                                    std::string& error, const IpcOptions& options) {
@@ -1036,11 +953,9 @@ Instance query_instance(const Endpoint& ep, const IpcOptions& options) {
     }
     return inst;
 }
-}  // namespace
+}
 
 std::vector<Instance> list_instances(const IpcOptions& options) {
-    // Every endpoint is asked at once: an instance whose UI thread is busy costs one
-    // timeout, not one per instance. discover() returns them ordered by pid.
     std::vector<std::future<Instance>> pending;
     for (const auto& ep : discover(options))
         pending.push_back(std::async(std::launch::async, query_instance, ep, options));
@@ -1082,10 +997,6 @@ std::optional<bool> analysis_complete(const Endpoint& endpoint, std::string& err
     return *done;
 }
 
-// ===========================================================================
-// Selection
-// ===========================================================================
-
 bool same_path(std::string_view a, std::string_view b) {
     auto norm = [](std::string_view p) {
         std::string s(p);
@@ -1107,13 +1018,11 @@ bool same_database(std::string_view a, std::string_view b) {
     const fs::path cb = fs::weakly_canonical(u8path(std::string(b)), ec_b);
     if (ec_a || ec_b) return false;
 #if defined(_WIN32) || defined(__APPLE__)
-    // Case-insensitive file systems (the default on both).
     auto key = [](const fs::path& p) { return lower(path_string(p)); };
 #else
     auto key = [](const fs::path& p) { return path_string(p); };
 #endif
     if (key(ca) == key(cb)) return true;
-    // IDA upgrades a legacy x.idb to x.i64 next to it.
     const std::string name_a = path_string(ca.filename()), name_b = path_string(cb.filename());
     const bool a_idb = ends_with_ci(name_a, ".i64") || ends_with_ci(name_a, ".idb");
     const bool b_idb = ends_with_ci(name_b, ".i64") || ends_with_ci(name_b, ".idb");
@@ -1139,7 +1048,7 @@ Selection select_instance(const std::vector<Instance>& instances, const LinkTarg
                 return sel;
             }
         }
-        sel.error = "no IDA 9.4 instance with process id " + std::to_string(*pid);
+        sel.error = "no IDA 9.4+ instance with process id " + std::to_string(*pid);
         return sel;
     }
 
@@ -1151,8 +1060,6 @@ Selection select_instance(const std::vector<Instance>& instances, const LinkTarg
     }
     if (matches.empty() && !target.idb_name.empty() &&
         (allow_name_fallback || target.idb_path.empty())) {
-        // No instance has that exact file (or the link names none): a copy of the
-        // database opened elsewhere still counts, by its basename.
         const std::string want = lower(strip_idb_extension(target.idb_name));
         for (const auto& i : with_db) {
             if (lower(strip_idb_extension(i.idb_name())) == want) matches.push_back(i);
@@ -1161,7 +1068,7 @@ Selection select_instance(const std::vector<Instance>& instances, const LinkTarg
     } else if (target.idb_path.empty() && target.idb_name.empty()) {
         matches = with_db;
         if (matches.empty()) {
-            sel.error = "no running IDA 9.4 instance has a database open";
+            sel.error = "no running IDA 9.4+ instance has a database open";
             return sel;
         }
     }
@@ -1170,7 +1077,7 @@ Selection select_instance(const std::vector<Instance>& instances, const LinkTarg
         sel.chosen = matches.front();
     } else if (matches.empty()) {
         const std::string what = !target.idb_path.empty() ? target.idb_path : target.idb_name;
-        sel.error = "no running IDA 9.4 instance has " + what + " open";
+        sel.error = "no running IDA 9.4+ instance has " + what + " open";
     } else {
         sel.candidates = matches;
         sel.error = target.idb_name.empty() && target.idb_path.empty()
@@ -1216,28 +1123,12 @@ SessionChoice choose_from_session(const std::vector<Instance>& others, const Lin
     return choice;
 }
 
-// ===========================================================================
-// Config
-// ===========================================================================
-
-fs::path default_config_path() {
-#ifdef _WIN32
-    std::string base = env_var("APPDATA");
-    if (base.empty()) base = env_var("USERPROFILE");
-    return u8path(base) / "idasql" / "links.json";
-#elif defined(__APPLE__)
-    return fs::path(env_var("HOME")) / "Library" / "Application Support" / "idasql" / "links.json";
-#else
-    std::string base = env_var("XDG_CONFIG_HOME");
-    if (base.empty()) base = env_var("HOME") + "/.config";
-    return fs::path(base) / "idasql" / "links.json";
-#endif
-}
+fs::path default_config_path() { return os::config_dir() / "links.json"; }
 
 Config load_config(const fs::path& path, std::string* error) {
     Config cfg;
     std::ifstream in(path, std::ios::binary);
-    if (!in) return cfg;  // no file = defaults
+    if (!in) return cfg;
     std::stringstream ss;
     ss << in.rdbuf();
     json j = json::parse(ss.str(), nullptr, false);
@@ -1251,8 +1142,6 @@ Config load_config(const fs::path& path, std::string* error) {
         }
     }
     const bool bad_sources = j.contains("sources") && !j["sources"].is_object();
-    // A hand-edited file may hold any JSON type: a wrong one is reported and the
-    // default kept, never thrown.
     auto warn = [&](const std::string& w) {
         if (error) *error += (error->empty() ? "" : "\n") + path_string(path) + ": " + w;
     };
@@ -1311,10 +1200,6 @@ bool valid_source_name(std::string_view name) {
                        [&](unsigned char c) { return ok(c) || c == '-'; });
 }
 
-// ===========================================================================
-// Launch
-// ===========================================================================
-
 fs::path self_executable() {
 #ifdef _WIN32
     std::wstring buf(32768, L'\0');
@@ -1333,14 +1218,6 @@ fs::path self_executable() {
 #else
     std::error_code ec;
     return fs::read_symlink("/proc/self/exe", ec);
-#endif
-}
-
-uint64_t current_pid() {
-#ifdef _WIN32
-    return GetCurrentProcessId();
-#else
-    return static_cast<uint64_t>(::getpid());
 #endif
 }
 
@@ -1378,7 +1255,7 @@ bool path_within(const fs::path& child, const fs::path& dir) {
     }
     return true;
 }
-}  // namespace
+}
 
 std::optional<fs::path> resolve_ida(const Config& config, const fs::path& self, std::string& error) {
     std::vector<fs::path> candidates;
@@ -1400,8 +1277,6 @@ std::optional<fs::path> resolve_ida(const Config& config, const fs::path& self, 
 
 IdbResolution resolve_idb(const LinkTarget& target, const Config& config) {
     IdbResolution res;
-    // parse() already refuses these; resolve_idb is also reached with targets
-    // built in code, and must never hand such a name to the file system or IDA.
     if (has_control_byte(target.idb_path) || has_control_byte(target.idb_name)) {
         res.error = "database path contains control characters";
         return res;
@@ -1431,7 +1306,6 @@ IdbResolution resolve_idb(const LinkTarget& target, const Config& config) {
             }
             return res;
         }
-        // Fall through to the sources: the file may have moved.
     }
     if (target.idb_name.empty()) {
         res.error = "the link names no database, so there is nothing to launch";
@@ -1452,8 +1326,6 @@ IdbResolution resolve_idb(const LinkTarget& target, const Config& config) {
     } else {
         roots.assign(config.sources.begin(), config.sources.end());
     }
-    // Every match, never the first one the directory order happens to give; bounded
-    // so a click never walks a whole disk.
     constexpr int kMaxDepth = 16;
     constexpr size_t kMaxEntries = 200000;
     std::vector<fs::path> found;
@@ -1468,7 +1340,6 @@ IdbResolution resolve_idb(const LinkTarget& target, const Config& config) {
                 return res;
             }
             if (it.depth() >= kMaxDepth) it.disable_recursion_pending();
-            // A separate error code: one dangling link must not end the whole walk.
             std::error_code entry_ec;
             if (!it->is_regular_file(entry_ec)) continue;
             const std::string file = path_string(it->path().filename());
@@ -1497,7 +1368,6 @@ IdbResolution resolve_idb(const LinkTarget& target, const Config& config) {
 
 #ifdef _WIN32
 namespace {
-// Quote one argument by the CommandLineToArgvW rules.
 std::wstring quote_arg(const std::wstring& arg) {
     if (!arg.empty() && arg.find_first_of(L" \t\"") == std::wstring::npos) return arg;
     std::wstring out = L"\"";
@@ -1519,7 +1389,7 @@ std::wstring quote_arg(const std::wstring& arg) {
     out.push_back(L'"');
     return out;
 }
-}  // namespace
+}
 #else
 namespace {
 std::optional<pid_t> posix_spawn_detached(const std::vector<std::string>& argv, std::string& error) {
@@ -1540,13 +1410,11 @@ std::optional<pid_t> posix_spawn_detached(const std::vector<std::string>& argv, 
     }
     return pid;
 }
-}  // namespace
+}
 #endif
 
 std::optional<uint64_t> spawn_ida(const fs::path& ida, const std::vector<std::string>& extra_args,
                                   const fs::path& idb, std::string& error) {
-    // An argument with an embedded NUL would reach IDA cut short (argv and
-    // CreateProcessW both end a string there).
     auto has_nul = [](const auto& s) { return std::find(s.begin(), s.end(), 0) != s.end(); };
     if (has_nul(ida.native()) || has_nul(idb.native()) ||
         std::any_of(extra_args.begin(), extra_args.end(), has_nul)) {
@@ -1572,8 +1440,6 @@ std::optional<uint64_t> spawn_ida(const fs::path& ida, const std::vector<std::st
     return pid;
 #else
 #if defined(__APPLE__)
-    // A bundle binary (X.app/Contents/MacOS/ida) is started through Launch Services so
-    // it gets a proper application activation; that path does not report a pid.
     const std::string s = ida.string();
     const size_t app = s.find(".app/Contents/MacOS/");
     if (app != std::string::npos) {
@@ -1593,10 +1459,6 @@ std::optional<uint64_t> spawn_ida(const fs::path& ida, const std::vector<std::st
 #endif
 }
 
-// ===========================================================================
-// OS handler registration
-// ===========================================================================
-
 const char* owner_name(HandlerOwner owner) {
     switch (owner) {
         case HandlerOwner::none: return "none";
@@ -1609,8 +1471,6 @@ const char* owner_name(HandlerOwner owner) {
 
 namespace {
 #ifdef _WIN32
-// The registered handler command is read and written only on Windows (registry);
-// macOS registers an app bundle and Linux a .desktop entry instead.
 HandlerOwner classify_command(const std::string& command) {
     if (command.empty()) return HandlerOwner::none;
     const std::string c = lower(command);
@@ -1621,8 +1481,6 @@ HandlerOwner classify_command(const std::string& command) {
 }
 
 std::string handler_command_line(const fs::path& exe) {
-    // No `cmd /c` (it would mangle %XX escapes) and `--` so a crafted link can never
-    // be read as an option.
     return "\"" + path_string(exe) + "\" link open --from-handler -- \"%1\"";
 }
 #endif
@@ -1651,7 +1509,6 @@ fs::path desktop_file(const RegistrationEnv& env) {
     return home_of(env) / ".local" / "share" / "applications" / "idasql-ida-handler.desktop";
 }
 
-// Our .desktop file remembers the handler it replaced, so unregister can restore it.
 constexpr const char* kPreviousKey = "X-Idasql-Previous-Handler=";
 
 std::string saved_previous(const RegistrationEnv& env) {
@@ -1663,7 +1520,6 @@ std::string saved_previous(const RegistrationEnv& env) {
     return {};
 }
 
-// What xdg-mime recorded as the default handler for x-scheme-handler/ida.
 std::string mimeapps_default(const RegistrationEnv& env) {
     const std::string key = "x-scheme-handler/ida=";
     for (const fs::path& file : {home_of(env) / ".config" / "mimeapps.list",
@@ -1696,7 +1552,7 @@ const char* kLsregister =
     "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/"
     "Versions/A/Support/lsregister";
 #endif
-}  // namespace
+}
 
 #ifdef _WIN32
 namespace {
@@ -1728,14 +1584,11 @@ std::string reg_get(HKEY root, const std::wstring& subkey, const wchar_t* name =
     return out;
 }
 
-// Our ida key remembers the handler it replaced (its HKCU command and icon), so
-// unregister can put it back. A per-machine handler needs no copy: it applies again
-// by itself once our per-user key is gone.
 constexpr const wchar_t* kPreviousCommand = L"IdasqlPreviousCommand";
 constexpr const wchar_t* kPreviousIcon = L"IdasqlPreviousIcon";
 
 std::wstring ida_key(const RegistrationEnv& env) { return widen(env.windows_classes_key + "\\ida"); }
-}  // namespace
+}
 #endif
 
 HandlerStatus handler_status(const RegistrationEnv& env) {
@@ -1743,7 +1596,6 @@ HandlerStatus handler_status(const RegistrationEnv& env) {
 #ifdef _WIN32
     const std::wstring sub = ida_key(env) + L"\\shell\\open\\command";
     st.command = reg_get(HKEY_CURRENT_USER, sub);
-    // A per-machine registration applies when the user has none of their own.
     if (st.command.empty() && env.windows_classes_key == "Software\\Classes")
         st.command = reg_get(HKEY_LOCAL_MACHINE, sub);
     st.owner = classify_command(st.command);
@@ -1778,8 +1630,6 @@ bool register_handler(const fs::path& handler_exe, const RegistrationEnv& env, s
 #ifdef _WIN32
     const std::wstring root = ida_key(env);
     const std::wstring exe = handler_exe.native();
-    // Remember the handler we replace, unless it is already us (registering twice must
-    // not overwrite the saved one with our own command).
     const std::string before = reg_get(HKEY_CURRENT_USER, root + L"\\shell\\open\\command");
     bool ok = true;
     if (!before.empty() && classify_command(before) != HandlerOwner::idasql) {
@@ -1828,8 +1678,6 @@ bool register_handler(const fs::path& handler_exe, const RegistrationEnv& env, s
 #else
     auto run = env.run ? env.run : run_default;
     const fs::path file = desktop_file(env);
-    // The handler we replace: the current default, unless that is already us, in
-    // which case the one we saved last time.
     const std::string current = mimeapps_default(env);
     const std::string previous = current == file.filename().string() ? saved_previous(env) : current;
     std::error_code ec;
@@ -1869,7 +1717,6 @@ bool unregister_handler(const RegistrationEnv& env, std::string& error) {
 #ifdef _WIN32
     const std::wstring root = ida_key(env);
     if (!st.previous.empty()) {
-        // Put the replaced handler back: its command, its icon, and nothing of ours.
         const std::string icon = reg_get(HKEY_CURRENT_USER, root, kPreviousIcon);
         bool ok = reg_set(HKEY_CURRENT_USER, root + L"\\shell\\open\\command", nullptr, widen(st.previous));
         if (icon.empty()) {
@@ -1897,7 +1744,6 @@ bool unregister_handler(const RegistrationEnv& env, std::string& error) {
     run({kLsregister, "-u", app.string()});
     std::error_code ec;
     fs::remove_all(app, ec);
-    // hcli's bundle claims ida:// again once ours is gone.
     if (!st.previous.empty()) run({kLsregister, "-f", st.previous});
     return true;
 #else
@@ -1911,10 +1757,6 @@ bool unregister_handler(const RegistrationEnv& env, std::string& error) {
 #endif
 }
 
-// ===========================================================================
-// IPC override seam
-// ===========================================================================
-
 void set_ipc_options_override(std::optional<IpcOptions> options) {
     std::lock_guard<std::mutex> lock(g_override_mutex);
     g_override = std::move(options);
@@ -1925,21 +1767,17 @@ IpcOptions effective_ipc_options() {
     return g_override ? *g_override : IpcOptions{};
 }
 
-// ===========================================================================
-// `idasql link ...`
-// ===========================================================================
-
 namespace {
 
 enum Exit : int {
-    kOk = 0,
-    kUsage = 1,
-    kBadLink = 2,
-    kNotFound = 3,
-    kAmbiguous = 4,
-    kIdaError = 5,
-    kLaunchFailed = 6,
-    kDeclined = 7,
+    kOk = cli::kOk,
+    kNotFound = cli::kFailed,
+    kUsage = cli::kUsage,
+    kBadLink = cli::kFirstSpecific,
+    kAmbiguous,
+    kIdaError,
+    kLaunchFailed,
+    kDeclined,
 };
 
 fs::path handler_log_path() {
@@ -1969,7 +1807,6 @@ public:
         log("error", text);
         if (from_handler_) notify(text);
     }
-    // The user's own "no": record it, but raising a box about it would ask twice.
     void declined(const std::string& text) {
         std::cerr << text << "\n";
         log("info", text);
@@ -2022,7 +1859,6 @@ private:
     bool from_handler_;
 };
 
-// A yes/no question on the desktop; false when no dialog can be shown.
 bool confirm_on_desktop(const std::string& question) {
 #ifdef _WIN32
     return MessageBoxW(nullptr, widen(question).c_str(), L"idasql link",
@@ -2046,11 +1882,10 @@ void print_usage() {
         "\n"
         "  open [--pid N] [--no-launch] [--launch-anyway] [--skip-analysis] [--timeout S]\n"
         "       [--ida-arg A]... [--from-handler] [--] <uri>\n"
-        "                       open an ida:// link in a running IDA 9.4,\n"
+        "                       open an ida:// link in a running IDA 9.4+,\n"
         "                       launching IDA on the database when none has it open\n"
         "                       (--timeout: 1..3600 seconds; --launch-anyway: launch even\n"
         "                       when an IDA that does not answer may have it open)\n"
-        "  list [--json]        running IDA 9.4 instances and their databases\n"
         "  status [--json]      who handles ida:// links on this machine\n"
         "  register             make idasql the ida:// handler; a handler it replaces\n"
         "                       (hcli's, say) is saved\n"
@@ -2060,7 +1895,11 @@ void print_usage() {
         "  config launch-timeout <seconds> | config wait-analysis on|off\n"
         "\n"
         "  --config <file>      before the verb: use another links.json\n"
-        "                       (default: the user config dir)\n";
+        "                       (default: the user config dir)\n"
+        "\n"
+        "exit codes: 0 done, 1 not found, 2 usage, 4 bad link, 5 ambiguous,\n"
+        "            6 IDA error, 7 launch failed, 8 declined\n"
+        "(running instances: idasql instances)\n";
 }
 
 bool take_value(const std::vector<std::string>& a, size_t& i, std::string& out) {
@@ -2069,39 +1908,8 @@ bool take_value(const std::vector<std::string>& a, size_t& i, std::string& out) 
     return true;
 }
 
-json instance_json(const Instance& i, const IpcOptions& options) {
-    json j = {{"pid", i.pid}, {"endpoint", i.endpoint}, {"responsive", i.responsive},
-              {"idb_path", i.idb_path}, {"idb_name", i.idb_name()}, {"version", i.version}};
-    if (i.responsive && !i.idb_path.empty()) {
-        std::string err;
-        const auto done = analysis_complete({i.pid, i.endpoint}, err, options);
-        j["analysis_complete"] = done ? json(*done) : json(nullptr);
-    } else {
-        j["analysis_complete"] = nullptr;
-    }
-    return j;
-}
-
 std::string describe(const Instance& i) {
     return "PID " + std::to_string(i.pid) + ": " + (i.idb_path.empty() ? "no database open" : i.idb_path);
-}
-
-int verb_list(const std::vector<std::string>& a) {
-    bool as_json = std::find(a.begin(), a.end(), "--json") != a.end();
-    const IpcOptions options = effective_ipc_options();
-    const auto instances = list_instances(options);
-    if (as_json) {
-        json arr = json::array();
-        for (const auto& i : instances) arr.push_back(instance_json(i, options));
-        std::cout << arr.dump(2) << "\n";
-        return kOk;
-    }
-    if (instances.empty()) {
-        std::cout << "No running IDA 9.4 instances.\n";
-        return kOk;
-    }
-    for (const auto& i : instances) std::cout << describe(i) << (i.responsive ? "" : " (not answering)") << "\n";
-    return kOk;
 }
 
 int verb_status(const std::vector<std::string>& a) {
@@ -2225,7 +2033,6 @@ int verb_config(const std::vector<std::string>& a, const fs::path& config_path) 
     return kOk;
 }
 
-// Poll until `probe` returns a value or the deadline passes.
 template <typename T, typename F>
 std::optional<T> poll_until(std::chrono::steady_clock::time_point deadline, F probe) {
     auto delay = std::chrono::milliseconds(100);
@@ -2282,9 +2089,6 @@ int verb_open(const std::vector<std::string>& a, const fs::path& config_path) {
     }
     Reporter report(from_handler);
 #ifdef _WIN32
-    // A click starts this console program in a console window of its own, which
-    // would then sit on the desktop for as long as a launch takes. Detaching
-    // closes it; the handler reports through its log and native dialogs instead.
     if (from_handler) FreeConsole();
 #endif
     if (uri.empty()) {
@@ -2319,8 +2123,6 @@ int verb_open(const std::vector<std::string>& a, const fs::path& config_path) {
     };
 
     const auto instances = list_instances(options);
-    // The exact file is on this machine: a same-named database open elsewhere is a
-    // different database, so it is launched rather than steered to.
     const bool exact_file_here = !link.target.idb_path.empty() && !is_remote_path(link.target.idb_path) &&
                                  is_file(u8path(link.target.idb_path));
     const Selection sel = select_instance(instances, link.target, pid, !exact_file_here);
@@ -2343,9 +2145,6 @@ int verb_open(const std::vector<std::string>& a, const fs::path& config_path) {
         return kNotFound;
     }
 
-    // An IDA that does not answer (its UI thread busy: a modal dialog, a script,
-    // a long query) may be the one with this database open; a second IDA on the
-    // same database would fail on its lock.
     if (!launch_anyway) {
         for (const auto& i : instances) {
             if (!i.responsive) {
@@ -2357,7 +2156,6 @@ int verb_open(const std::vector<std::string>& a, const fs::path& config_path) {
         }
     }
 
-    // Nothing has the database open: launch IDA on it.
     std::string error;
     const Config cfg = load_config(config_path, &error);
     const IdbResolution idb = resolve_idb(link.target, cfg);
@@ -2365,7 +2163,6 @@ int verb_open(const std::vector<std::string>& a, const fs::path& config_path) {
         report.error(sel.error + "; " + idb.error);
         return kNotFound;
     }
-    // IDA keeps the unpacked <stem>.id0 next to the database while it is open.
     if (!launch_anyway) {
         fs::path id0 = *idb.path;
         id0.replace_extension(".id0");
@@ -2398,14 +2195,10 @@ int verb_open(const std::vector<std::string>& a, const fs::path& config_path) {
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(timeout_s.value_or(cfg.launch_timeout_s));
     const std::string db = path_string(*idb.path);
-    // Wait for the launched process's own endpoint with the database loaded (IDA
-    // starts its IPC server only after the database opens).
     const auto ready = poll_until<Instance>(deadline, [&]() -> std::optional<Instance> {
         IpcOptions o = options;
         if (*child) o.only_pids = {*child};
         for (const auto& i : list_instances(o)) {
-            // The launched process opened it, under whatever name IDA reports
-            // (a .idb upgraded to .i64, a canonical or differently-cased path).
             if (i.responsive && same_database(i.idb_path, db)) return i;
         }
         return std::nullopt;
@@ -2426,9 +2219,6 @@ int verb_open(const std::vector<std::string>& a, const fs::path& config_path) {
 }
 
 int run_cli_impl(const std::vector<std::string>& args_in) {
-    // Global options come before the verb only. Nothing after it is read as one: the
-    // handler passes `open --from-handler -- "%1"`, and a link must never carry its
-    // own --config (and with it the IDA executable to start).
     fs::path config_path = default_config_path();
     size_t i = 0;
     while (i < args_in.size() && args_in[i] == "--config") {
@@ -2447,7 +2237,6 @@ int run_cli_impl(const std::vector<std::string>& args_in) {
     const std::string verb = args[0];
     const std::vector<std::string> rest(args.begin() + 1, args.end());
     if (verb == "open") return verb_open(rest, config_path);
-    if (verb == "list") return verb_list(rest);
     if (verb == "status") return verb_status(rest);
     if (verb == "register") return verb_register(rest, false);
     if (verb == "unregister") return verb_register(rest, true);
@@ -2458,10 +2247,9 @@ int run_cli_impl(const std::vector<std::string>& args_in) {
     return kUsage;
 }
 
-}  // namespace
+}
 
 int run_cli(const std::vector<std::string>& args) {
-    // Nothing may escape a link verb: it runs as the OS URL handler.
     const bool handler = std::find(args.begin(), args.end(), "--from-handler") != args.end();
     try {
         return run_cli_impl(args);
@@ -2473,5 +2261,5 @@ int run_cli(const std::vector<std::string>& args) {
     return kIdaError;
 }
 
-}  // namespace deep_link
-}  // namespace idasql
+}
+}

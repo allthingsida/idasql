@@ -11,8 +11,6 @@
 namespace idasql {
 namespace core {
 
-// Convert a SQL int64 address value to ea_t (wrap-around cast). Shared by the
-// heads/bytes generator tables.
 ea_t normalize_sql_ea(int64_t value) {
   return static_cast<ea_t>(static_cast<uint64_t>(value));
 }
@@ -27,8 +25,6 @@ ea_t HeadSpanWalker::first_in_span(const xsql::U64Span &span) const {
   if (descending_) {
     if (hi != BADADDR && is_head(get_flags(hi)))
       return hi;
-    // prev_head(BADADDR, lo) is the highest head: BADADDR is a valid start
-    // for a backward walk.
     return prev_head(hi, lo);
   }
   if (lo != BADADDR && is_head(get_flags(lo)))
@@ -63,10 +59,6 @@ ea_t HeadSpanWalker::next() {
   current_ = BADADDR;
   return BADADDR;
 }
-
-// ============================================================================
-// Helper: Safe string extraction from IDA
-// ============================================================================
 
 std::string safe_func_name(ea_t ea) {
   qstring name;
@@ -152,10 +144,6 @@ std::string name_or_fallback(ea_t ea) {
   return std::string(fallback.c_str());
 }
 
-// ============================================================================
-// Function type helpers
-// ============================================================================
-
 bool get_func_tinfo(ea_t ea, tinfo_t &tif) { return get_tinfo(&tif, ea); }
 
 const char *get_cc_name(callcnv_t cc) {
@@ -182,10 +170,6 @@ const char *get_cc_name(callcnv_t cc) {
     return "unknown";
   }
 }
-
-// ============================================================================
-// Helper: get function type details (rettype, calling conv, etc.)
-// ============================================================================
 
 bool get_func_type_details(ea_t ea, func_type_data_t &fi) {
   tinfo_t tif;
@@ -222,7 +206,6 @@ bool parse_int64(const std::string &text, int64_t &out_value) {
   const std::string trimmed = trim_copy(text);
   if (trimmed.empty())
     return false;
-  // Out of range is a failure, never a silent clamp to INT64_MIN/MAX.
   errno = 0;
   char *end_ptr = nullptr;
   const long long value = std::strtoll(trimmed.c_str(), &end_ptr, 0);
@@ -259,5 +242,5 @@ std::string tid_name_or_fallback(tid_t tid) {
   return "";
 }
 
-} // namespace core
-} // namespace idasql
+}
+}

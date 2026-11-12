@@ -6,19 +6,6 @@
 
 #pragma once
 
-/**
- * mcp_server.hpp - MCP server wrapper for IDASQL
- *
- * IDAMCPServer - MCP server for IDASQL
- *
- * Thread-safe MCP server using command queue pattern.
- * Tool handlers queue commands for execution on the main thread.
- *
- * Usage modes:
- * 1. CLI (idalib): Call run_until_stopped() to process commands on main thread
- * 2. Plugin: Use execute_sync() wrapper in callbacks (no run_until_stopped() needed)
- */
-
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -29,10 +16,8 @@
 
 namespace idasql {
 
-// SQL callback for handling requests.
 using QueryCallback = std::function<std::string(const std::string& sql)>;
 
-// Internal command structure for cross-thread execution.
 struct MCPPendingCommand {
     enum class Type { Query };
 
@@ -56,76 +41,30 @@ public:
     IDAMCPServer();
     ~IDAMCPServer();
 
-    // Non-copyable
     IDAMCPServer(const IDAMCPServer&) = delete;
     IDAMCPServer& operator=(const IDAMCPServer&) = delete;
 
-    /**
-     * Start MCP server on given port with callback.
-     *
-     * @param port Port to listen on (0 = random port 9000-9999)
-     * @param query_cb SQL query callback
-     * @param bind_addr Address to bind to (default: localhost only)
-     * @param use_queue If true, callbacks are queued for main thread (CLI mode)
-     *                  If false, callbacks called directly (plugin mode with execute_sync)
-     * @return Actual port used, or -1 on failure
-     */
     int start(int port, QueryCallback query_cb,
               const std::string& bind_addr = "127.0.0.1", bool use_queue = false);
 
-    /**
-     * Block until server stops, processing commands on the calling thread.
-     * Only needed when use_queue=true (CLI mode).
-     */
     void run_until_stopped();
 
-    /**
-     * Stop the server.
-     */
     void stop();
 
-    /**
-     * Stop answering without joining the server's threads, and leak them to
-     * process exit. Only for teardown on the thread a request is waiting on, where
-     * stop() would wait for that request forever.
-     */
     void abandon();
 
-    /**
-     * Check if server is running.
-     */
     bool is_running() const { return running_.load(); }
 
-    /**
-     * Whether this build has the deep_links table (IDA 9.4+). Set before start():
-     * the server instructions and tool description mention it only when true.
-     */
     void set_deep_links_available(bool available) { deep_links_ = available; }
 
-    /**
-     * Get the port the server is listening on.
-     */
     int port() const { return port_; }
 
-    /**
-     * Get the SSE endpoint URL.
-     */
     std::string url() const;
 
-    /**
-     * Get bind address configured at startup.
-     */
     const std::string& bind_addr() const { return bind_addr_; }
 
-    /**
-     * Set interrupt check function (called during wait loop).
-     */
     void set_interrupt_check(std::function<bool()> check);
 
-    /**
-     * Queue a command for execution on the main thread.
-     * Called by MCP tool handlers when use_queue=true.
-     */
     MCPQueueResult queue_and_wait(MCPPendingCommand::Type type, const std::string& input);
 
 private:
@@ -136,37 +75,24 @@ private:
     std::string bind_addr_{"127.0.0.1"};
     int port_{0};
 
-    // Command queue for cross-thread execution (CLI mode)
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::deque<std::shared_ptr<MCPPendingCommand>> pending_commands_;
 
-    // Callback stored for execution.
     QueryCallback query_cb_;
 
-    // Forward declaration - impl hides fastmcpp.
     class Impl;
     std::unique_ptr<Impl> impl_;
 
     void complete_pending_commands(const std::string& result);
 };
 
-/**
- * Format MCP server info for display.
- */
 std::string format_mcp_info(int port);
 std::string format_mcp_info(int port, const std::string& bind_addr);
 
-/**
- * Format MCP server status.
- */
 std::string format_mcp_status(int port, bool running, const std::string& bind_addr);
 
-/**
- * The server instructions and the idasql_query tool description an MCP client
- * shows its model. Deep-link guidance only when the build has deep_links.
- */
 std::string mcp_server_instructions(bool deep_links);
 std::string mcp_query_tool_description(bool deep_links);
 
-} // namespace idasql
+}

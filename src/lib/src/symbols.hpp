@@ -4,11 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * symbols.hpp - Umbrella header for the idasql::symbols domain: naming and
- * annotation (names, entries, comments, bookmarks, imports).
- */
-
 #pragma once
 
 #include "symbols_names.hpp"

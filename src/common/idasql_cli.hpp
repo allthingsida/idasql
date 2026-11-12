@@ -6,14 +6,6 @@
 
 #pragma once
 
-/**
- * idasql_cli.hpp - IDA plugin CLI integration wrapper
- *
- * IdasqlCLI - IDA plugin command line interface.
- *
- * Wraps SessionHandler and provides cli_t integration for IDA.
- */
-
 #include <functional>
 #include <memory>
 #include <string>
@@ -35,7 +27,6 @@ public:
         uninstall();
     }
 
-    // Non-copyable
     IdasqlCLI(const IdasqlCLI&) = delete;
     IdasqlCLI& operator=(const IdasqlCLI&) = delete;
 
@@ -106,4 +97,4 @@ private:
 
 inline IdasqlCLI* IdasqlCLI::s_instance_ = nullptr;
 
-} // namespace idasql
+}

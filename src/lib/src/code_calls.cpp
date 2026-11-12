@@ -17,7 +17,6 @@ using namespace idasql::core;
 namespace idasql {
 namespace code {
 
-// callee_type of the call at ea, as every access path reports it.
 static void result_callee_type(xsql::FunctionContext &ctx, ea_t ea) {
   tinfo_t tif;
   if (!decompiler::get_callee_tinfo_at(ea, tif)) {
@@ -32,10 +31,6 @@ static void result_callee_type(xsql::FunctionContext &ctx, ea_t ea) {
   }
 }
 
-// The call instructions of a function, collected with a scoped function item
-// iterator: a live one locks the function, and a cursor stays open until its
-// statement ends (a DELETE whose subquery reads disasm_calls would keep IDA from
-// undefining the function's code).
 static std::vector<ea_t> call_addrs_in(ea_t func_addr) {
   std::vector<ea_t> out;
   idasql_func_item_iterator fii;
@@ -72,8 +67,6 @@ class DisasmCallsInFuncIterator : public xsql::RowIterator {
 
 public:
   explicit DisasmCallsInFuncIterator(ea_t func_addr) : func_addr_(func_addr) {
-    // func_addr is the owner's ENTRY address; an interior or tail address is a
-    // different key and matches nothing, as in the full scan.
     if (idasql_is_func_start(func_addr_))
       calls_ = call_addrs_in(func_addr_);
   }
@@ -118,21 +111,15 @@ public:
     }
   }
 
-  // (function, address): a call in a tail shared by A and C is a row under
-  // each, and SQLite de-duplicates a MULTI-INDEX OR plan by rowid.
   int64_t rowid() const override {
     return idasql::detail::pack_owned_address_rowid(func_addr_, current_ea_);
   }
 };
 
-// ============================================================================
-// DisasmCallsGenerator
-// ============================================================================
-
 class DisasmCallsGenerator : public xsql::Generator<DisasmCallInfo> {
   size_t func_idx_ = 0;
   ea_t func_ea_ = BADADDR;
-  std::vector<ea_t> calls_;  // the current function's calls (see call_addrs_in)
+  std::vector<ea_t> calls_;
   size_t call_idx_ = 0;
   DisasmCallInfo current_;
 
@@ -164,9 +151,6 @@ public:
   }
 };
 
-// The call at one address: one row per owning function (several for a shared
-// tail). disasm_calls lists the calls functions make, as its full scan walks
-// functions: a call outside every function has no row on any path.
 static bool make_call_row(ea_t ea, ea_t owner, DisasmCallInfo &row) {
   insn_t insn;
   if (ea == BADADDR || owner == BADADDR || decode_insn(&insn, ea) <= 0 || !is_call_insn(insn))
@@ -207,10 +191,6 @@ public:
                                                     rows_[idx_].ea);
   }
 };
-
-// ============================================================================
-// LoopsInFuncIterator
-// ============================================================================
 
 GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
   return generator_table<DisasmCallInfo>("disasm_calls")
@@ -261,9 +241,6 @@ GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
               return false;
             }
             if (!decompiler::apply_callee_tinfo_at(row.ea, tif, callee_name.c_str())) {
-              // apply_callee_tinfo reports no reason. Measured: it refuses a prototype
-              // the call's arguments do not fit, e.g. a 32-bit __fastcall one whose
-              // arguments all go in registers at a call that pushes one.
               qstring printed;
               tif.print(&printed);
               xsql::set_vtab_error("disasm_calls: IDA refused callee_type '" +
@@ -275,7 +252,6 @@ GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
             return true;
           })
       .row_lookup([](DisasmCallInfo &row, int64_t raw_rowid) -> bool {
-        // The rowid is (owner, address): see the generators above.
         ea_t owner = BADADDR;
         ea_t ea = BADADDR;
         uint32_t sub = 0;
@@ -302,7 +278,6 @@ GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
               xsql::set_vtab_error(error.empty() ? "disasm_calls: missing ea constraint" : error);
               return nullptr;
             }
-            // omit=1: a value no address equals (NULL, 4096.5) has no rows.
             if (!ea)
               return nullptr;
             return std::make_unique<DisasmCallAtEaGenerator>(*ea);
@@ -311,5 +286,5 @@ GeneratorTableDef<DisasmCallInfo> define_disasm_calls() {
       .build();
 }
 
-} // namespace code
-} // namespace idasql
+}
+}

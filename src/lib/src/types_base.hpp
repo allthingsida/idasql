@@ -4,11 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * types_base.hpp - `types` table (all local types: structs, unions, enums,
- * typedefs, funcs).
- */
-
 #pragma once
 
 #include "types_common.hpp"
@@ -30,16 +25,16 @@ struct TypeEntry {
   bool is_ptr;
   bool is_array;
   std::string definition;
-  std::string resolved; // For typedefs: what it resolves to
+  std::string resolved;
   std::string folder_path;
   std::string full_path;
-  bool is_fixed;        // struct has fixed (frozen) member offsets (TAUDT_FIXED)
-  bool is_bitmask;      // enum is a bitmask/bitfield enum (BTE_BITMASK)
+  bool is_fixed;
+  bool is_bitmask;
 };
 
 void collect_types(std::vector<TypeEntry> &rows);
 
 CachedTableDef<TypeEntry> define_types();
 
-} // namespace types
-} // namespace idasql
+}
+}

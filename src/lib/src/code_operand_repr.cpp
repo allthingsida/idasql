@@ -14,12 +14,6 @@ using namespace idasql::core;
 namespace idasql {
 namespace code {
 
-// ============================================================================
-// INSTRUCTIONS Table helpers and parsing
-// ============================================================================
-
-// trim_copy is now in <idasql/string_utils.hpp>
-
 void split_path_names(const std::string &path_spec,
                       std::vector<std::string> &out_names) {
   out_names.clear();
@@ -37,7 +31,6 @@ void split_path_names(const std::string &path_spec,
   }
 }
 
-// Resolve an offset base spec: either a symbol name or a numeric address.
 bool resolve_ea_spec(const std::string &spec, ea_t &out_ea) {
   const std::string trimmed = trim_copy(spec);
   if (trimmed.empty())
@@ -47,12 +40,9 @@ bool resolve_ea_spec(const std::string &spec, ea_t &out_ea) {
     out_ea = named;
     return true;
   }
-  // An address is unsigned: the whole 64-bit range, nothing above it.
   return parse_numeric_ea_text(trimmed, out_ea);
 }
 
-// Recognize a standalone sign/bnot modifier token (,signed / ,unsigned /
-// ,bnot / ,nobnot). Sets the matching mode and returns true on a match.
 bool match_operand_modifier(const std::string &token, OperandModMode &sign_mode,
                             OperandModMode &bnot_mode) {
   if (equals_ci(token, "signed")) {
@@ -74,9 +64,6 @@ bool match_operand_modifier(const std::string &token, OperandModMode &sign_mode,
   return false;
 }
 
-// Strip trailing ,signed/,unsigned/,bnot/,nobnot tokens from the spec so the
-// remaining text is the base representation. Base options such as ",serial="
-// and ",delta=" are not modifiers and stop the scan.
 void strip_trailing_modifiers(std::string &text, OperandModMode &sign_mode,
                               OperandModMode &bnot_mode) {
   for (;;) {
@@ -111,8 +98,6 @@ bool parse_operand_format_spec(const char *spec, OperandApplyRequest &out,
     return false;
   }
 
-  // Pull off any trailing sign/bnot modifiers; they combine with the base spec
-  // or, when alone, modify the operand's current representation in place.
   strip_trailing_modifiers(text, out.sign_mode, out.bnot_mode);
   if (text.empty()) {
     out.kind = OperandApplyKind::Modifiers;
@@ -270,8 +255,6 @@ bool parse_operand_format_spec(const char *spec, OperandApplyRequest &out,
         delta = static_cast<adiff_t>(delta64);
       } else if ((delta_text.rfind("0x", 0) == 0 || delta_text.rfind("0X", 0) == 0) &&
                  parse_numeric_ea_text(delta_text, delta_bits)) {
-        // A hex bit pattern above INT64_MAX is a negative delta in two's
-        // complement (0xFFFFFFFFFFFFFFF8 is -8), as IDA displays it.
         delta = static_cast<adiff_t>(static_cast<int64_t>(delta_bits));
       } else {
         if (out_error)
@@ -357,10 +340,6 @@ bool operand_numeric_value(ea_t ea, int opnum, uint64 &out_value,
   }
 }
 
-// tinfo_t::find_edm became get_edm / get_edm_by_value inside IDA 9.0: the 9.0 GA
-// SDK has only find_edm, 9.0 SP1 and later only get_edm, and both say
-// IDA_SDK_VERSION 900. So the member is detected, not the version: the first
-// overload (int) is viable only when get_edm exists.
 template <typename T>
 auto edm_by_name(const T &tif, edm_t *out, const char *name, int)
     -> decltype(tif.get_edm(out, name)) {
@@ -424,9 +403,6 @@ bool resolve_enum_member_serial(const tinfo_t &enum_tif,
   return false;
 }
 
-// Apply the ,signed/,bnot modifiers idempotently to the current operand
-// representation. toggle_sign/toggle_bnot flip state, so only toggle when the
-// current state differs from the requested one.
 bool apply_operand_modifiers(ea_t ea, int opnum, const OperandApplyRequest &req,
                              std::string *out_error) {
   if (req.sign_mode != OperandModMode::Unchanged) {
@@ -658,9 +634,6 @@ bool apply_operand_representation(ea_t ea, int opnum,
       idasql_auto_wait();
       return false;
     }
-    // "size STRUCT" is the struct-offset representation applied to an operand
-    // whose value sits at the end of the structure (value == sizeof). op_stroff
-    // renders this past-end offset as "size STRUCT".
     tid_t path[1] = {tid};
     ok = op_stroff(insn, opnum, path, 1, 0);
     if (!ok && out_error)
@@ -675,7 +648,6 @@ bool apply_operand_representation(ea_t ea, int opnum,
     break;
 
   case OperandApplyKind::Modifiers:
-    // No base-representation change; sign/bnot applied below.
     ok = true;
     break;
 
@@ -759,7 +731,6 @@ std::string operand_class_text(ea_t ea, int opnum) {
   return operand_class_name(op.type);
 }
 
-// Dependency-free lowercase hex formatter for offset bases.
 std::string to_hex_string(uint64_t value) {
   static const char *digits = "0123456789abcdef";
   std::string out;
@@ -770,9 +741,6 @@ std::string to_hex_string(uint64_t value) {
   return "0x" + out;
 }
 
-// True when a struct-offset operand renders as "size STRUCT" (the operand value
-// sits at the end of the structure). Distinguishes the sizeof representation
-// from a regular member struct-offset on read-back.
 bool operand_renders_as_sizeof(ea_t ea, int opnum) {
   qstring buf;
   print_operand(&buf, ea, opnum);
@@ -926,9 +894,9 @@ std::string operand_format_spec_text(ea_t ea, int opnum) {
   } else if (kind == "offset") {
     base = type_name.empty() ? "offset" : ("offset:" + type_name);
   } else if (kind == "forced") {
-    return "forced:" + type_name; // forced text ignores sign/bnot display
+    return "forced:" + type_name;
   } else {
-    base = kind; // hex/dec/oct/bin/char/float/segment/stkvar/plain
+    base = kind;
   }
 
   if (kind != "plain" && opnum >= 0 && opnum < UA_MAXOP) {
@@ -940,7 +908,6 @@ std::string operand_format_spec_text(ea_t ea, int opnum) {
   return base;
 }
 
-// Legacy wrappers kept for compatibility with older call sites.
 std::string operand_kind_text(ea_t ea, int opnum) {
   return operand_repr_kind_text(ea, opnum);
 }
@@ -954,5 +921,5 @@ int64_t operand_stroff_delta(ea_t ea, int opnum) {
   return operand_repr_delta(ea, opnum);
 }
 
-} // namespace code
-} // namespace idasql
+}
+}

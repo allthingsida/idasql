@@ -21,7 +21,7 @@ void collect_enum_values(std::vector<EnumValueEntry>& rows) {
 
     for (uint32_t ord = 1; ord < max_ord; ++ord) {
         const char* name = get_numbered_type_name(ti, ord);
-        if (!name) continue;  // Skip gaps in ordinal space
+        if (!name) continue;
 
         tinfo_t tif;
         if (tif.get_numbered_type(ti, ord)) {
@@ -45,10 +45,6 @@ void collect_enum_values(std::vector<EnumValueEntry>& rows) {
         }
     }
 }
-
-// ============================================================================
-// EnumValuesInTypeIterator
-// ============================================================================
 
 EnumValuesInTypeIterator::EnumValuesInTypeIterator(uint32_t ordinal) : type_ordinal_(ordinal) {
     til_t* ti = get_idati();
@@ -89,7 +85,7 @@ void EnumValuesInTypeIterator::column(xsql::FunctionContext& ctx, int col) {
         case 2: ctx.result_int(idx_); break;
         case 3: ctx.result_text(e.name.c_str()); break;
         case 4: ctx.result_int64(static_cast<int64_t>(e.value)); break;
-        case 5: ctx.result_int64(static_cast<int64_t>(e.value)); break;  // uvalue
+        case 5: ctx.result_int64(static_cast<int64_t>(e.value)); break;
         case 6: ctx.result_text(e.cmt.c_str()); break;
         default: ctx.result_null(); break;
     }
@@ -98,10 +94,6 @@ void EnumValuesInTypeIterator::column(xsql::FunctionContext& ctx, int col) {
 int64_t EnumValuesInTypeIterator::rowid() const {
     return pack_type_rowid(type_ordinal_, static_cast<int>(idx_));
 }
-
-// ============================================================================
-// EnumTypeRef
-// ============================================================================
 
 EnumTypeRef::EnumTypeRef(uint32_t ord) : valid(false), ordinal(ord) {
     til_t* ti = get_idati();
@@ -119,10 +111,6 @@ bool EnumTypeRef::save() {
     new_tif.create_enum(ei);
     return new_tif.set_numbered_type(get_idati(), ordinal, NTF_REPLACE, nullptr) == TERR_OK;
 }
-
-// ============================================================================
-// build_enum_value_entry
-// ============================================================================
 
 bool build_enum_value_entry(uint32_t ordinal, int value_index, EnumValueEntry& entry) {
     til_t* ti = get_idati();
@@ -149,13 +137,6 @@ bool build_enum_value_entry(uint32_t ordinal, int value_index, EnumValueEntry& e
     return true;
 }
 
-// Resolve the LIVE index of the enum member identified by `row` against `ref`,
-// preferring the cached index only when its name still matches. Mirrors
-// resolve_member_index (types_members.cpp): with the pre-mutation snapshot a
-// multi-row DELETE/UPDATE hands each handler its scan-time row, but earlier rows
-// may have shifted live indices (an erase renumbers the flat edm list), so the
-// live member MUST be relocated by name, never by the stale index. Returns -1 and
-// sets `error` on not-found/ambiguous.
 static int resolve_enum_value_index(const EnumTypeRef& ref, const EnumValueEntry& row,
                                     std::string& error) {
     const std::string ctx = "enum=" + row.type_name +
@@ -185,10 +166,6 @@ static int resolve_enum_value_index(const EnumTypeRef& ref, const EnumValueEntry
     return -1;
 }
 
-// ============================================================================
-// TYPES_ENUM_VALUES Table Definition
-// ============================================================================
-
 CachedTableDef<EnumValueEntry> define_types_enum_values() {
     return cached_table<EnumValueEntry>("types_enum_values")
         .no_shared_cache()
@@ -203,11 +180,6 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
             if (argc > 2 && !argv[2].is_null()) row.type_ordinal = static_cast<uint32_t>(argv[2].as_int());
             if (argc > 4 && !argv[4].is_null()) row.value_index = argv[4].as_int();
         })
-        // Stable rowid = pack_type_rowid(type_ordinal, value_index), matching the
-        // iterator (EnumValuesInTypeIterator::rowid) and row_lookup. The
-        // full-scan/index cursors and the filtered iterators MUST agree or an
-        // unfiltered UPDATE/DELETE reconstructs the wrong value. See the packing
-        // note in types_common.hpp.
         .rowid([](const EnumValueEntry& row) -> int64_t {
             return pack_type_rowid(row.type_ordinal, row.value_index);
         })
@@ -217,10 +189,6 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
             if (!unpack_type_rowid(rowid, ordinal, value_index)) return false;
             return build_enum_value_entry(ordinal, value_index, row);
         })
-        // The packed (ordinal, value_index) rowid shifts when a multi-row DELETE
-        // erases an earlier value (the flat edm list renumbers). Opt into the
-        // pre-mutation snapshot so each rowid resolves to its scan-time row; the
-        // handlers then relocate the live value by name (resolve_enum_value_index).
         .snapshot_mutations()
         .column_int("type_ordinal", [](const EnumValueEntry& row) -> int {
             return static_cast<int>(row.type_ordinal);
@@ -304,12 +272,6 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
                 xsql::set_vtab_error(error);
                 return false;
             }
-            // Delete via the tinfo API rather than erasing from the flat
-            // enum_type_data_t + create_enum(): for a bitmask enum the details
-            // carry group_sizes (each group must sum to the member count), and an
-            // erase+rebuild that never shrinks group_sizes corrupts grouping or
-            // fails to save. del_edm keeps the details consistent. Persist the
-            // modified tif directly (mirrors the INSERT add_edm path).
             const tinfo_code_t code =
                 ref.tif.del_edm(static_cast<size_t>(idx));
             if (code != TERR_OK) {
@@ -365,11 +327,6 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
                 if (!v) return false;
                 new_edm.value = static_cast<uint64_t>(*v);
             } else if (is_bitmask) {
-                // Bitmask enums treat each member value as its own single-bit mask
-                // (DEFMASK64 below). 0 is an invalid mask and a sequential back()+1
-                // isn't a clean power of two, so pick the lowest unused single bit --
-                // bounded to the enum's declared byte width (types.size): a 1-byte
-                // bitmask only has bits 0x01..0x80, so we must not invent 0x100.
                 uint64_t used = 0;
                 for (size_t i = 0; i < ref.ei.size(); i++) used |= ref.ei[i].value;
                 const size_t ebytes = ref.tif.get_size();
@@ -398,12 +355,6 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
                 if (cmt) new_edm.cmt = cmt;
             }
 
-            // On a bitmask enum, add the member via add_edm so IDA forms the
-            // bitmask group, with the member's value as its own mask (a flat
-            // flag) -- the common case. The mask is passed explicitly: IDA 9.1+
-            // read DEFMASK64 as "use the value", but 9.0 takes it literally and
-            // files every member under one all-ones group with a synthetic
-            // MM_FFFFFFFFh mask member. bmask == value is the same group on all.
             if (is_bitmask) {
                 const tinfo_code_t code =
                     ref.tif.add_edm(new_edm, static_cast<bmask64_t>(new_edm.value));
@@ -415,11 +366,6 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
                         std::to_string(static_cast<int>(code)) + ")");
                     return false;
                 }
-                // add_edm mutates the in-memory tinfo only; persist it back to the
-                // IDB under the same ordinal. We must NOT call ref.save() here: it
-                // rebuilds the type from ref.ei (the flat enum_type_data_t), which
-                // the bitmask branch never updated, so it would clobber the new
-                // member. Write the modified tif directly instead.
                 const tinfo_code_t save_code =
                     ref.tif.set_numbered_type(get_idati(), ref.ordinal, NTF_REPLACE, nullptr);
                 if (save_code != TERR_OK) {
@@ -437,9 +383,6 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
             return ref.save();
         })
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
-            // Type ordinals are uint32; reject anything out of range rather than
-            // truncating (e.g. 4294967297 -> 1 would return ordinal-1's members).
-            // Ordinal 0 is always a gap, so the iterator yields no rows.
             if (ordinal <= 0 || ordinal > static_cast<int64_t>(UINT32_MAX))
                 return std::make_unique<EnumValuesInTypeIterator>(0u);
             return std::make_unique<EnumValuesInTypeIterator>(static_cast<uint32_t>(ordinal));
@@ -447,5 +390,5 @@ CachedTableDef<EnumValueEntry> define_types_enum_values() {
         .build();
 }
 
-} // namespace types
-} // namespace idasql
+}
+}

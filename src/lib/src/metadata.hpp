@@ -4,12 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * metadata.hpp - IDA database metadata as virtual tables
- *
- * Tables: db_info, ida_info, binary, runtime_settings, notepad, ida_config
- */
-
 #pragma once
 
 #include "metadata_binary.hpp"
@@ -24,9 +18,6 @@
 
 namespace idasql {
 namespace metadata {
-
-// MetadataItem (the shared key/value/type row shape) lives in
-// metadata_binary.hpp so define_binary() can use it without a cycle.
 
 struct TrueBelieverRow {
     std::string handle;
@@ -46,5 +37,5 @@ struct MetadataRegistry {
     void register_all(xsql::Database& db);
 };
 
-} // namespace metadata
-} // namespace idasql
+}
+}

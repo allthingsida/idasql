@@ -4,17 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * types_member_xrefs.hpp - `struct_member_xrefs` table.
- *
- * Cross-references TO a specific struct/union member, resolved via the member's
- * IDA tid (`tinfo_t::get_udm_tid`) and enumerated with `xrefblk_t::first_to(tid,
- * XREF_ALL)` -- no disassembly-text scan. Supports full nested-member expansion
- * (dotted `member_path`) and reports function + best-effort operand/access
- * context. Requires a filter on `type_ordinal`, `type_name`, or `member_id`; an
- * unfiltered query returns an actionable error rather than scanning every type.
- */
-
 #pragma once
 
 #include "types_common.hpp"
@@ -22,9 +11,6 @@
 namespace idasql {
 namespace types {
 
-// One emitted row: leaf-member identity joined with a single cross-reference.
-// Only used to declare the table schema; the actual rows are produced by the
-// filter iterators below (the unfiltered cache path errors out).
 struct MemberXrefRow {
   uint32_t type_ordinal = 0;
   std::string type_name;
@@ -49,5 +35,5 @@ struct MemberXrefRow {
 
 GeneratorTableDef<MemberXrefRow> define_struct_member_xrefs();
 
-} // namespace types
-} // namespace idasql
+}
+}

@@ -45,19 +45,16 @@ void TypesRegistry::register_all(xsql::Database& db) {
     db.register_cached_table("types_func_args", &types_func_args);
     db.create_table("types_func_args", "types_func_args");
 
-    // Create views
     create_views(db);
 }
 
 void TypesRegistry::create_views(xsql::Database& db) {
-    // Filtering views
     db.exec("CREATE VIEW IF NOT EXISTS types_v_structs AS SELECT * FROM types WHERE is_struct = 1");
     db.exec("CREATE VIEW IF NOT EXISTS types_v_unions AS SELECT * FROM types WHERE is_union = 1");
     db.exec("CREATE VIEW IF NOT EXISTS types_v_enums AS SELECT * FROM types WHERE is_enum = 1");
     db.exec("CREATE VIEW IF NOT EXISTS types_v_typedefs AS SELECT * FROM types WHERE is_typedef = 1");
     db.exec("CREATE VIEW IF NOT EXISTS types_v_funcs AS SELECT * FROM types WHERE is_func = 1");
 
-    // Inheritance view: struct/class base classes
     db.exec(R"(
         CREATE VIEW IF NOT EXISTS types_v_inheritance AS
         SELECT
@@ -71,5 +68,5 @@ void TypesRegistry::create_views(xsql::Database& db) {
     )");
 }
 
-} // namespace types
-} // namespace idasql
+}
+}

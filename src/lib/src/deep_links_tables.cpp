@@ -4,18 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * deep_links_tables.cpp - the SQL surface for IDA 9.4 deep links.
- *
- *   deep_links        generator: WHERE resource = ... AND addr|rva|name = ... -> one link
- *   deep_link_parse   generator: WHERE uri = ... -> the link's parts, validated
- *   ida_open_link()   scalar: navigate (in-process in the GUI plugin, IPC otherwise)
- *   enable_deep_link_navigation   runtime setting gating ida_open_link()
- *
- * The link format and the IPC client live in deep_link.hpp. Everything here exists
- * only in IDA 9.4+ builds (IDASQL_HAS_DEEP_LINKS); older builds register nothing.
- */
-
 #include <idasql/fwd.hpp>
 
 #include <xsql/database.hpp>
@@ -26,6 +14,7 @@
 
 #include "decompiler.hpp"
 #include "deep_link.hpp"
+#include "os.hpp"
 
 #include <idasql/runtime_settings.hpp>
 
@@ -48,7 +37,6 @@ namespace {
 
 constexpr const char* kNavSetting = "enable_deep_link_navigation";
 
-// The setting lives in the typed runtime-settings registry.
 void register_nav_setting(RuntimeSettings& settings) {
     (void)settings.register_bool_setting(kNavSetting, false, "idasql");
 }
@@ -72,13 +60,10 @@ std::string current_idb_name() {
     return pos == std::string::npos ? path : path.substr(pos + 1);
 }
 
-// A UTF-8 path (links carry UTF-8) as a filesystem path on every platform.
 std::filesystem::path utf8_path(const std::string& s) {
     return std::filesystem::path(std::u8string(s.begin(), s.end()));
 }
 
-// IDA's own check for "does this address resolve to this resource" (the ones that
-// are cheap to ask here); the rest IDA verifies when the link is opened.
 std::string entity_problem(const std::string& resource, ea_t ea) {
     if (resource == "functions") {
         if (idasql_func_start(ea) == BADADDR) return "No function at address " + dl::format_hex(ea);
@@ -96,10 +81,6 @@ std::string entity_problem(const std::string& resource, ea_t ea) {
     return {};
 }
 
-// A link should open code. IDA's own default for most resources is a list window
-// (the Functions or Strings chooser), which is rarely what a reader wants: functions
-// open pseudocode (disassembly without a decompiler), everything with an address
-// opens disassembly, types open the type. An explicit view always wins.
 std::string code_view(const std::string& resource) {
     if (resource == "functions") return decompiler::hexrays_available() ? "pseudocode" : "disasm";
     for (const auto& v : dl::allowed_views(resource)) {
@@ -107,10 +88,6 @@ std::string code_view(const std::string& resource) {
     }
     return dl::default_view(resource);
 }
-
-// ---------------------------------------------------------------------------
-// deep_links
-// ---------------------------------------------------------------------------
 
 enum DeepLinkColumn : int {
     COL_URI = 0,
@@ -171,9 +148,6 @@ std::string text_of(const xsql::FunctionArg& v) {
 std::unique_ptr<xsql::Generator<DeepLinkRow>> make_deep_link(const std::vector<xsql::GeneratorConstraintArg>& args) {
     DeepLinkRow row;
     std::optional<std::string> idb_name_arg;
-    // The row echoes its constraints, which are omit=1: a value its column
-    // could never hold (addr = 4096.5, addr = NULL, resource = NULL) has no
-    // row, rather than a row carrying the truncated or empty value.
     for (const auto& arg : args) {
         if (arg.op != xsql::ConstraintOp::Eq) continue;
         if (arg.column_index == COL_EA || arg.column_index == COL_RVA) {
@@ -219,7 +193,6 @@ std::unique_ptr<xsql::Generator<DeepLinkRow>> make_deep_link(const std::vector<x
     target.idb_name = row.idb_name;
     target.resource = row.resource;
     target.view = row.view.empty() ? row.default_view : row.view;
-    // The path belongs to this database: a link for another one, or for none, has none.
     if (row.idb_name == current_idb_name()) target.idb_path = current_idb_path();
 
     if (row.resource == "types") {
@@ -301,16 +274,11 @@ xsql::GeneratorTableDef<DeepLinkRow> define_deep_links() {
             "deep_links requires WHERE resource = '<resource>' plus the target "
             "(addr = <addr>, rva = <offset>, or name = '<type>' for resource 'types'); "
             "join it per row, e.g. JOIN deep_links dl ON dl.resource = 'functions' AND dl.addr = f.addr")
-        // One filter per coordinate, each requiring resource AND its coordinate. With
-        // resource alone usable, no filter matches, so the planner never puts
-        // deep_links on the outer side of a join (where it would see no address and
-        // emit nothing): it drives the join from the other table and feeds one
-        // address per row into here.
         .constraint_filter(
             {
                 xsql::required_eq("resource", "deep_links requires WHERE resource = '<resource>'"),
                 xsql::required_eq("addr", "deep_links requires WHERE addr = <addr> (or rva / name)"),
-                xsql::optional_eq("rva"),  // only so ea AND rva can be reported as exclusive
+                xsql::optional_eq("rva"),
                 xsql::optional_eq("view"),
                 xsql::optional_eq("idb_name"),
                 xsql::optional_eq("source"),
@@ -340,10 +308,6 @@ xsql::GeneratorTableDef<DeepLinkRow> define_deep_links() {
         .build();
 }
 
-// ---------------------------------------------------------------------------
-// deep_link_parse
-// ---------------------------------------------------------------------------
-
 struct ParseRow {
     std::string uri;
     dl::ParsedLink link;
@@ -354,7 +318,7 @@ std::unique_ptr<xsql::Generator<ParseRow>> make_parse(const std::vector<xsql::Ge
     for (const auto& arg : args) {
         if (arg.column_index != 0 || arg.op != xsql::ConstraintOp::Eq) continue;
         std::optional<std::string> uri = xsql::exact_text(arg.value);
-        if (!uri) return nullptr;  // uri = NULL (omit=1) parses nothing
+        if (!uri) return nullptr;
         row.uri = std::move(*uri);
     }
     row.link = dl::parse(row.uri);
@@ -395,44 +359,30 @@ xsql::GeneratorTableDef<ParseRow> define_deep_link_parse() {
         .build();
 }
 
-// ---------------------------------------------------------------------------
-// ida_open_link(uri)
-// ---------------------------------------------------------------------------
-
-void sql_ida_open_link_impl(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
-    if (argc != 1 || argv[0].is_null()) {
-        ctx.result_error("ida_open_link(uri) requires one ida:// link");
-        return;
-    }
+bool open_link_impl(const std::string& uri, std::string& error) {
     if (!nav_setting(runtime_settings())) {
-        ctx.result_error(
+        error = (
             "deep-link navigation is disabled; enable it with UPDATE runtime_settings SET value='1' "
             "WHERE key='enable_deep_link_navigation'");
-        return;
+        return false;
     }
-    const std::string uri = text_of(argv[0]);
     if (const std::string why = dl::screen_untrusted_uri(uri); !why.empty()) {
-        ctx.result_error("ida_open_link: " + why);
-        return;
+        error = "ida_open_link: " + why;
+        return false;
     }
     const dl::ParsedLink link = dl::parse(uri);
     if (!link.valid) {
-        ctx.result_error("ida_open_link: invalid link: " + link.diagnostic);
-        return;
+        error = "ida_open_link: invalid link: " + link.diagnostic;
+        return false;
     }
     const std::string ida_uri = dl::to_ida_uri(link);
     if (ida_uri.empty()) {
-        ctx.result_error("ida_open_link: invalid link: cannot be re-encoded for IDA");
-        return;
+        error = "ida_open_link: invalid link: cannot be re-encoded for IDA";
+        return false;
     }
 
-    // The other running IDA 9.4 instances, over their IPC endpoints. In the GUI never
-    // our own endpoint: its server runs on the UI thread this query is blocking, so
-    // asking ourselves would deadlock. (idalib runs no IPC server, so there is
-    // nothing of ours to skip.) This runs on IDA's UI thread too, so discovery uses
-    // short timeouts; only the navigation itself gets the full IO timeout.
     const bool in_gui = !idasql_is_ida_library();
-    const uint64_t self = dl::current_pid();
+    const uint64_t self = os::current_pid();
     const dl::IpcOptions nav_options = dl::effective_ipc_options();
     dl::IpcOptions discovery = nav_options;
     discovery.connect_timeout_ms = (std::min)(discovery.connect_timeout_ms, 500);
@@ -442,45 +392,42 @@ void sql_ida_open_link_impl(xsql::FunctionContext& ctx, int argc, xsql::Function
         if (!in_gui || i.pid != self) instances.push_back(std::move(i));
     }
 
-    // The exact file is on this machine: a same-named database elsewhere is a
-    // different database, never a stand-in for it.
     const auto& t = link.target;
     std::error_code ec;
     const bool allow_name_fallback = t.idb_path.empty() || !std::filesystem::exists(utf8_path(t.idb_path), ec);
-    // In the GUI, a link for this database (or for no particular one) opens right
-    // here; we already run on the UI thread (SQL is dispatched with execute_sync).
     const dl::SessionChoice choice =
         dl::choose_from_session(instances, t, in_gui ? current_idb_path() : std::string(), allow_name_fallback);
     if (in_gui && choice.here) {
-        if (open_ida_link(ida_uri.c_str())) {
-            ctx.result_int(1);
-        } else {
-            ctx.result_error("IDA could not open " + ida_uri + " (the reason is in the Output window)");
-        }
-        return;
+        if (open_ida_link(ida_uri.c_str())) return true;
+        error = "IDA could not open " + ida_uri + " (the reason is in the Output window)";
+        return false;
     }
-    // Under idalib "here" is not a place a link can open (no UI); steer instead.
     const dl::Selection sel =
         in_gui ? choice.other : dl::select_instance(instances, t, std::nullopt, allow_name_fallback);
     if (!sel.chosen) {
         std::string text = "ida_open_link: " + sel.error;
         for (const auto& c : sel.candidates) text += "; PID " + std::to_string(c.pid) + " has " + c.idb_path;
-        ctx.result_error(text);
-        return;
+        error = text;
+        return false;
     }
     std::string message;
-    if (dl::open_in({sel.chosen->pid, sel.chosen->endpoint}, ida_uri, message, nav_options)) {
-        ctx.result_int(1);
-    } else {
-        ctx.result_error("IDA (PID " + std::to_string(sel.chosen->pid) + ") could not open " + ida_uri + ": " +
-                         message);
-    }
+    if (dl::open_in({sel.chosen->pid, sel.chosen->endpoint}, ida_uri, message, nav_options)) return true;
+    error = "IDA (PID " + std::to_string(sel.chosen->pid) + ") could not open " + ida_uri + ": " + message;
+    return false;
 }
 
-// A scalar runs inside SQLite's C frames: nothing may escape it.
 void sql_ida_open_link(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     try {
-        sql_ida_open_link_impl(ctx, argc, argv);
+        if (argc != 1 || argv[0].is_null()) {
+            ctx.result_error("ida_open_link(uri) requires one ida:// link");
+            return;
+        }
+        std::string error;
+        if (open_link(text_of(argv[0]), error)) {
+            ctx.result_int(1);
+        } else {
+            ctx.result_error(error);
+        }
     } catch (const std::exception& e) {
         ctx.result_error(std::string("ida_open_link: internal error: ") + e.what());
     } catch (...) {
@@ -488,7 +435,9 @@ void sql_ida_open_link(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* 
     }
 }
 
-}  // namespace
+}
+
+bool open_link(const std::string& uri, std::string& error) { return open_link_impl(uri, error); }
 
 bool register_deep_links(xsql::Database& db) {
     register_nav_setting(runtime_settings());
@@ -505,16 +454,20 @@ bool register_deep_links(xsql::Database& db) {
 
 void enable_navigation_default_for_gui() { set_nav_setting(runtime_settings(), true); }
 
-}  // namespace deep_links
-}  // namespace idasql
+}
+}
 
-#else  // IDA SDK before 9.4: no deep links.
+#else
 
 namespace idasql {
 namespace deep_links {
 bool register_deep_links(xsql::Database&) { return true; }
+bool open_link(const std::string&, std::string& error) {
+    error = "deep links need an idasql build for IDA 9.4 or later";
+    return false;
+}
 void enable_navigation_default_for_gui() {}
-}  // namespace deep_links
-}  // namespace idasql
+}
+}
 
 #endif

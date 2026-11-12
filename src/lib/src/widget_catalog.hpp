@@ -13,9 +13,6 @@
 #include <string>
 #include <sstream>
 
-// This header must be included AFTER the IDA SDK headers (kernwin.hpp) and
-// ida_compat.hpp; ida_headers.hpp arranges that ordering.
-
 namespace idasql {
 namespace ui_context {
 
@@ -45,7 +42,6 @@ struct WidgetCatalogEntry
 };
 
 inline constexpr WidgetCatalogEntry kWidgetCatalog[] = {
-    // --- Choosers / list widgets present in all 9.0-9.3 ---
     { BWN_EXPORTS,         "BWN_EXPORTS",         WidgetCategory::Chooser,     false, false, true  },
     { BWN_IMPORTS,         "BWN_IMPORTS",         WidgetCategory::Chooser,     false, false, true  },
     { BWN_NAMES,           "BWN_NAMES",           WidgetCategory::Chooser,     false, false, true  },
@@ -57,7 +53,6 @@ inline constexpr WidgetCatalogEntry kWidgetCatalog[] = {
     { BWN_SIGNS,           "BWN_SIGNS",           WidgetCategory::Chooser,     false, false, true  },
     { BWN_TILS,            "BWN_TILS",            WidgetCategory::TypeView,    false, false, true  },
 
-    // --- Slot id 10: Local Types widget. Exactly one row per SDK. ---
 #if defined(BWN_TITREE)
     { BWN_TITREE,          "BWN_TITREE",          WidgetCategory::TypeView,    false, false, true  },
 #elif defined(BWN_TICSR)
@@ -66,7 +61,6 @@ inline constexpr WidgetCatalogEntry kWidgetCatalog[] = {
     { BWN_TILVIEW,         "BWN_TILVIEW",         WidgetCategory::TypeView,    false, false, true  },
 #endif
 
-    // --- Slot id 11: BWN_CALLS in 9.0-9.2; reserved in 9.3 ---
 #ifdef BWN_CALLS
     { BWN_CALLS,           "BWN_CALLS",           WidgetCategory::Chooser,     false, false, true  },
 #endif
@@ -106,7 +100,6 @@ inline constexpr WidgetCatalogEntry kWidgetCatalog[] = {
     { BWN_ADDRWATCH,       "BWN_ADDRWATCH",       WidgetCategory::Debugger,    false, false, true  },
     { BWN_PSEUDOCODE,      "BWN_PSEUDOCODE",      WidgetCategory::Decompiler,  true,  true,  false },
 
-    // --- Slot ids 47/48: callers/callees in 9.0-9.2; reserved in 9.3 ---
 #ifdef BWN_CALLS_CALLERS
     { BWN_CALLS_CALLERS,   "BWN_CALLS_CALLERS",   WidgetCategory::Chooser,     false, false, true  },
 #endif
@@ -131,12 +124,10 @@ inline constexpr WidgetCatalogEntry kWidgetCatalog[] = {
     { BWN_BOOKMARKS,       "BWN_BOOKMARKS",       WidgetCategory::Chooser,     false, false, true  },
     { BWN_TILIST,          "BWN_TILIST",          WidgetCategory::TypeView,    false, true,  false },
 
-    // --- Added in 9.1+ ---
 #ifdef BWN_TIL_VIEW
     { BWN_TIL_VIEW,        "BWN_TIL_VIEW",        WidgetCategory::TypeView,    false, false, true  },
 #endif
 
-    // --- Added in 9.2+ ---
 #ifdef BWN_TYPE_EDITOR
     { BWN_TYPE_EDITOR,     "BWN_TYPE_EDITOR",     WidgetCategory::TypeView,    false, false, false },
 #endif
@@ -177,10 +168,6 @@ inline std::string widget_type_name_or_unknown(int widget_type)
     return out.str();
 }
 
-// Cross-version canonical name. Currently only differs from the SDK macro
-// name for the slot-10 "Local Types" widget (BWN_TILVIEW / BWN_TICSR /
-// BWN_TITREE) which all map to "BWN_LOCAL_TYPES". For every other id,
-// returns the SDK macro name (or "UNKNOWN_<n>").
 inline std::string widget_canonical_name(int widget_type)
 {
 #if defined(BWN_TITREE)
@@ -235,17 +222,11 @@ inline bool is_address_widget_type(int widget_type)
 
 inline bool is_chooser_like_widget_type(int widget_type)
 {
-    // OR the catalog's explicit flag with the SDK's own predicate so that
-    // widgets the SDK identifies as choosers (but the catalog doesn't list)
-    // are still recognized, while still forcing chooser-like behavior on
-    // the widgets the catalog pins (notably the FUNCS / NAMES / IMPORTS /
-    // BPTS / Local-Types set, which the SDK's 9.3 is_chooser_widget
-    // excludes from its range test).
     const WidgetCatalogEntry *entry = widget_catalog_lookup(widget_type);
     if (entry != nullptr && entry->is_chooser_like)
         return true;
     return is_chooser_widget(widget_type);
 }
 
-} // namespace ui_context
-} // namespace idasql
+}
+}

@@ -3,29 +3,6 @@
 //
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
-//
-// decompiler_splits — Hex-Rays "Split expression" as a table.
-//
-// Split expression keeps the decompiler from merging narrower operations into
-// one wider one at an address: an 8-byte store of two 4-byte fields prints as
-// two assignments instead of one `*(_QWORD *)...`. The pseudocode window does it
-// for the item under the cursor (hexrays.hpp: vdui_t::split_item); the SDK has
-// no call that works without a window. Observed on IDA 9.0, 9.1, 9.2 and 9.4,
-// where the window's action and this table store byte-identical data:
-//
-//   - the state is a blob (tag 'm', start 0) in the node whose index + 1 the
-//     function's netnode keeps at altval(2, 'A'), the node Hex-Rays also keeps
-//     the function's user comments in;
-//   - the blob is the format version (1), pack_dd(count), then per entry in
-//     address order pack_dq(addr - func_addr + 1), pack_dd(operand, always 0),
-//     pack_dd(flags); a function without entries has no blob;
-//   - the low 3 bits of flags give the piece size, 1/2/3/4 = 1/2/4/8 bytes;
-//     the other bits are kept as they are.
-//
-// The decompiler reads the state the next time it decompiles the function; a
-// write marks the function's pseudocode dirty. It ignores a blob with another
-// version byte, and so does nothing here: such a blob is refused, never
-// rewritten. IDA versions other than 9.0-9.4 are refused as a whole.
 
 #include "decompiler.hpp"
 #include "function_rowid.hpp"
@@ -80,7 +57,7 @@ bool check_version() {
     if (splits_version_supported(buf))
         return true;
     xsql::set_vtab_error(std::string("decompiler_splits: the stored split format is verified on IDA "
-                                     "9.0-9.4 only; this is IDA ") + buf);
+                                     "9.0-9.5 only; this is IDA ") + buf);
     return false;
 }
 
@@ -102,8 +79,6 @@ std::string where(ea_t func_addr) {
     return " (func_addr " + format_ea_hex(func_addr) + ")";
 }
 
-// Read a function's entries. false + vtab error when the blob is not one this
-// table understands.
 bool read_entries(ea_t func_addr, std::vector<Entry>& out) {
     out.clear();
     const nodeidx_t id = state_node(func_addr, false);
@@ -169,7 +144,6 @@ bool write_entries(ea_t func_addr, std::vector<Entry> entries) {
     return true;
 }
 
-// Rows of one function: the operand-0 entries with a piece size.
 bool collect_function(ea_t func_addr, std::vector<SplitRow>& rows) {
     std::vector<Entry> entries;
     if (!read_entries(func_addr, entries))
@@ -189,11 +163,6 @@ bool collect_function(ea_t func_addr, std::vector<SplitRow>& rows) {
     return true;
 }
 
-// rowid = function index << 32 | the address's position in the function's
-// layout (chunks end to end): exact, so two splits never share a key however far
-// apart their addresses are, and it does not move when another split of the same
-// function is removed. A stored split whose address is no longer in the function
-// (stale) sets bit 63 over the low 32 bits of its distance from the entry.
 int64_t pack_rowid(ea_t func_addr, ea_t addr) {
     const int fnum = get_func_num(func_addr);
     if (fnum < 0)
@@ -215,7 +184,6 @@ bool owned_by(ea_t addr, ea_t func_addr) {
     return found;
 }
 
-// Change the piece size at (func_addr, addr): 0 removes the split.
 bool apply(ea_t func_addr, ea_t addr, uint32 code) {
     std::vector<Entry> entries;
     if (!read_entries(func_addr, entries))
@@ -233,7 +201,6 @@ bool apply(ea_t func_addr, ea_t addr, uint32 code) {
     }
     if (!write_entries(func_addr, entries))
         return false;
-    // Read back: the next decompile sees exactly this.
     std::vector<Entry> after;
     if (!read_entries(func_addr, after))
         return false;
@@ -256,9 +223,8 @@ bool valid_piece_size(int64_t piece_size) {
     return false;
 }
 
-} // namespace
+}
 
-// The IDA versions whose stored form was verified (see the header comment).
 bool splits_version_supported(const char* kernel_version) {
     if (kernel_version == nullptr)
         return false;
@@ -270,7 +236,7 @@ bool splits_version_supported(const char* kernel_version) {
     const long minor = std::strtol(minor_text, &end, 10);
     if (end == minor_text)
         return false;
-    return major == 9 && minor >= 0 && minor <= 4;
+    return major == 9 && minor >= 0 && minor <= 5;
 }
 
 SplitsInFuncIterator::SplitsInFuncIterator(ea_t func_addr) {
@@ -323,7 +289,6 @@ CachedTableDef<SplitRow> define_decompiler_splits() {
     return cached_table<SplitRow>("decompiler_splits")
         .no_shared_cache()
         .estimate_rows([]() -> size_t { return 16; })
-        // Full scan: one netnode lookup per function, no decompilation.
         .cache_builder([](std::vector<SplitRow>& rows) {
             rows.clear();
             if (!check_version())
@@ -341,8 +306,6 @@ CachedTableDef<SplitRow> define_decompiler_splits() {
         .row_lookup([](SplitRow& row, int64_t rowid) -> bool {
             if (!check_version())
                 return false;
-            // Bit 63 marks a stale split (see pack_rowid); the function index
-            // sits below it either way.
             const int64_t fnum = static_cast<int64_t>((static_cast<uint64_t>(rowid) >> 32) & 0x7FFFFFFFull);
             const ea_t f = idasql_func_ea_by_num(static_cast<size_t>(fnum));
             if (f == BADADDR)
@@ -394,7 +357,6 @@ CachedTableDef<SplitRow> define_decompiler_splits() {
             return apply(row.func_addr, row.addr, 0);
         })
         .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
-            // argv[0]=func_addr, argv[1]=addr, argv[2]=piece_size
             if (!check_version())
                 return false;
             if (argc < 3 || argv[1].is_null() || argv[2].is_null()) {
@@ -454,5 +416,5 @@ CachedTableDef<SplitRow> define_decompiler_splits() {
         .build();
 }
 
-} // namespace decompiler
-} // namespace idasql
+}
+}

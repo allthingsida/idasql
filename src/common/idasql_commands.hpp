@@ -4,12 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * idasql_commands.hpp - Dot-command parser for interactive sessions
- *
- * Shared command handling for CLI and plugin session frontends.
- */
-
 #pragma once
 
 #include <functional>
@@ -21,21 +15,14 @@
 
 namespace idasql {
 
-// Checked port parse: digits-only, in [0, 65535]. Returns true and sets `out` on
-// success; false (leaving `out` untouched) on empty/non-numeric/out-of-range
-// input. Used everywhere user input becomes a port so a bad ".http start
-// 99999999999999" / "--http abc" is a clean error instead of an std::stoi throw
-// unwinding through IDA's C execute_line (crash/UB) or aborting the CLI.
 inline bool parse_port(const std::string& s, int& out) {
     if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos) {
         return false;
     }
-    // Bound the length before conversion so a very long all-digit string can't
-    // overflow; 5 digits covers the full 0..65535 range.
     if (s.size() > 5) {
         return false;
     }
-    const int value = std::stoi(s);  // safe: <= 99999, digits-only
+    const int value = std::stoi(s);
     if (value < 0 || value > 65535) {
         return false;
     }
@@ -44,9 +31,9 @@ inline bool parse_port(const std::string& s, int& out) {
 }
 
 enum class CommandResult {
-    NOT_HANDLED,  // Not a command, process as query
-    HANDLED,      // Command executed successfully
-    QUIT          // User requested quit
+    NOT_HANDLED,
+    HANDLED,
+    QUIT
 };
 
 struct CommandCallbacks {
@@ -54,33 +41,25 @@ struct CommandCallbacks {
     std::function<std::string(const std::string&)> get_schema;
     std::function<std::string()> get_info;
 
-    // MCP server callbacks (optional)
     std::function<std::string()> mcp_status;
     std::function<std::string(int, const std::string&)> mcp_start;
     std::function<std::string()> mcp_stop;
 
-    // HTTP server callbacks (optional). http_start receives (port, bind, token);
-    // an empty token means no authentication.
     std::function<std::string()> http_status;
     std::function<std::string(int, const std::string&, const std::string&)> http_start;
     std::function<std::string()> http_stop;
 
-    // Autostart pin callbacks (optional). Wired by both the CLI and the plugin
-    // (see common/pin_commands.hpp); the netnode work lives behind them so this
-    // header has no IDA dependency. service is "http" | "mcp"; for pin_clear it
-    // may also be "all".
     std::function<std::string()> pin_list;
     std::function<std::string(const std::string& service,
                               const std::string& bind, int port,
                               const std::string& token)> pin_set;
     std::function<std::string(const std::string& service, bool enable)> pin_enable;
     std::function<std::string(const std::string& service)> pin_clear;
+
+    std::function<std::string()> remote_status;
+    std::function<std::string(bool on)> remote_set;
 };
 
-// Parse "[bindinterface] [port]" into bind_addr/port. Returns false (leaving
-// outputs at their defaults) when a token that must be a port fails the checked
-// parse (non-numeric or out of range) — callers turn that into a usage error
-// instead of throwing out of std::stoi on bad user input.
 inline bool parse_bind_and_port(const std::string& raw, std::string& bind_addr, int& port) {
     bind_addr = "127.0.0.1";
     port = 0;
@@ -117,17 +96,12 @@ inline bool parse_bind_and_port(const std::string& raw, std::string& bind_addr, 
     return true;
 }
 
-// Parse "[bindinterface] [port] [--token SECRET]". Extracts and removes a
-// `--token <value>` pair (if present) into `token`, then parses the remaining
-// "[bind] [port]" via parse_bind_and_port. `--token` with no following value is a
-// usage error (returns false). Same numeric-port validation semantics as above.
 inline bool parse_bind_port_token(const std::string& raw, std::string& bind_addr,
                                   int& port, std::string& token) {
     token.clear();
     std::string cleaned;
     cleaned.reserve(raw.size());
 
-    // Tokenize on whitespace, pulling out `--token <value>`; keep the rest verbatim.
     size_t i = 0;
     bool expect_token_value = false;
     while (i < raw.size()) {
@@ -149,7 +123,7 @@ inline bool parse_bind_port_token(const std::string& raw, std::string& bind_addr
         }
     }
     if (expect_token_value) {
-        return false; // "--token" with no value
+        return false;
     }
     return parse_bind_and_port(cleaned, bind_addr, port);
 }
@@ -222,6 +196,12 @@ inline CommandResult handle_command(
 #endif
                  "  .pin help                         Show pin help\n"
                  "\n"
+                 "Remote Control:\n"
+                 "  .remote                           Show whether other processes may start/stop "
+                 "this database's servers\n"
+                 "  .remote on|off                    Allow or refuse that (saved in the database; "
+                 "off by default)\n"
+                 "\n"
                  "SQL:\n"
                  "  SELECT * FROM funcs LIMIT 10;\n"
                  "  SELECT name, size FROM funcs ORDER BY size DESC;\n";
@@ -253,10 +233,6 @@ inline CommandResult handle_command(
             }
 
             if (callbacks.mcp_start) {
-                // The clipboard config is copied by the start callback itself at
-                // bind time (it knows the real host/port and, in the CLI, the call
-                // blocks until Ctrl+C so nothing could be copied here after it
-                // returns). See start_mcp_server / the CLI mcp_start callback.
                 output = callbacks.mcp_start(port, bind_addr);
             } else {
                 output = "MCP server not available";
@@ -317,10 +293,6 @@ inline CommandResult handle_command(
             }
 
             if (callbacks.http_start) {
-                // The clipboard payload is copied by the start callback at bind time
-                // (see the CLI http_start / start_http_server) -- in the CLI the call
-                // blocks until Ctrl+C, so the returned string is the post-stop message
-                // and copying it here would copy the wrong text.
                 output = callbacks.http_start(port, bind_addr, token);
             } else {
                 output = "HTTP server not available";
@@ -373,7 +345,6 @@ inline CommandResult handle_command(
         size_t s = subargs.find_first_not_of(" \t");
         subargs = (s == std::string::npos) ? "" : subargs.substr(s);
 
-        // Pop the next whitespace-delimited token off the front of rest.
         auto next_token = [](std::string& rest) -> std::string {
             size_t b = rest.find_first_not_of(" \t");
             if (b == std::string::npos) { rest.clear(); return ""; }
@@ -441,9 +412,6 @@ inline CommandResult handle_command(
 #endif
                 return false;
             };
-            // Shared "pin a service" handler. The port is optional: when omitted
-            // (or 0) the pin is stored with port 0 = "autostart with a fresh
-            // random port each launch". bind defaults to 127.0.0.1.
             auto do_pin_set = [&](const std::string& service) {
                 if (reject_unavailable_mcp(service)) {
                     return;
@@ -471,12 +439,10 @@ inline CommandResult handle_command(
             if (verb == "set") {
                 do_pin_set(next_token(subargs));
             } else if (verb == "http" || verb == "mcp") {
-                // Shorthand: ".pin http [bindinterface] [port]".
                 do_pin_set(verb);
             } else if (verb == "on" || verb == "off") {
                 std::string service = next_token(subargs);
                 if (reject_unavailable_mcp(service)) {
-                    // The build has no MCP callbacks to dispatch.
                 } else if (service != "http" && service != "mcp") {
                     output = "Usage: .pin " + verb + " " + kPinServices;
                 } else if (callbacks.pin_enable) {
@@ -488,7 +454,6 @@ inline CommandResult handle_command(
                 std::string service = next_token(subargs);
                 if (service.empty()) service = "all";
                 if (reject_unavailable_mcp(service)) {
-                    // The build has no MCP callbacks to dispatch.
                 } else if (service != "http" && service != "mcp" && service != "all") {
                     output = std::string("Usage: .pin clear [") + kPinClearServices + "]";
                 } else if (callbacks.pin_clear) {
@@ -500,6 +465,38 @@ inline CommandResult handle_command(
                 output = "Unknown pin command: " + verb
                          + "\nUse '.pin help' for available commands.";
             }
+        }
+        return CommandResult::HANDLED;
+    }
+
+    if (input == ".remote" || input.rfind(".remote ", 0) == 0 || input.rfind(".remote\t", 0) == 0) {
+        static const char* kRemoteUnavailable = "Remote control is not available in this session.";
+        std::string sub = input.substr(7);
+        const size_t b = sub.find_first_not_of(" \t");
+        sub = b == std::string::npos ? "" : sub.substr(b);
+        const size_t e = sub.find_last_not_of(" \t");
+        if (e != std::string::npos) sub = sub.substr(0, e + 1);
+        if (sub.empty() || sub == "status") {
+            output = callbacks.remote_status ? callbacks.remote_status() : kRemoteUnavailable;
+        } else if (sub == "on" || sub == "off") {
+            output = callbacks.remote_set ? callbacks.remote_set(sub == "on") : kRemoteUnavailable;
+        } else if (sub == "help") {
+            output =
+                "Remote control commands:\n"
+                "  .remote | .remote status   Show the switch\n"
+                "  .remote on                 Let other processes of yours on this machine start\n"
+                "                             and stop this database's servers\n"
+                "  .remote off                Refuse that (the default)\n"
+                "  .remote help               Show this help\n"
+                "\n"
+                "From another terminal, with remote control on:\n"
+                "  idasql http start <database|pid>     the same as .http start here\n"
+                "  idasql http stop  <database|pid>     the same as .http stop\n"
+                "  idasql remote on|off <database|pid>  the same as .remote on|off\n"
+                "Every such request is printed in IDA's Output window. The switch is\n"
+                "stored in the database: save it to keep it.\n";
+        } else {
+            output = "Unknown remote command: " + sub + "\nUse '.remote help' for available commands.";
         }
         return CommandResult::HANDLED;
     }
@@ -529,4 +526,4 @@ inline CommandResult handle_command(
     return CommandResult::HANDLED;
 }
 
-} // namespace idasql
+}

@@ -13,17 +13,13 @@
 namespace idasql {
 namespace metadata {
 
-// One metadata fact: the shared row shape of the key/value/type metadata
-// tables (binary, db_info, ida_info).
 struct MetadataItem {
     std::string key;
     std::string value;
-    std::string type;  // "string", "int", "hex", "bool"
+    std::string type;
 };
 
-// binary — orientation/metadata table, canonical key/value/type shape
-// (one row per fact; family-canonical across idasql/bnsql/ghidrasql/r2sql).
 CachedTableDef<MetadataItem> define_binary();
 
-} // namespace metadata
-} // namespace idasql
+}
+}

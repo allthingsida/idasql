@@ -15,29 +15,23 @@ namespace idasql {
 namespace metadata {
 
 struct ConfigRow {
-    // Columns
     std::string key;
     std::string file;
     std::optional<std::string> value;
-    std::string value_source;  // runtime | inf | session | file
+    std::string value_source;
     int writable = 0;
     int persisted = 0;
     std::optional<std::string> message;
 
-    // How the key is read and written (not columns)
-    std::optional<std::string> file_value;  // the value the files set, if any
-    int inf_index = -1;     // entry in the inf-backed key map, or -1
-    bool is_bool = false;   // YES/NO
-    bool is_string = false; // a quoted string
-    bool is_list = false;   // its statement ends with ';'
-    bool hex = false;       // numbers shown in hex, as the file writes them
+    std::optional<std::string> file_value;
+    int inf_index = -1;
+    bool is_bool = false;
+    bool is_string = false;
+    bool is_list = false;
+    bool hex = false;
 };
 
-// ida_config — IDA's configuration keys, listed from the shipped option files
-// (ida.cfg, hexrays.cfg, idagui.cfg in IDADIR/cfg then IDAUSR/cfg). UPDATE of
-// value applies a `KEY=VALUE` directive (idacfg.hpp process_config_directive)
-// and reads it back.
 CachedTableDef<ConfigRow> define_ida_config();
 
-} // namespace metadata
-} // namespace idasql
+}
+}

@@ -9,10 +9,6 @@
 namespace idasql {
 namespace search {
 
-// ============================================================================
-// NamePattern
-// ============================================================================
-
 NamePattern::NamePattern(const std::string& raw) {
     std::string lowered = to_lower(raw);
     std::replace(lowered.begin(), lowered.end(), '*', '%');
@@ -77,10 +73,6 @@ bool NamePattern::like_match(const std::string& text, const std::string& pattern
     return pi == pattern.size();
 }
 
-// ============================================================================
-// EntityGenerator
-// ============================================================================
-
 EntityGenerator::EntityGenerator(const std::string& pattern) : pattern_(pattern) {}
 
 bool EntityGenerator::next() {
@@ -92,7 +84,7 @@ bool EntityGenerator::next() {
         }
         current_source_ = static_cast<EntitySource>(static_cast<int>(current_source_) + 1);
         current_index_ = 0;
-        type_ordinal_ = 1;  // valid local-type ordinals are 1..get_ordinal_limit()-1
+        type_ordinal_ = 1;
         member_index_ = 0;
     }
     return false;
@@ -192,7 +184,7 @@ bool EntityGenerator::advance_segments() {
 }
 
 bool EntityGenerator::advance_types_of_kind(const char* kind, bool want_struct, bool want_union, bool want_enum) {
-    uint32 limit = get_ordinal_limit(nullptr);  // valid ordinals are 1..limit-1
+    uint32 limit = get_ordinal_limit(nullptr);
     while (type_ordinal_ < limit) {
         uint32 ord = type_ordinal_++;
         tinfo_t tif;
@@ -229,7 +221,7 @@ bool EntityGenerator::advance_unions()  { return advance_types_of_kind("union", 
 bool EntityGenerator::advance_enums()   { return advance_types_of_kind("enum", false, false, true); }
 
 bool EntityGenerator::advance_members() {
-    uint32 limit = get_ordinal_limit(nullptr);  // valid ordinals are 1..limit-1
+    uint32 limit = get_ordinal_limit(nullptr);
 
     while (type_ordinal_ < limit) {
         if (!current_type_.get_numbered_type(nullptr, type_ordinal_)) {
@@ -277,7 +269,7 @@ bool EntityGenerator::advance_members() {
 }
 
 bool EntityGenerator::advance_enum_members() {
-    uint32 limit = get_ordinal_limit(nullptr);  // valid ordinals are 1..limit-1
+    uint32 limit = get_ordinal_limit(nullptr);
 
     while (type_ordinal_ < limit) {
         if (!current_type_.get_numbered_type(nullptr, type_ordinal_)) {
@@ -323,10 +315,6 @@ bool EntityGenerator::advance_enum_members() {
     }
     return false;
 }
-
-// ============================================================================
-// GrepIterator
-// ============================================================================
 
 GrepIterator::GrepIterator(const std::string& pattern)
     : generator_(pattern) {}
@@ -386,10 +374,6 @@ int64_t GrepIterator::rowid() const {
     return rowid_;
 }
 
-// ============================================================================
-// Table definition and registration
-// ============================================================================
-
 VTableDef define_grep() {
     return table("grep")
         .row_count([]() -> size_t {
@@ -402,7 +386,10 @@ VTableDef define_grep() {
         .column_int64("ordinal", [](size_t) -> int64_t { return 0; })
         .column_text("parent_name", [](size_t) -> std::string { return ""; })
         .column_text("full_name", [](size_t) -> std::string { return ""; })
-        .filter_eq_text("pattern", [](const char* pattern) -> std::unique_ptr<xsql::RowIterator> {
+        .filter_eq_text("pattern", [](const auto& value) -> std::unique_ptr<xsql::RowIterator> {
+            const std::string full_pattern(value);
+            if (full_pattern.find('\0') != std::string::npos) return nullptr;
+            const char* pattern = full_pattern.c_str();
             return std::make_unique<GrepIterator>(pattern ? pattern : "");
         }, 25.0, 100.0)
         .build();
@@ -413,5 +400,5 @@ bool register_grep_entities(xsql::Database& db) {
     return db.register_table("grep", &grep) && db.create_table("grep", "grep");
 }
 
-} // namespace search
-} // namespace idasql
+}
+}

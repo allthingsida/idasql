@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_imports.hpp - `imports` table (imported symbols + module).
- */
-
 #pragma once
 
 #include "core_common.hpp"
@@ -34,5 +30,5 @@ std::string get_import_module_name_safe(int idx);
 
 CachedTableDef<ImportInfo> define_imports();
 
-} // namespace symbols
-} // namespace idasql
+}
+}

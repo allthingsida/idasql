@@ -18,10 +18,6 @@ using namespace idasql::core;
 namespace idasql {
 namespace memory {
 
-// ============================================================================
-// BYTES Table - Raw mapped bytes with patch support
-// ============================================================================
-
 namespace {
 
 enum class ByteOrder { Asc, Desc };
@@ -50,11 +46,6 @@ bool is_loaded_byte_range(ea_t ea, size_t width) {
   return true;
 }
 
-// IDA's revert_byte() restores the saved original byte value, but a patch made
-// against an unloaded byte has no initialized value to restore. Persist that
-// extra bit of state in the IDB so DELETE can faithfully return BSS (and other
-// sparse mapped bytes) to SQL NULL even after saving and reopening the
-// database.
 constexpr const char *kUnloadedPatchNode = "$ idasql bytes originally unloaded";
 
 netnode unloaded_patch_node(bool create) {
@@ -111,9 +102,6 @@ void forget_markers_for_still_unloaded_bytes(ea_t ea, size_t width) {
   }
 }
 
-// The integer a bytes setter writes, or nullopt with the vtab error set. Exact like a
-// native INTEGER comparison (xsql::exact_int64): text, a real or a blob that is not
-// exactly an integer is refused instead of truncating to 0 or saturating.
 std::optional<int64_t> setter_int64(xsql::FunctionArg arg, const char *column,
                                     const char *noun) {
   if (arg.is_null()) {
@@ -152,11 +140,6 @@ size_t estimate_mapped_byte_rows() {
   return static_cast<size_t>(total);
 }
 
-// Yields the mapped bytes of an addr window in SQL order: the window is walked
-// as its unsigned spans (xsql::Int64KeyRange::unsigned_spans), because an
-// address >= 2^63 is a negative INTEGER and sorts first. Within a span the walk
-// is segment-driven, upward (Asc) or downward (Desc). The unconstrained scan
-// walks every address the same way.
 class BytesGenerator : public xsql::Generator<ByteRow> {
   ByteOrder order_;
   std::vector<xsql::U64Span> spans_;
@@ -165,7 +148,6 @@ class BytesGenerator : public xsql::Generator<ByteRow> {
   ea_t current_ea_ = BADADDR;
   mutable ByteRow row_{BADADDR};
 
-  // The first mapped byte at or after `start` and at or below `hi`.
   static ea_t next_mapped_at_or_after(ea_t start, ea_t hi) {
     idasql_segment_info_t seg;
     bool have_seg = idasql_segment_info(start, &seg)
@@ -186,8 +168,6 @@ class BytesGenerator : public xsql::Generator<ByteRow> {
     return BADADDR;
   }
 
-  // The last mapped byte at or before `start` and at or above `lo`. `start`
-  // may be BADADDR: the segment before BADADDR is the last segment.
   static ea_t prev_mapped_at_or_before(ea_t start, ea_t lo) {
     idasql_segment_info_t seg;
     bool have_seg = idasql_segment_info(start, &seg)
@@ -255,9 +235,6 @@ public:
   int64_t rowid() const override { return static_cast<int64_t>(current_ea_); }
 };
 
-// The addr constraints are omit=1, so they are compared the way SQLite
-// compares the INTEGER addr column (xsql::Int64KeyRange): `addr = 4096.5` and
-// `addr = NULL` match nothing, `addr >= 4095.5` starts at 4096.
 std::unique_ptr<xsql::Generator<ByteRow>>
 make_bytes_generator(ByteOrder order,
                      const std::vector<xsql::GeneratorConstraintArg> &args) {
@@ -276,29 +253,17 @@ make_bytes_generator(ByteOrder order,
 }
 
 bool byte_is_patched(ea_t ea) {
-  // A zero written into an originally-unloaded byte has the same numeric value
-  // as IDA's synthetic original zero, but it is still a real patch: it changes
-  // the byte from SQL NULL/uninitialized to an initialized zero. Preserve that
-  // semantic distinction through the marker recorded by the setter -- while the
-  // byte is still loaded: a patch reverted outside idasql (IDA's Patched bytes
-  // window, revert_byte) leaves the byte unloaded and the marker stale.
   if (was_unloaded_before_patch(ea))
     return is_loaded(ea);
   return get_byte(ea) != static_cast<uchar>(get_original_byte(ea));
 }
 
-// idaapi callback for visit_patched_bytes: collect patched addresses.
 int idaapi collect_patched_ea(ea_t ea, qoff64_t, uint64, uint64, void *ud) {
   auto *vec = static_cast<std::vector<ea_t> *>(ud);
   vec->push_back(ea);
-  return 0; // continue
+  return 0;
 }
 
-// Generator backing `bytes WHERE is_patched = <v>`. For v == 1 it enumerates
-// only patched locations via visit_patched_bytes() (O(#patches)); for v == 0 it
-// scans mapped bytes yielding the unpatched ones; any other value yields none.
-// The query planner omits the is_patched constraint (omit=1), so this generator
-// must return exactly the matching rows.
 class IsPatchedGenerator : public xsql::Generator<ByteRow> {
   int want_;
   std::vector<ea_t> patched_;
@@ -310,9 +275,6 @@ public:
   explicit IsPatchedGenerator(int want) : want_(want) {
     if (want_ == 1) {
       visit_patched_bytes(0, BADADDR, collect_patched_ea, &patched_);
-      // A zero written into an unloaded byte equals its synthetic original, so
-      // IDA may not list it as patched; the setter's marker does. (Markers are
-      // stored ea-mapped, hence node2ea.)
       netnode node = unloaded_patch_node(false);
       if (node != BADNODE) {
         for (nodeidx_t idx = node.altfirst(); idx != BADNODE; idx = node.altnext(idx))
@@ -351,8 +313,6 @@ public:
   int64_t rowid() const override { return static_cast<int64_t>(row_.ea); }
 };
 
-// Column indices for the bytes table — used by constraint filters that
-// dispatch on column_index. Keep in sync with define_bytes() column order.
 enum BytesColumn {
   kBytesEa = 0,
   kBytesValue = 1,
@@ -367,14 +327,7 @@ enum BytesColumn {
   kBytesN = 10,
 };
 
-// Generator backing `bytes WHERE start_addr = X AND n = N`: the N consecutive
-// addresses X, X+1, ... (unsigned), stopping before BADADDR, which is never an
-// address. Does not skip unmapped addresses; `value` is NULL wherever the SDK
-// reports the byte as uninitialized. The plan claims ORDER BY addr, so the rows
-// come out in SQL order: when the run crosses 2^63 (0x7FFF...FFFF ->
-// 0x8000...0000), the part at or above 2^63 -- negative INTEGERs -- comes first.
 class BytesNGenerator : public xsql::Generator<ByteRow> {
-  // At most two runs, each inclusive, walked upward in this order.
   std::vector<std::pair<ea_t, ea_t>> runs_;
   size_t run_ = 0;
   bool in_run_ = false;
@@ -385,7 +338,6 @@ public:
   BytesNGenerator(ea_t start, int64_t n) {
     if (n <= 0 || start == BADADDR)
       return;
-    // The last address the run reaches, saturated below BADADDR.
     const ea_t room = (BADADDR - 1) - start;
     const ea_t last = static_cast<uint64_t>(n - 1) > static_cast<uint64_t>(room)
                           ? BADADDR - 1
@@ -424,8 +376,6 @@ public:
 
 std::unique_ptr<xsql::Generator<ByteRow>>
 make_bytes_n_generator(const std::vector<xsql::GeneratorConstraintArg> &args) {
-  // Both inputs are omit=1: a value no integer equals (NULL, 4096.5, 'a')
-  // requests nothing, as a native INTEGER column would match nothing.
   ea_t start = BADADDR;
   int64_t n = 0;
   for (const auto &arg : args) {
@@ -443,7 +393,7 @@ make_bytes_n_generator(const std::vector<xsql::GeneratorConstraintArg> &args) {
   return std::make_unique<BytesNGenerator>(start, n);
 }
 
-} // namespace
+}
 
 GeneratorTableDef<ByteRow> define_bytes() {
   return generator_table<ByteRow>("bytes")
@@ -456,10 +406,6 @@ GeneratorTableDef<ByteRow> define_bytes() {
                     [](const ByteRow &row) -> int64_t {
                       return static_cast<int64_t>(row.ea);
                     })
-      // Canonical byte surface: value is NULL for a mapped-but-uninitialized byte
-      // (e.g. BSS), preserving the "unknown" vs "real 0" distinction (the ratified
-      // cross-tool decision; matches ghidrasql/bnsql, with is_initialized carrying
-      // the 0/1 flag). The byte-patch setter still writes any mapped byte.
       .column_rw(
           "value", xsql::ColumnType::Integer,
           [](xsql::FunctionContext &ctx, const ByteRow &row) {
@@ -484,10 +430,6 @@ GeneratorTableDef<ByteRow> define_bytes() {
               return false;
             }
             const auto val = static_cast<uchar>(value);
-            // patch_byte returns false when the byte already holds this value;
-            // treat "already equal" as success so re-runs / bulk NOP-outs don't
-            // abort mid-range. An unloaded byte that reads as zero is NOT
-            // already equal: writing it must initialize the byte.
             if (is_loaded(row.ea) && get_byte(row.ea) == val)
               return true;
             if (!remember_unloaded_before_patch(row.ea, 1))
@@ -517,8 +459,6 @@ GeneratorTableDef<ByteRow> define_bytes() {
                                    std::to_string(value));
               return false;
             }
-            // patch_word returns false when the word already holds this value;
-            // treat "already equal" as success (idempotent re-runs).
             if (is_loaded_byte_range(row.ea, 2) &&
                 get_word(row.ea) == static_cast<ushort>(value))
               return true;
@@ -553,8 +493,6 @@ GeneratorTableDef<ByteRow> define_bytes() {
                   std::to_string(value));
               return false;
             }
-            // patch_dword returns false when the dword already holds this value;
-            // treat "already equal" as success (idempotent re-runs).
             if (is_loaded_byte_range(row.ea, 4) &&
                 get_dword(row.ea) == static_cast<uint32>(value))
               return true;
@@ -583,10 +521,6 @@ GeneratorTableDef<ByteRow> define_bytes() {
                                    idasql::format_ea_hex(row.ea));
               return false;
             }
-            // qword spans the full 64-bit column width, so any int64 bit
-            // pattern is in range (-1 is 0xFFFFFFFFFFFFFFFF). patch_qword returns false when the qword
-            // already holds this value; treat "already equal" as success
-            // (idempotent re-runs).
             if (is_loaded_byte_range(row.ea, 8) &&
                 get_qword(row.ea) == static_cast<uint64>(value))
               return true;
@@ -608,9 +542,6 @@ GeneratorTableDef<ByteRow> define_bytes() {
                   [](const ByteRow &row) -> int {
                     return byte_is_patched(row.ea) ? 1 : 0;
                   })
-      // Canonical byte-surface flag: 1 when the byte is initialized (loaded from
-      // the image), 0 for a mapped-but-uninitialized byte (e.g. BSS). Matches
-      // ghidrasql's is_initialized so the cross-tool byte surface is portable.
       .column_int("is_initialized",
                   [](const ByteRow &row) -> int {
                     return is_loaded(row.ea) ? 1 : 0;
@@ -623,13 +554,6 @@ GeneratorTableDef<ByteRow> define_bytes() {
                 else
                   ctx.result_int64(static_cast<int64_t>(fpos));
       })
-      // Hidden input columns for the bounded read: `WHERE start_addr = X AND
-      // n = N` requests exactly N consecutive bytes beginning at X. Both
-      // columns are HIDDEN (input-only, not in `SELECT *`). Using a dedicated
-      // `start_ea` rather than consuming the visible `ea` keeps any user
-      // predicate on `ea` enforceable by SQLite, so joins like
-      // `ON b.ea = t.target AND b.start_ea = t.target AND b.n = 4` stay
-      // correct.
       .hidden_column_int64("start_addr")
       .hidden_column_int("n")
       .row_lookup([](ByteRow &row, int64_t ea_val) -> bool {
@@ -639,10 +563,6 @@ GeneratorTableDef<ByteRow> define_bytes() {
         row.ea = ea;
         return true;
       })
-      // Bounded read: `WHERE start_addr = X AND n = N` yields N consecutive
-      // bytes starting at X. The generator yields them in SQL order (the part
-      // at or above 2^63 first when the run crosses it), so ORDER BY addr is
-      // free.
       .constraint_filter(
           {xsql::required_eq("start_addr", ""), xsql::required_eq("n", "")},
           make_bytes_n_generator,
@@ -673,15 +593,10 @@ GeneratorTableDef<ByteRow> define_bytes() {
           },
           10.0, 100.0)
       .order_by_consumed("addr", true)
-      // Fast patch enumeration: `WHERE is_patched = 1` walks the patch list via
-      // visit_patched_bytes() (O(#patches)) instead of scanning every mapped
-      // byte. Replaces the former standalone patched_bytes table.
       .constraint_filter(
           {xsql::required_eq("is_patched", "")},
           [](const std::vector<xsql::GeneratorConstraintArg> &args)
               -> std::unique_ptr<xsql::Generator<ByteRow>> {
-            // omit=1: `is_patched = 1.5` or `= NULL` matches no byte (a
-            // truncating read turned them into 1 and 0).
             const std::optional<int64_t> want =
                 args.empty() ? std::optional<int64_t>(1)
                              : xsql::exact_int64(args.front().value);
@@ -690,8 +605,6 @@ GeneratorTableDef<ByteRow> define_bytes() {
             return std::make_unique<IsPatchedGenerator>(static_cast<int>(*want));
           },
           1.0, 64.0)
-      // DELETE reverts a patch (revert_byte). Deleting an unpatched byte is a
-      // harmless no-op. `DELETE FROM bytes WHERE is_patched = 1` reverts all.
       .deletable([](ByteRow &row) -> bool {
         if (!is_mapped_byte_address(row.ea)) {
           xsql::set_vtab_error("bytes: address is not mapped: " +
@@ -699,15 +612,13 @@ GeneratorTableDef<ByteRow> define_bytes() {
           return false;
         }
         if (was_unloaded_before_patch(row.ea)) {
-          // A marker can outlive an out-of-band revert. Either way, remove any
-          // patch record, drop the synthetic value, and clear our metadata.
           (void)revert_byte(row.ea);
           del_value(row.ea);
           forget_unloaded_patch(row.ea);
           return true;
         }
         if (!byte_is_patched(row.ea))
-          return true; // nothing to revert
+          return true;
         bool ok = revert_byte(row.ea);
         if (!ok)
           xsql::set_vtab_error("bytes: failed to revert byte at " +
@@ -717,5 +628,5 @@ GeneratorTableDef<ByteRow> define_bytes() {
       .build();
 }
 
-} // namespace memory
-} // namespace idasql
+}
+}

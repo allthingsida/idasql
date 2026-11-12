@@ -27,6 +27,10 @@
     "9.4": {
       "ref": "v9.4.0-release",
       "sha": "2348615c25f90e357cd2cc72fcfede1ba14ad41a"
+    },
+    "9.5": {
+      "ref": "v9.5.0-release",
+      "sha": "04c0a982c80fd08388e7a3c26ff711fc1c38344d"
     }
   }
 }

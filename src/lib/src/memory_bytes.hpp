@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_bytes.hpp - `bytes` generator table (raw/patched byte access).
- */
-
 #pragma once
 
 #include "core_common.hpp"
@@ -21,5 +17,5 @@ struct ByteRow {
 
 GeneratorTableDef<ByteRow> define_bytes();
 
-} // namespace memory
-} // namespace idasql
+}
+}

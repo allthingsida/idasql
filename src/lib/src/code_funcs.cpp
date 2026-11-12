@@ -29,8 +29,6 @@ bool update_function_comment(FuncRow &row, xsql::FunctionArg val,
   std::string &original_comment =
       repeatable ? row.original_rpt_comment : row.original_comment;
 
-  // no_shared_cache() can replay the pre-update value during unrelated
-  // column updates; treat that exact replay as a no-op.
   if (requested_comment == original_comment) {
     return true;
   }
@@ -46,13 +44,6 @@ bool update_function_comment(FuncRow &row, xsql::FunctionArg val,
   return ok;
 }
 
-// Invalidate the decompiler cache of every function that references `callee`: its
-// callers (code xrefs) and the functions that take its address (data xrefs, e.g.
-// `&sub_X` in a callback table), every owner of a shared tail included. A name,
-// prototype or no-return change on `callee` changes how they render it, but
-// invalidate_decompiler_cache(callee) only refreshes the callee itself; a referrer
-// decompiled earlier in the session would keep stale pseudocode. Cheap (marks
-// dirty), safe when Hex-Rays is absent.
 static void invalidate_callers(ea_t callee) {
   if (callee == BADADDR) {
     return;
@@ -65,10 +56,6 @@ static void invalidate_callers(ea_t callee) {
     });
   }
 }
-
-// ============================================================================
-// FUNCS Table (with UPDATE/DELETE support)
-// ============================================================================
 
 CachedTableDef<FuncRow> define_funcs() {
   return cached_table<FuncRow>("funcs")
@@ -94,19 +81,10 @@ CachedTableDef<FuncRow> define_funcs() {
           }
         }
       })
-      // Stable rowid = the function's start_ea, matching the `addr` column. This
-      // makes full-scan and index cursors report a positional-independent rowid
-      // so a multi-row UPDATE/DELETE resolves each row by its own address --
-      // deleting one func never shifts another's rowid. row_lookup below resolves
-      // that rowid back to the live function by ea, NOT by ordinal.
       .rowid([](const FuncRow &row) -> int64_t {
         return static_cast<int64_t>(row.start_ea);
       })
       .row_lookup([](FuncRow &row, int64_t rowid) -> bool {
-        // rowid is a start_ea (see .rowid above): resolve the function by its
-        // stable address, and require it to actually START there (a lookup also
-        // succeeds for interior addresses / chunks -- a func whose start_ea is
-        // not `rowid` is a different function and must not be mutated).
         if (!idasql_is_func_start(static_cast<ea_t>(rowid)))
           return false;
         row.start_ea = static_cast<ea_t>(rowid);
@@ -126,11 +104,6 @@ CachedTableDef<FuncRow> define_funcs() {
                     [](const FuncRow &row) -> int64_t {
                       return static_cast<int64_t>(row.start_ea);
                     })
-      // Per-cursor address index: JOINs probing funcs.addr (e.g. string_refs'
-      // func_name leg) reuse one cache per cursor instead of rebuilding the whole
-      // funcs cache on every probe. Without this registration a string_refs scan
-      // on a large database rebuilt the cache per probe and took roughly a
-      // minute; with it the probe cost is negligible.
       .index_on("addr",
                 [](const FuncRow &row) -> int64_t {
                   return static_cast<int64_t>(row.start_ea);
@@ -166,13 +139,6 @@ CachedTableDef<FuncRow> define_funcs() {
             }
             const char *new_decl = val.is_null() ? nullptr : val.as_c_str();
             const std::string requested_decl = new_decl ? new_decl : "";
-            // no_shared_cache() can replay the pre-update declaration during
-            // rename-only updates; treat that exact replay as a no-op -- but only
-            // when the type is already the user's. A guessed type (from a PDB or
-            // auto-analysis) prints the same text yet is not pinned: Hex-Rays
-            // may rewrite it on the next decompile (IDA 9.4 SP1 widens an `int`
-            // return to `__int64`). Writing that text is how a user pins it, so
-            // it must reach apply_cdecl, which always applies TINFO_DEFINITE.
             if (requested_decl == row.original_prototype &&
                 (requested_decl.empty() || is_userti(row.start_ea))) {
               return true;
@@ -208,8 +174,6 @@ CachedTableDef<FuncRow> define_funcs() {
           [](FuncRow &row, xsql::FunctionArg val) -> bool {
             return update_function_comment(row, val, true);
           })
-      // size = total bytes across ALL chunks (entry + tails). end_addr below is
-      // the end of the ENTRY chunk only; a chunked function is not contiguous.
       .column_int64("size",
                     [](const FuncRow &row) -> int64_t {
                       return static_cast<int64_t>(
@@ -231,16 +195,10 @@ CachedTableDef<FuncRow> define_funcs() {
             if (idasql_func_start(row.start_ea) == BADADDR)
               return false;
             const uint64 current = idasql_func_flags(row.start_ea);
-            // Only a whitelisted subset of the FUNC_* flags (a uint64) is safe to
-            // write; every other bit is preserved from the current value. In
-            // particular FUNC_TAIL and FUNC_RESERVED are structural and must
-            // never be set through this column.
             static constexpr uint64 WRITABLE_MASK =
                 FUNC_NORET | FUNC_LIB | FUNC_STATICDEF | FUNC_FRAME |
                 FUNC_HIDDEN | FUNC_THUNK | FUNC_BOTTOMBP;
             const uint64 requested = static_cast<uint64>(new_flags);
-            // Refuse if the write would change ANY non-writable bit (set or
-            // clear); all such bits are preserved from the current value.
             if (((current ^ requested) & ~WRITABLE_MASK) != 0) {
               xsql::set_vtab_error(
                   "funcs.flags: attempt to modify a non-writable bit at " +
@@ -253,14 +211,12 @@ CachedTableDef<FuncRow> define_funcs() {
                 (current & ~WRITABLE_MASK) | (requested & WRITABLE_MASK));
             if (ok) {
               decompiler::invalidate_decompiler_cache(row.start_ea);
-              // A no-return change alters every caller (code after the call).
               if (((current ^ requested) & FUNC_NORET) != 0)
                 invalidate_callers(row.start_ea);
             }
             idasql_auto_wait();
             return ok;
           })
-      // Prototype columns - return type (lazy-computed, cached per row)
       .column_text("return_type",
                    [](const FuncRow &row) -> std::string {
                      if (!row.ensure_fi())
@@ -286,7 +242,6 @@ CachedTableDef<FuncRow> define_funcs() {
                   [](const FuncRow &row) -> int {
                     return row.ensure_fi() && row.fi.rettype.is_void() ? 1 : 0;
                   })
-      // Prototype columns - arguments
       .column_int("arg_count",
                   [](const FuncRow &row) -> int {
                     if (!row.ensure_fi())
@@ -324,7 +279,6 @@ CachedTableDef<FuncRow> define_funcs() {
       .column_text("full_path", [](const FuncRow &row) -> std::string {
         return row.full_path;
       })
-      // Appended last on purpose: INSERT reads columns 0-7 by position.
       .column_int64("chunk_count",
                     [](const FuncRow &row) -> int64_t {
                       return static_cast<int64_t>(
@@ -337,7 +291,6 @@ CachedTableDef<FuncRow> define_funcs() {
         return ok;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
-        // address (col 0) is required
         if (argc < 1 || argv[0].is_null()) {
           xsql::set_vtab_error("funcs: INSERT needs addr");
           return false;
@@ -347,7 +300,6 @@ CachedTableDef<FuncRow> define_funcs() {
         if (!idasql::write_address(argv[0], "funcs", "addr", ea))
           return false;
 
-        // An address already inside a function (its entry or any chunk).
         const ea_t owner = idasql_func_start(ea);
         if (owner != BADADDR) {
           xsql::set_vtab_error(
@@ -358,9 +310,6 @@ CachedTableDef<FuncRow> define_funcs() {
         }
 
         idasql_auto_wait();
-        // Columns: 0 addr, 1 name, 2 prototype, 3 comment, 4 rpt_comment,
-        // 5 size, 6 end_addr, 7 flags.
-        // end_ea from col 6 if provided, else BADADDR (IDA auto-detects).
         ea_t end = BADADDR;
         if (argc > 6 && !argv[6].is_null() &&
             !idasql::write_address(argv[6], "funcs", "end_addr", end))
@@ -383,9 +332,6 @@ CachedTableDef<FuncRow> define_funcs() {
           return false;
         }
 
-        // A refused name or prototype fails the whole INSERT: the function is
-        // removed again (the instructions add_func created stay code), so the
-        // statement does not half-apply.
         auto refuse = [&](const std::string &why) {
           del_func(ea);
           idasql_auto_wait();
@@ -393,7 +339,6 @@ CachedTableDef<FuncRow> define_funcs() {
           return false;
         };
 
-        // Optional: set name (col 1) after creation
         if (argc > 1 && !argv[1].is_null()) {
           const char *name = argv[1].as_c_str();
           if (name && name[0] && !set_name(ea, name, SN_CHECK | SN_NOWARN))
@@ -401,7 +346,6 @@ CachedTableDef<FuncRow> define_funcs() {
                           idasql::format_ea_hex(ea));
         }
 
-        // Optional: apply prototype (col 2)
         if (argc > 2 && !argv[2].is_null()) {
           const char *decl = argv[2].as_c_str();
           if (decl && decl[0] && !apply_cdecl(nullptr, ea, decl, 0))
@@ -411,7 +355,6 @@ CachedTableDef<FuncRow> define_funcs() {
         invalidate_callers(ea);
 
         const bool created = idasql_func_start(ea) != BADADDR;
-        // Optional: regular comment (col 3) and repeatable comment (col 4)
         if (created && argc > 3 && !argv[3].is_null()) {
           const char *cmt = argv[3].as_c_str();
           if (cmt && !idasql_set_func_cmt(ea, cmt, false))
@@ -423,8 +366,6 @@ CachedTableDef<FuncRow> define_funcs() {
             return refuse("funcs: IDA refused the repeatable comment at " + idasql::format_ea_hex(ea));
         }
 
-        // Optional: writable flags (col 7). Only the whitelisted, non-structural
-        // subset may be OR'd in; everything else is left as IDA analyzed it.
         if (created && flags) {
           static constexpr uint64 WRITABLE_MASK =
               FUNC_NORET | FUNC_LIB | FUNC_STATICDEF | FUNC_FRAME | FUNC_HIDDEN |
@@ -440,16 +381,6 @@ CachedTableDef<FuncRow> define_funcs() {
       })
       .build();
 }
-
-// ============================================================================
-// FUNC_AT Table-valued function: the function(s) that own an address
-// ============================================================================
-//
-// A function may be split into disjoint chunks, so "addr is inside function f"
-// is not `addr >= f.addr AND addr < f.end_addr` (end_addr ends the entry chunk).
-// func_at(addr) answers it from IDA's chunk table: one row per owning function,
-// so a tail shared by several functions yields one row per owner, and an
-// address outside every function yields none.
 
 namespace {
 
@@ -500,7 +431,7 @@ private:
 constexpr const char *kFuncAtUsage =
     "func_at requires an address: SELECT * FROM func_at(<addr>)";
 
-} // namespace
+}
 
 GeneratorTableDef<FuncAtRow> define_func_at() {
   return generator_table<FuncAtRow>("func_at")
@@ -522,7 +453,6 @@ GeneratorTableDef<FuncAtRow> define_func_at() {
                     })
       .column_int("is_tail",
                   [](const FuncAtRow &r) -> int { return r.is_tail ? 1 : 0; })
-      // The input: func_at(X) binds X to this hidden column.
       .hidden_column_int64("addr")
       .full_scan_error(kFuncAtUsage)
       .constraint_filter(
@@ -536,7 +466,6 @@ GeneratorTableDef<FuncAtRow> define_func_at() {
               xsql::set_vtab_error(error.empty() ? kFuncAtUsage : error);
               return nullptr;
             }
-            // omit=1: a value no address equals (NULL, 4096.5) has no rows.
             if (!ea)
               return std::make_unique<EmptyFuncAtGenerator>();
             return std::make_unique<FuncAtGenerator>(*ea);
@@ -545,5 +474,5 @@ GeneratorTableDef<FuncAtRow> define_func_at() {
       .build();
 }
 
-} // namespace code
-} // namespace idasql
+}
+}

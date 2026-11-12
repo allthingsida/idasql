@@ -13,4 +13,4 @@ namespace idasql {
 const char* default_binary_query();
 std::string format_query_curl_example(const std::string& base_url);
 
-} // namespace idasql
+}

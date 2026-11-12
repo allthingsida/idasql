@@ -11,12 +11,8 @@ using namespace idasql::core;
 namespace idasql {
 namespace memory {
 
-// ============================================================================
-// STRING helpers
-// ============================================================================
-
 int get_string_width(int strtype) {
-  return strtype & 0x03; // 0=ASCII, 1=UTF-16, 2=UTF-32
+  return strtype & 0x03;
 }
 
 const char *get_string_width_name(int strtype) {
@@ -48,27 +44,27 @@ const char *get_string_type_name(int strtype) {
 }
 
 int get_string_layout(int strtype) {
-  return (strtype >> 2) & 0x3F; // Bits 2-7
+  return (strtype >> 2) & 0x3F;
 }
 
 const char *get_string_layout_name(int strtype) {
   int layout = get_string_layout(strtype);
   switch (layout) {
   case 0:
-    return "termchr"; // Null-terminated (C-style)
+    return "termchr";
   case 1:
-    return "pascal1"; // 1-byte length prefix
+    return "pascal1";
   case 2:
-    return "pascal2"; // 2-byte length prefix
+    return "pascal2";
   case 3:
-    return "pascal4"; // 4-byte length prefix
+    return "pascal4";
   default:
     return "unknown";
   }
 }
 
 int get_string_encoding(int strtype) {
-  return (strtype >> 24) & 0xFF; // Bits 24-31: encoding index
+  return (strtype >> 24) & 0xFF;
 }
 
 std::string get_string_content(const string_info_t &si) {
@@ -76,9 +72,6 @@ std::string get_string_content(const string_info_t &si) {
   get_strlit_contents(&content, si.ea, si.length, si.type);
   return std::string(content.c_str());
 }
-// ============================================================================
-// STRINGS Table (query-scoped cache)
-// ============================================================================
 
 CachedTableDef<string_info_t> define_strings() {
   return cached_table<string_info_t>("strings")
@@ -98,10 +91,6 @@ CachedTableDef<string_info_t> define_strings() {
                     [](const string_info_t &r) -> int64_t {
                       return static_cast<int64_t>(r.ea);
                     })
-      // Per-cursor address index: JOINs probing strings.addr reuse one strlist
-      // materialization per cursor instead of rebuilding it on every probe. IDA's
-      // strlist has no address point-lookup (index-based get_strlist_item only),
-      // so the per-cursor hash is the fastest correct source.
       .index_on("addr",
                 [](const string_info_t &r) -> int64_t {
                   return static_cast<int64_t>(r.ea);
@@ -145,5 +134,5 @@ CachedTableDef<string_info_t> define_strings() {
       .build();
 }
 
-} // namespace memory
-} // namespace idasql
+}
+}

@@ -42,7 +42,9 @@ jobs:
               and (.ida_sdks["9.3"].ref == "v9.3.0-sdk.3")
               and (.ida_sdks["9.3"].sha | test("^[0-9a-f]{40}$"))
               and (.ida_sdks["9.4"].ref == "v9.4.0-release")
-              and (.ida_sdks["9.4"].sha | test("^[0-9a-f]{40}$"))' \
+              and (.ida_sdks["9.4"].sha | test("^[0-9a-f]{40}$"))
+              and (.ida_sdks["9.5"].ref == "v9.5.0-release")
+              and (.ida_sdks["9.5"].sha | test("^[0-9a-f]{40}$"))' \
             .github/release-revisions.json >/dev/null
 
   build:
@@ -149,6 +151,48 @@ jobs:
           - ida: "94"
             ida_version: "9.4"
             sdk_ref: v9.4.0-release
+            runner: windows-11-arm
+            platform: windows-arm64
+            plugin_ext: .dll
+            cli_ext: .exe
+            cmake_arch: ARM64
+            pe_machine: "0xAA64"
+
+          - ida: "95"
+            ida_version: "9.5"
+            sdk_ref: v9.5.0-release
+            runner: ubuntu-24.04
+            platform: linux-x86_64
+            plugin_ext: .so
+            cli_ext: ""
+            linux_arch_regex: "x86-64|x86_64"
+          - ida: "95"
+            ida_version: "9.5"
+            sdk_ref: v9.5.0-release
+            runner: ubuntu-24.04-arm
+            platform: linux-arm64
+            plugin_ext: .so
+            cli_ext: ""
+            linux_arch_regex: "ARM aarch64|aarch64"
+          - ida: "95"
+            ida_version: "9.5"
+            sdk_ref: v9.5.0-release
+            runner: macos-15
+            platform: macos-arm64
+            plugin_ext: .dylib
+            cli_ext: ""
+          - ida: "95"
+            ida_version: "9.5"
+            sdk_ref: v9.5.0-release
+            runner: windows-2022
+            platform: windows-x86_64
+            plugin_ext: .dll
+            cli_ext: .exe
+            cmake_arch: x64
+            pe_machine: "0x8664"
+          - ida: "95"
+            ida_version: "9.5"
+            sdk_ref: v9.5.0-release
             runner: windows-11-arm
             platform: windows-arm64
             plugin_ext: .dll
@@ -383,9 +427,9 @@ jobs:
             if (-not $text.Contains($env:IDASQL_VERSION)) {
               throw "Version string $env:IDASQL_VERSION not found in $binary"
             }
-            if ("${{ matrix.ida }}" -ne "94" -and
+            if ([int]"${{ matrix.ida }}" -lt 94 -and
                 $text.Contains("lock_func_range_ea")) {
-              throw "IDA 9.4-only import lock_func_range_ea found in $binary"
+              throw "IDA 9.4+ import lock_func_range_ea found in $binary"
             }
           }
 

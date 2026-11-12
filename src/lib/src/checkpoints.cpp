@@ -24,8 +24,6 @@ namespace idasql {
 namespace checkpoints {
 namespace {
 
-// The undo-point record IDAPython's create_undo_point(action, label) builds, so
-// a checkpoint shows in IDA's Undo menu as "idasql checkpoint: <label>".
 constexpr const char* kActionName = "idasql";
 constexpr const char* kLabelPrefix = "idasql checkpoint: ";
 constexpr const char* kAutoPrefix = "auto#";
@@ -33,23 +31,14 @@ constexpr size_t kStatementMax = 240;
 constexpr const char* kStateLive = "live";
 constexpr const char* kStateUndone = "undone";
 
-// > 0 while idasql causes IDB changes as a side effect of reading.
 thread_local int t_derived_depth = 0;
-// Depth of the statements running on this thread (nested = issued from Python).
 thread_local int t_stmt_depth = 0;
 
 struct Store {
-    std::vector<CheckpointRow> live;   // oldest first
-    std::vector<CheckpointRow> redo;   // back() = the next checkpoint a redo restores
+    std::vector<CheckpointRow> live;
+    std::vector<CheckpointRow> redo;
     int64_t next_seq = 1;
-    // write_epoch() right after the last rollback/redo; -1 when none is pending.
-    // After an undo, IDA does not end its redo branch when the database is changed
-    // programmatically, and a later perform_redo() re-applies the undone step AND
-    // drops those newer changes. A redo is refused once the epoch moved.
     int64_t changes_mark = -1;
-    // auto_checkpoint: an undo point created before a statement that has not
-    // written yet. The next statement reuses it instead of stacking empty undo
-    // points (IDA keeps empty ones; each would cost an undo step).
     std::optional<CheckpointRow> pending;
     int64_t last_rollback_steps = 0;
     int64_t last_rollback_foreign = 0;
@@ -60,16 +49,12 @@ Store& store() {
     return s;
 }
 
-// Counts IDA database-change notifications. Measured on IDA 9.2-9.4: renames,
-// comments, types, bytes, functions, folders... all notify; perform_undo(),
-// perform_redo() and idle auto-analysis with nothing queued do not.
 struct WriteMonitor : public event_listener_t {
     std::atomic<int64_t> events{0};
     bool hooked = false;
 
     ssize_t idaapi on_event(ssize_t code, va_list) override {
         if (code == idb_event::closebase) {
-            // IDA's undo history ends with the database.
             store() = Store{};
             return 0;
         }
@@ -86,7 +71,7 @@ struct WriteMonitor : public event_listener_t {
             case idb_event::kernel_config_loaded:
             case idb_event::loader_finished:
             case idb_event::flow_chart_created:
-                break;  // informational, not a change to the database
+                break;
             default:
                 events.fetch_add(1, std::memory_order_relaxed);
                 break;
@@ -102,7 +87,7 @@ WriteMonitor& monitor() {
 
 struct Engines {
     std::vector<QueryEngine*> live;
-    int64_t retired_writes = 0;  // vtab writes of engines already gone
+    int64_t retired_writes = 0;
 };
 
 Engines& engines() {
@@ -132,17 +117,12 @@ std::string now_iso() {
     return buf;
 }
 
-// After undo/redo the IDB is right but cached decompilations are not: Hex-Rays
-// would serve the old pseudocode and lvars, and nothing says which functions
-// changed. (Table caches are query-scoped, so they rebuild on their own.)
 void refresh_caches() {
     if (decompiler::hexrays_available())
         clear_cached_cfuncs();
 }
 
 bool create_point(const std::string& label) {
-    // Callers take their write mark AFTER this: creating an undo point can flush
-    // pending notifications (the first one of a session reports func_updated).
     bytevec_t rec;
     rec.pack_ds(kActionName);
     rec.pack_ds(undo_label(label).c_str());
@@ -185,8 +165,6 @@ bool label_taken(const Store& s, const std::string& label) {
     return false;
 }
 
-// A pending auto point that saw writes (GUI edits between statements, say) is a
-// real checkpoint; an unused one is forgotten (its empty IDA step stays behind).
 void settle_pending(Store& s, const char* statement) {
     if (!s.pending)
         return;
@@ -204,9 +182,6 @@ std::string to_lower(std::string s) {
     return s;
 }
 
-// INSERT / UPDATE / DELETE / REPLACE (after leading whitespace and comments),
-// or a WITH that SQLite says writes. Not CREATE TEMP TABLE and friends: a temp
-// table is not a change to the database.
 bool is_dml_statement(const std::string& sql, xsql::Database* db) {
     size_t i = 0;
     for (;;) {
@@ -235,10 +210,6 @@ bool is_ident_char(char c) {
            static_cast<unsigned char>(c) >= 0x80;
 }
 
-// Statements that name the checkpoints table (an identifier token: bare, "..",
-// `..` or [..]) manage undo points themselves. The word inside a string or blob
-// literal or a comment is not a reference: such a write still gets its
-// auto checkpoint.
 bool references_checkpoints(const std::string& sql) {
     const size_t n = sql.size();
     for (size_t i = 0; i < n;) {
@@ -254,7 +225,7 @@ bool references_checkpoints(const std::string& sql) {
             i += 2;
             continue;
         }
-        if (c == '\'') {  // '...' with '' escapes (also X'..')
+        if (c == '\'') {
             for (++i; i < n; ++i) {
                 if (sql[i] == '\'') {
                     if (i + 1 < n && sql[i + 1] == '\'') ++i;
@@ -264,7 +235,7 @@ bool references_checkpoints(const std::string& sql) {
             ++i;
             continue;
         }
-        if (c == '"' || c == '`' || c == '[') {  // quoted identifier
+        if (c == '"' || c == '`' || c == '[') {
             const char close = c == '[' ? ']' : c;
             std::string ident;
             for (++i; i < n; ++i) {
@@ -297,10 +268,6 @@ bool references_checkpoints(const std::string& sql) {
 bool auto_checkpoint_enabled() {
     return runtime_settings().auto_checkpoint() == "statement";
 }
-
-// --------------------------------------------------------------------------
-// The verbs
-// --------------------------------------------------------------------------
 
 bool create_checkpoint(const std::optional<std::string>& requested) {
     std::string error;
@@ -344,12 +311,11 @@ bool create_checkpoint(const std::optional<std::string>& requested) {
     row.state = kStateLive;
     row.mark = write_epoch();
     s.live.push_back(std::move(row));
-    s.redo.clear();  // a new undo point ends IDA's redo branch
+    s.redo.clear();
     s.changes_mark = -1;
     return true;
 }
 
-// Undo back through live[idx], newer checkpoints included.
 bool rollback_to(size_t idx) {
     std::string error;
     if (!supported(&error)) {
@@ -375,9 +341,6 @@ bool rollback_to(size_t idx) {
             ++foreign;
     }
     if (!reached) {
-        // The label is idasql's, but IDA no longer has the point (history trimmed
-        // by UNDO_MAXSIZE / UNDO_DEPTH, or undone outside idasql). IDA cannot list
-        // its history, so that is only found by undoing: put everything back.
         for (int64_t i = 0; i < steps; ++i) {
             if (!perform_redo())
                 break;
@@ -389,8 +352,6 @@ bool rollback_to(size_t idx) {
         return false;
     }
 
-    // writes_since bookkeeping: remember what each rolled-back checkpoint held
-    // (for redo), and stop counting the undone writes against older checkpoints.
     const int64_t now = write_epoch();
     for (size_t j = idx; j < s.live.size(); ++j) {
         const int64_t end = (j + 1 < s.live.size()) ? s.live[j + 1].mark : now;
@@ -400,13 +361,12 @@ bool rollback_to(size_t idx) {
     for (size_t k = 0; k < idx; ++k)
         s.live[k].mark += undone;
 
-    // Newest first onto the redo stack, so the target ends on top (redone first).
     for (size_t i = s.live.size(); i-- > idx;) {
         s.live[i].state = kStateUndone;
         s.redo.push_back(s.live[i]);
     }
     s.live.erase(s.live.begin() + static_cast<std::ptrdiff_t>(idx), s.live.end());
-    s.pending.reset();  // undone with the rest
+    s.pending.reset();
     s.last_rollback_steps = steps;
     s.last_rollback_foreign = foreign;
     refresh_caches();
@@ -418,8 +378,6 @@ bool redo_safe(const Store& s) {
     return !s.redo.empty() && (s.changes_mark < 0 || write_epoch() == s.changes_mark);
 }
 
-// Redo the checkpoint on top of the redo stack: IDA's steps up to and including
-// its own (foreign steps recorded between two checkpoints come back with it).
 bool redo_next() {
     std::string error;
     if (!supported(&error)) {
@@ -471,7 +429,6 @@ bool redo_next() {
     return true;
 }
 
-// The row as it is now, or nullptr when the checkpoint is gone.
 CheckpointRow* find_seq(Store& s, int64_t seq, bool* is_live, size_t* index) {
     for (size_t i = 0; i < s.live.size(); ++i) {
         if (s.live[i].seq == seq) {
@@ -523,7 +480,6 @@ bool set_state(CheckpointRow& row, xsql::FunctionArg value) {
         return false;
     }
     if (wanted == kStateUndone) {
-        // Already undone (e.g. by an older row of the same UPDATE): nothing to do.
         if (is_live && !rollback_to(index))
             return false;
     } else if (!is_live) {
@@ -540,7 +496,6 @@ bool set_state(CheckpointRow& row, xsql::FunctionArg value) {
 }
 
 bool insert_checkpoint(int argc, xsql::FunctionArg* argv) {
-    // Column order: seq, label, created_at, kind, writes_since, statement, state.
     for (int i = 0; i < argc; ++i) {
         if (i == 1 || argv[i].is_null())
             continue;
@@ -556,33 +511,23 @@ bool insert_checkpoint(int argc, xsql::FunctionArg* argv) {
     return create_checkpoint(label);
 }
 
-// --------------------------------------------------------------------------
-// auto_checkpoint
-// --------------------------------------------------------------------------
-
 void before_statement(const std::string& sql, xsql::Database* db) {
     if (++t_stmt_depth != 1)
-        return;  // nested (from Python through `import idasql`): the outer statement owns it
+        return;
     auto& s = store();
     if (!auto_checkpoint_enabled() || !supported(nullptr)) {
-        // Turned off: a point left pending by the statement that turned it off
-        // holds nothing of this statement's.
         settle_pending(s, "(outside idasql statements)");
         return;
     }
     if (references_checkpoints(sql))
         return;
-    // Right after a rollback/redo with nothing written since, a new undo point
-    // would end IDA's redo branch: keep it alive for reads. A DML statement ends
-    // it anyway (a redo is refused after any write), so that one still gets its
-    // checkpoint.
     qstring redo_lab;
     if (ida_redo_label(&redo_lab) && (s.changes_mark < 0 || write_epoch() == s.changes_mark) &&
         !is_dml_statement(sql, db))
         return;
     if (s.pending) {
         if (write_epoch() == s.pending->mark)
-            return;  // still unused: reuse it
+            return;
         settle_pending(s, "(outside idasql statements)");
     }
     CheckpointRow row;
@@ -609,7 +554,6 @@ void after_statement(const std::string& sql) {
     if (!top || !s.pending)
         return;
     if (write_epoch() == s.pending->mark) {
-        // Unused. Kept for the next statement, unless this one turned auto mode off.
         if (!auto_checkpoint_enabled())
             s.pending.reset();
         return;
@@ -634,11 +578,7 @@ void unhook_monitor() {
     }
 }
 
-}  // namespace
-
-// --------------------------------------------------------------------------
-// Public
-// --------------------------------------------------------------------------
+}
 
 ScopedDerivedWrites::ScopedDerivedWrites() { ++t_derived_depth; }
 ScopedDerivedWrites::~ScopedDerivedWrites() { --t_derived_depth; }
@@ -669,7 +609,6 @@ int64_t write_epoch() {
 void attach_engine(QueryEngine* engine) {
     auto& e = engines();
     if (e.live.empty()) {
-        // A new session: nothing to roll back to yet.
         store() = Store{};
         hook_monitor();
     }
@@ -702,7 +641,7 @@ CheckpointsRegistry::CheckpointsRegistry()
     : checkpoints(
           cached_table<CheckpointRow>("checkpoints")
               .no_shared_cache()
-              .counts_as_write(false)  // a checkpoint is not a change to the database
+              .counts_as_write(false)
               .estimate_rows([]() -> size_t { return store().live.size() + store().redo.size(); })
               .cache_builder([](std::vector<CheckpointRow>& rows) { collect_rows(rows); })
               .column_int64("seq", [](const CheckpointRow& r) -> int64_t { return r.seq; })
@@ -772,5 +711,5 @@ void CheckpointsRegistry::register_all(xsql::Database& db) {
     db.create_table("undo_state", "undo_state");
 }
 
-} // namespace checkpoints
-} // namespace idasql
+}
+}

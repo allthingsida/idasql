@@ -13,27 +13,10 @@ using namespace idasql::core;
 namespace idasql {
 namespace xrefs {
 
-// The xrefs surface exposes real cross-references only: ordinary fall-through
-// flow edges (fl_F: every instruction "references" the next one) bloat the
-// table ~3x and match neither IDA's Ctrl-X UX nor the other xsql tools.
-// Filtered by TYPE rather than the XREF_NOFLOW enumeration flag so the rule is
-// spelled once, is identical across SDK versions (the 0x01 flag is named
-// XREF_FAR before SDK 9.2), and is shared verbatim by the pushdown iterators
-// and the full-scan cache builder (fast/full parity).
 static inline bool is_flow_xref(const xrefblk_t &xb) {
   return xb.iscode && xb.type == fl_F;
 }
 
-// ============================================================================
-// Rows, owners and rowids
-// ============================================================================
-//
-// An xref is reported under the function that contains its source. A source in
-// a tail shared by functions A and C is inside both, so that xref is a row
-// under A and a row under C -- in the full scan and in every pushdown alike.
-
-// The functions an xref source is reported under; a single BADADDR entry
-// (from_func NULL) for a source outside every function.
 static std::vector<ea_t> source_owners(ea_t from) {
   std::vector<ea_t> owners;
   idasql_for_each_owner_of(from, [&](ea_t owner) { owners.push_back(owner); });
@@ -42,8 +25,6 @@ static std::vector<ea_t> source_owners(ea_t from) {
   return owners;
 }
 
-// Visit the reported xrefs from `from` with their ordinal among the non-flow
-// xrefs of that source (the ordinal is part of the row's identity).
 template <typename Callback>
 static void for_each_xref_from(ea_t from, Callback &&cb) {
   xrefblk_t xb;
@@ -80,14 +61,6 @@ static uint64_t splitmix64(uint64_t x) {
   return x ^ (x >> 31);
 }
 
-// Rowid of one xref row, shared by the full scan and every pushdown, so SQLite
-// can de-duplicate a MULTI-INDEX OR plan without dropping rows. A row under a
-// function is packed exactly: bit 63 clear, then the function ordinal (23
-// bits), the source's byte position in the function (24 bits, see
-// detail::FunctionLayout) and the xref's ordinal at that source (16 bits) --
-// distinct rows never share it, including one tail's rows under two owners. A
-// row outside every function (or beyond those widths) has bit 63 set over a
-// 63-bit hash of the same coordinates; the two forms never meet.
 static int64_t xref_rowid(const XrefInfo &row) {
   if (row.from_func != BADADDR && row.ordinal < (1u << 16)) {
     const int func_index = get_func_num(row.from_func);
@@ -107,7 +80,6 @@ static int64_t xref_rowid(const XrefInfo &row) {
   return static_cast<int64_t>(h | (uint64_t{1} << 63));
 }
 
-// Column order MUST match define_xrefs() below.
 static void xref_column(xsql::FunctionContext &ctx, const XrefInfo &r,
                         int col) {
   switch (col) {
@@ -119,7 +91,7 @@ static void xref_column(xsql::FunctionContext &ctx, const XrefInfo &r,
     break;
   case 2:
     if (r.from_func == BADADDR)
-      ctx.result_null(); // orphan source: NULL, consistent with the full scan
+      ctx.result_null();
     else
       ctx.result_int64(static_cast<int64_t>(r.from_func));
     break;
@@ -137,10 +109,6 @@ static void xref_column(xsql::FunctionContext &ctx, const XrefInfo &r,
     break;
   }
 }
-
-// ============================================================================
-// Xref Iterators
-// ============================================================================
 
 bool XrefRowsIterator::next() {
   if (!started_)
@@ -169,7 +137,6 @@ XrefsToIterator::XrefsToIterator(ea_t target) {
   for (bool ok = xb.first_to(target, XREF_ALL); ok; ok = xb.next_to()) {
     if (is_flow_xref(xb))
       continue;
-    // The xref's ordinal is its position among the xrefs FROM its source.
     uint32_t ordinal = 0;
     bool found = false;
     for_each_xref_from(xb.from, [&](const xrefblk_t &from_xb, uint32_t k) {
@@ -180,7 +147,7 @@ XrefsToIterator::XrefsToIterator(ea_t target) {
       }
     });
     if (!found)
-      continue; // not reported by the from-side walk either
+      continue;
     append_xref_rows(xb, ordinal, source_owners(xb.from), rows_);
   }
 }
@@ -195,13 +162,9 @@ XrefsFromIterator::XrefsFromIterator(ea_t source) {
 }
 
 XrefsFromFuncIterator::XrefsFromFuncIterator(ea_t func_ea) {
-  // from_func is the owner's ENTRY address; an interior or tail address is a
-  // different key and matches nothing, as in the full scan.
   if (!idasql_is_func_start(func_ea))
     return;
   const std::vector<ea_t> owner{func_ea};
-  // Every head (code and data) of every chunk: the full scan attributes an
-  // xref from data inside a function body (a jump table) to that function too.
   idasql_func_item_iterator fii;
   for (bool ok = fii.set(func_ea); ok; ok = fii.next_head()) {
     for_each_xref_from(fii.current(), [&](const xrefblk_t &xb, uint32_t k) {
@@ -210,27 +173,12 @@ XrefsFromFuncIterator::XrefsFromFuncIterator(ea_t func_ea) {
   }
 }
 
-// ============================================================================
-// XREFS Table
-// ============================================================================
-
 CachedTableDef<XrefInfo> define_xrefs() {
   return cached_table<XrefInfo>("xrefs")
       .no_shared_cache()
-      // Estimate row count without building cache
       .estimate_rows([]() -> size_t {
-        // Heuristic: ~10 xrefs per function on average
         return get_func_qty() * 10;
       })
-      // Cache builder (full-scan path; pushdown iterators bypass it).
-      // Enumerate the COMPLETE xref universe by collecting outgoing xrefs from every
-      // defined head, matching the from_addr/from_func/to_addr filter iterators
-      // (which all use xrefblk_t::first_from/first_to with XREF_ALL). The old builder
-      // collected only xrefs whose TARGET is a function start, so a full scan
-      // (COUNT / GROUP BY / from_addr range) silently missed every data/string/
-      // mid-function xref and disagreed with the pushdown iterators. Each xref has a
-      // single from-address, so iterating from-xrefs over all heads visits each once
-      // (once per owning function for a source in a shared tail).
       .cache_builder([](std::vector<XrefInfo> &cache) {
         const ea_t max_ea = inf_get_max_ea();
         uint64_t scanned = 0;
@@ -249,8 +197,6 @@ CachedTableDef<XrefInfo> define_xrefs() {
         }
       })
       .rowid([](const XrefInfo &r) -> int64_t { return xref_rowid(r); })
-      // Column order: from_addr, to_addr, from_func, type, is_code (matches bnsql),
-      // then kind. xref_column() above serves the same order to the pushdown iterators.
       .column_int64("from_addr",
                     [](const XrefInfo &r) -> int64_t {
                       return static_cast<int64_t>(r.from_ea);
@@ -259,10 +205,6 @@ CachedTableDef<XrefInfo> define_xrefs() {
                     [](const XrefInfo &r) -> int64_t {
                       return static_cast<int64_t>(r.to_ea);
                     })
-      // from_func is NULL when the source address is not inside any function
-      // (orphan source). Emitting NULL rather than 0 keeps the full scan consistent
-      // with the from_func pushdown iterator (which returns nothing for a non-
-      // function key) and disambiguates a genuine function based at ea 0.
       .column("from_func", xsql::ColumnType::Integer,
               [](xsql::FunctionContext &ctx, const XrefInfo &r) {
                 if (r.from_func == BADADDR)
@@ -275,12 +217,10 @@ CachedTableDef<XrefInfo> define_xrefs() {
           [](const XrefInfo &r) -> int { return static_cast<int>(r.type); })
       .column_int("is_code",
                   [](const XrefInfo &r) -> int { return r.is_code ? 1 : 0; })
-      // Readable classifier of `type` (call/jump/flow/code, offset/write/read/...).
       .column_text("kind",
                    [](const XrefInfo &r) -> std::string {
                      return xref_kind_str(r.is_code, r.type);
                    })
-      // Constraint pushdown: native IDA iterators bypass cache for O(1) lookups
       .filter_eq(
           "to_addr",
           [](int64_t target) -> std::unique_ptr<xsql::RowIterator> {
@@ -335,9 +275,6 @@ CachedTableDef<DataRefInfo> define_data_refs() {
             }
           };
 
-          // Every head of the body, data included: a jump or pointer table
-          // inside the function is the function's data reference too, as
-          // xrefs.from_func reports it.
           collect_item_refs(fii.current());
           while (fii.next_head()) {
             collect_item_refs(fii.current());
@@ -368,7 +305,6 @@ CachedTableDef<DataRefInfo> define_data_refs() {
                   [](const DataRefInfo &row) -> int {
                     return static_cast<int>(row.type);
                   })
-      // Readable classifier of ref_type: offset, write, read, text, info or data.
       .column_text("kind",
                    [](const DataRefInfo &row) -> std::string {
                      return xref_kind_str(false, row.type);
@@ -376,5 +312,5 @@ CachedTableDef<DataRefInfo> define_data_refs() {
       .build();
 }
 
-} // namespace xrefs
-} // namespace idasql
+}
+}

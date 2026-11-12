@@ -14,10 +14,6 @@ using namespace idasql::core;
 namespace idasql {
 namespace symbols {
 
-// ============================================================================
-// NAMES Table (with UPDATE/DELETE support)
-// ============================================================================
-
 void collect_name_rows(std::vector<NameRow> &rows) {
   rows.clear();
   auto folder_paths = dirtrees::collect_inode_paths(DIRTREE_NAMES);
@@ -42,9 +38,6 @@ void collect_name_rows(std::vector<NameRow> &rows) {
   }
 }
 
-// Why set_name() refused `name` at `ea`, for the error a failed INSERT or
-// UPDATE reports (SQLite alone would say "SQL logic error"). Asked after the
-// refusal, so it never changes what is accepted.
 static std::string explain_name_refusal(ea_t ea, const char *name) {
   const std::string where = idasql::format_ea_hex(ea);
   const std::string quoted = std::string("'") + (name ? name : "") + "'";
@@ -82,10 +75,6 @@ bool lookup_name_row(NameRow &row, ea_t ea) {
 CachedTableDef<NameRow> define_names() {
   return cached_table<NameRow>("names")
       .no_shared_cache()
-      // UPDATE reconstructs from the real argv column values (NOCHANGE stays
-      // disabled, so the unchanged ea/name carry real values): the name setter
-      // reads the NEW name from the row. DELETE resolves by rowid (the ea)
-      // through row_lookup().
       .update_from_column_values()
       .estimate_rows([]() -> size_t { return get_nlist_size(); })
       .cache_builder([](std::vector<NameRow> &rows) { collect_name_rows(rows); })
@@ -101,13 +90,6 @@ CachedTableDef<NameRow> define_names() {
           row.full_path = full ? full : "";
         }
       })
-      // Stable rowid = the address, matching the `addr` column and the addr
-      // index. The full-scan (and index) rowid is therefore an ea that
-      // round-trips through the ea-keyed row_lookup below, so a multi-row
-      // full-scan DELETE resolves each row by its own address instead of by a
-      // cache position that shifts as earlier rows are removed. (This also
-      // removes the low-based-image aliasing where distinct rows collided on a
-      // positional rowid.)
       .rowid([](const NameRow &row) -> int64_t {
         return static_cast<int64_t>(row.ea);
       })
@@ -137,8 +119,6 @@ CachedTableDef<NameRow> define_names() {
               return ok;
             }
             idasql_auto_wait();
-            // row.name holds the NEW name from argv (update_from_column_values),
-            // so re-read the TRUE pre-rename name from IDA for rollback.
             const std::string old_name = get_name(row.ea).c_str();
             auto old_path = dirtrees::find_inode_path(
                 DIRTREE_NAMES, static_cast<uint64_t>(row.ea));
@@ -215,7 +195,6 @@ CachedTableDef<NameRow> define_names() {
       .index_on("addr", [](const NameRow &row) -> int64_t {
         return static_cast<int64_t>(row.ea);
       })
-      // DELETE via set_name(ea, "") - removes the name
       .deletable([](NameRow &row) -> bool {
         idasql_auto_wait();
         bool ok = set_name(row.ea, "", SN_NOWARN) != 0;
@@ -225,7 +204,6 @@ CachedTableDef<NameRow> define_names() {
         return ok;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
-        // address (col 0) and name (col 1) are both required
         if (argc < 2 || argv[0].is_null() || argv[1].is_null()) {
           xsql::set_vtab_error("names: INSERT requires addr and name");
           return false;
@@ -262,10 +240,6 @@ CachedTableDef<NameRow> define_names() {
       .build();
 }
 
-// ============================================================================
-// ENTRIES Table (entry points / exports — canonical cross-tool name)
-// ============================================================================
-
 VTableDef define_exports() {
   return table("entries")
       .row_count([]() { return get_entry_qty(); })
@@ -283,5 +257,5 @@ VTableDef define_exports() {
       .build();
 }
 
-} // namespace symbols
-} // namespace idasql
+}
+}

@@ -3,10 +3,6 @@
 //
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
-//
-// `data_items` — enumerate defined data items (data heads). Canonical cross-tool
-// surface, matching ghidrasql:
-//   addr, name, data_type, size, value_repr, segment_name, is_string, is_initialized.
 
 #include "code_data_items.hpp"
 
@@ -22,7 +18,6 @@ namespace code {
 
 namespace {
 
-// A data head is a defined item whose class is data (not code/tail/unknown).
 inline bool is_data_head(ea_t ea) {
   if (ea == BADADDR)
     return false;
@@ -30,7 +25,6 @@ inline bool is_data_head(ea_t ea) {
   return is_head(f) && is_data(f);
 }
 
-// Best-effort type descriptor: prefer an applied tinfo, else the flag class.
 std::string data_type_str(ea_t ea) {
   flags64_t f = get_flags(ea);
   tinfo_t tif;
@@ -52,7 +46,6 @@ std::string data_type_str(ea_t ea) {
   }
 }
 
-// Best-effort value rendering: string contents for strlits, small scalars as hex.
 std::string value_repr_str(ea_t ea) {
   flags64_t f = get_flags(ea);
   if (is_strlit(f)) {
@@ -84,7 +77,6 @@ std::string segment_name_str(ea_t ea) {
   return "";
 }
 
-// WHERE addr = X pushdown: a single data head (or nothing) at X.
 class DataItemAtIterator : public xsql::RowIterator {
   ea_t ea_ = BADADDR;
   bool started_ = false;
@@ -130,7 +122,6 @@ private:
   }
 };
 
-// Full-scan generator: walk every head, keep the data ones.
 class DataItemsGenerator : public xsql::Generator<DataItemRow> {
   ea_t max_ea_ = inf_get_max_ea();
   bool started_ = false;
@@ -177,7 +168,7 @@ std::string ea_name_str(ea_t ea) {
   return "";
 }
 
-}  // namespace
+}
 
 GeneratorTableDef<DataItemRow> define_data_items() {
   return xsql::generator_table<DataItemRow>("data_items")
@@ -226,5 +217,5 @@ GeneratorTableDef<DataItemRow> define_data_items() {
       .build();
 }
 
-} // namespace code
-} // namespace idasql
+}
+}

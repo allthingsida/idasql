@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "ida_headers.hpp"
-#include "widget_catalog.hpp"  // BWN_* classification, widget_category(), widget_canonical_name(), ...
+#include "widget_catalog.hpp"
 
 #include <xsql/database.hpp>
 #include <xsql/json.hpp>
@@ -229,11 +229,6 @@ print("__IDASQL_UI_CTX__" + str(snapshot))
 static std::mutex g_capture_mutex;
 static bool g_helper_installed = false;
 
-// Widget-type classification (names, predicates, categories) is provided by
-// widget_catalog.hpp (included via ida_headers.hpp). The catalog lives in
-// namespace idasql::ui_context, so calls inside this anonymous namespace
-// resolve to it via ordinary name lookup.
-
 using idasql::format_ea_hex;
 
 static xsql::json make_selection_object(const char* kind) {
@@ -263,11 +258,6 @@ static void merge_from_active_widget(ContextSourceData& source, TWidget* viewer)
 
     source.viewer = viewer;
 
-    // The action snapshot's focused widget is authoritative. Only adopt the current
-    // main viewer's identity when the snapshot captured NO widget (the fallback
-    // path). Otherwise get_current_viewer() would clobber a focused chooser with the
-    // underlying listing view, gating off the chooser-selection paths and
-    // misreporting focused_widget.
     if (!source.has_widget) {
         source.widget_type = get_widget_type(viewer);
         source.has_widget = true;
@@ -283,14 +273,10 @@ static void merge_from_active_widget(ContextSourceData& source, TWidget* viewer)
     }
 
     if (source.has_widget && !is_address_widget_type(source.widget_type)) {
-        // Non-address focused widget (e.g. a chooser): no code anchor. Drop any
-        // stale action-context address rather than attributing the main viewer's ea.
         source.current_ea = BADADDR;
         return;
     }
 
-    // Address-type focused widget: fill the code anchor from the viewer only when
-    // the snapshot did not already provide one (don't overwrite a captured ea).
     if (source.current_ea == BADADDR) {
         const ea_t candidate_ea = get_screen_ea();
         if (candidate_ea != BADADDR) {
@@ -733,10 +719,6 @@ static void resolve_viewer_fallback_source(ContextSourceData& source) {
 
 static void populate_code_context_json(const ContextSourceData& source, xsql::json& out_code_context) {
     if (source.current_ea != BADADDR) {
-        // `has_address` is the documented boolean guard (ui-context skill concept:
-        // a concrete code anchor is present); `addr` is the canonical address value
-        // key. The guard keys (`has_address`/`is_address`) are conceptual field names
-        // and are intentionally not renamed to match the `addr` value key.
         xsql::json code_context = {
             {"has_address", true},
             {"addr", format_ea_hex(source.current_ea)}
@@ -745,7 +727,6 @@ static void populate_code_context_json(const ContextSourceData& source, xsql::js
         if (idasql_func_info_t current_func; idasql_func_info(source.current_ea, &current_func)) {
             qstring func_name;
             const bool have_func_name = get_func_name(&func_name, current_func.start_ea) > 0;
-            // end = entry-chunk end; size/chunks cover every chunk (entry + tails).
             code_context["function"] = {
                 {"name", have_func_name ? func_name.c_str() : ""},
                 {"start", format_ea_hex(current_func.start_ea)},
@@ -801,9 +782,6 @@ static xsql::json build_ui_context_json(const ContextSourceData& source, const C
         category = widget_category_name(widget_category(source.widget_type));
     }
 
-    // The main (address) viewer is distinct from the focused widget: a focused
-    // chooser sits on top of an underlying listing view. Describe the viewer from
-    // source.viewer so main_viewer is not merely a copy of focused_widget.
     xsql::json mv_type_id = type_id;
     std::string mv_type_name = type_name;
     std::string mv_canonical_name = canonical_name;
@@ -821,8 +799,6 @@ static xsql::json build_ui_context_json(const ContextSourceData& source, const C
     }
 
     xsql::json result = {
-        // Mirror the CLI stub's top-level shape (which carries available=false), so a
-        // client can key on `available` in both GUI and CLI/idalib mode.
         {"available", true},
         {"capture", {
             {"source", capture.source},
@@ -880,7 +856,7 @@ static xsql::json build_ui_context_json(const ContextSourceData& source, const C
     return result;
 }
 
-} // namespace
+}
 
 bool initialize_capture_helper(std::string* error) {
     std::lock_guard<std::mutex> lock(g_capture_mutex);
@@ -924,9 +900,6 @@ xsql::json get_ui_context_json() {
 
 namespace {
 
-// CLI/idalib has no IDA UI. Return the same top-level envelope shape as the
-// real provider (so clients don't break) but with machine-readable markers
-// (available=false, capture.source="cli") and a friendly message.
 xsql::json cli_unavailable_context_json() {
     return {
         {"available", false},
@@ -947,28 +920,21 @@ xsql::json cli_unavailable_context_json() {
     };
 }
 
-void sql_get_ui_context_json(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* /*argv*/) {
+void sql_get_ui_context_json(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* ) {
     if (argc != 0) {
         ctx.result_error("get_ui_context_json requires 0 arguments");
         return;
     }
-    // No UI under idalib/CLI — return the friendly stub instead of touching the
-    // GUI-only capture path.
     if (idasql_is_ida_library()) {
         ctx.result_text(cli_unavailable_context_json().dump(
             -1, ' ', false, xsql::json::error_handler_t::replace));
         return;
     }
-    // error_handler_t::replace: the live context carries binary-derived strings
-    // (disasm previews, widget titles, function/chooser names) that may hold
-    // non-UTF-8 bytes. Default dump() THROWS on those, and this runs inside a SQLite
-    // scalar callback with no try/catch — the exception would unwind through SQLite's
-    // C frames (UB/terminate in IDA). Replace substitutes U+FFFD so dump never throws.
     ctx.result_text(get_ui_context_json().dump(
         -1, ' ', false, xsql::json::error_handler_t::replace));
 }
 
-} // namespace
+}
 
 bool register_ui_context_sql_functions(xsql::Database& db) {
     return xsql::is_ok(db.register_function(
@@ -977,5 +943,5 @@ bool register_ui_context_sql_functions(xsql::Database& db) {
         xsql::ScalarFn(sql_get_ui_context_json)));
 }
 
-} // namespace ui_context
-} // namespace idasql
+}
+}

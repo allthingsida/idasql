@@ -36,11 +36,6 @@ const char* bpt_loc_type_name(int loc_type) {
 }
 
 std::string safe_bpt_group(const bpt_t& bpt) {
-    // A breakpoint's "group" is its folder in the DIRTREE_BPTS dirtree. Read it
-    // from the dirtree first: find_inode_path() loads the tree, so this is
-    // robust headless. The debugger-coupled get_bpt_group() returns empty under
-    // idalib whenever the bpts dirtree hasn't been loaded yet this session
-    // (order-dependent), so it is only a fallback. See safe_bpt_full_path().
     auto path = dirtrees::find_inode_path(DIRTREE_BPTS,
                                           static_cast<uint64_t>(bpt.bptid));
     if (path && !path->folder_path.empty())
@@ -109,13 +104,11 @@ std::string safe_bpt_loc_symbol(const bpt_t& bpt) {
 VTableDef define_breakpoints() {
     return table("breakpoints")
         .row_count([]() { return static_cast<size_t>(get_bpt_qty()); })
-        // Column 0: address (R)
         .column_int64("addr", [](size_t i) -> int64_t {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return static_cast<int64_t>(bpt.ea);
         })
-        // Column 1: enabled (RW)
         .column_int_rw("enabled",
             [](size_t i) -> int {
                 bpt_t bpt;
@@ -130,7 +123,6 @@ VTableDef define_breakpoints() {
                 }
                 return set_bpt_enabled(bpt, val != 0);
             })
-        // Column 2: type (RW)
         .column_int_rw("type",
             [](size_t i) -> int {
                 bpt_t bpt;
@@ -148,13 +140,11 @@ VTableDef define_breakpoints() {
                 if (!ok) xsql::set_vtab_error("breakpoints: failed to update type");
                 return ok;
             })
-        // Column 3: type_name (R)
         .column_text("type_name", [](size_t i) -> std::string {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             return bpt_type_name(bpt.type);
         })
-        // Column 4: size (RW)
         .column_int_rw("size",
             [](size_t i) -> int {
                 bpt_t bpt;
@@ -172,7 +162,6 @@ VTableDef define_breakpoints() {
                 if (!ok) xsql::set_vtab_error("breakpoints: failed to update size");
                 return ok;
             })
-        // Column 5: flags (RW)
         .column_int64_rw("flags",
             [](size_t i) -> int64_t {
                 bpt_t bpt;
@@ -185,15 +174,12 @@ VTableDef define_breakpoints() {
                     xsql::set_vtab_error("breakpoints: breakpoint not found at index " + std::to_string(i));
                     return false;
                 }
-                // Preserve BPT_ENABLED from current state so flags writes
-                // don't undo enabled-column writes during batch vtable updates
                 uint32 cur_enabled = bpt.flags & BPT_ENABLED;
                 bpt.flags = (static_cast<uint32>(val) & ~BPT_ENABLED) | cur_enabled;
                 bool ok = update_bpt(&bpt);
                 if (!ok) xsql::set_vtab_error("breakpoints: failed to update flags");
                 return ok;
             })
-        // Column 6: pass_count (RW)
         .column_int_rw("pass_count",
             [](size_t i) -> int {
                 bpt_t bpt;
@@ -211,7 +197,6 @@ VTableDef define_breakpoints() {
                 if (!ok) xsql::set_vtab_error("breakpoints: failed to update pass_count");
                 return ok;
             })
-        // Column 7: condition (RW)
         .column_text_rw("condition",
             [](size_t i) -> std::string {
                 bpt_t bpt;
@@ -229,31 +214,26 @@ VTableDef define_breakpoints() {
                 if (!ok) xsql::set_vtab_error("breakpoints: failed to update condition");
                 return ok;
             })
-        // Column 8: loc_type (R)
         .column_int("loc_type", [](size_t i) -> int {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return bpt.loc.type();
         })
-        // Column 9: loc_type_name (R)
         .column_text("loc_type_name", [](size_t i) -> std::string {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             return bpt_loc_type_name(bpt.loc.type());
         })
-        // Column 10: module (R)
         .column_text("module", [](size_t i) -> std::string {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             return safe_bpt_loc_path(bpt);
         })
-        // Column 11: symbol (R)
         .column_text("symbol", [](size_t i) -> std::string {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             return safe_bpt_loc_symbol(bpt);
         })
-        // Column 12: offset (R)
         .column_int64("offset", [](size_t i) -> int64_t {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
@@ -262,7 +242,6 @@ VTableDef define_breakpoints() {
                 return static_cast<int64_t>(bpt.loc.offset());
             return 0;
         })
-        // Column 13: source_file (R)
         .column_text("source_file", [](size_t i) -> std::string {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
@@ -272,7 +251,6 @@ VTableDef define_breakpoints() {
             }
             return "";
         })
-        // Column 14: source_line (R)
         .column_int("source_line", [](size_t i) -> int {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
@@ -280,19 +258,16 @@ VTableDef define_breakpoints() {
                 return bpt.loc.lineno();
             return 0;
         })
-        // Column 15: is_hardware (R)
         .column_int("is_hardware", [](size_t i) -> int {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return bpt.is_hwbpt() ? 1 : 0;
         })
-        // Column 16: is_active (R)
         .column_int("is_active", [](size_t i) -> int {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return bpt.is_active() ? 1 : 0;
         })
-        // Column 17: group (RW)
         .column_text_rw("group",
             [](size_t i) -> std::string {
                 bpt_t bpt;
@@ -310,13 +285,11 @@ VTableDef define_breakpoints() {
                 if (!ok) xsql::set_vtab_error("breakpoints: failed to set group");
                 return ok;
             })
-        // Column 18: bptid (R)
         .column_int64("bptid", [](size_t i) -> int64_t {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return 0;
             return static_cast<int64_t>(bpt.bptid);
         })
-        // Column 19: folder_path (RW, alias of group)
         .column_text_nullable_rw("folder_path",
             [](size_t i) -> std::optional<std::string> {
                 bpt_t bpt;
@@ -331,19 +304,16 @@ VTableDef define_breakpoints() {
                 }
                 return set_bpt_folder(bpt, value, "breakpoints.folder_path");
             })
-        // Column 20: full_path (R)
         .column_text("full_path", [](size_t i) -> std::string {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return "";
             return safe_bpt_full_path(bpt);
         })
-        // DELETE support
         .deletable([](size_t i) -> bool {
             bpt_t bpt;
             if (!getn_bpt(static_cast<int>(i), &bpt)) return false;
             return del_bpt(bpt.loc);
         })
-        // INSERT support
         .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
             auto is_non_null = [&](int col) -> bool {
                 return col < argc && !argv[col].is_null();
@@ -364,8 +334,6 @@ VTableDef define_breakpoints() {
                 return argv[col].as_int64();
             };
 
-            // Every integer value is exact (no '0x10' text read as 0, no 1.9
-            // read as 1) before anything is added.
             static constexpr struct { int col; const char* name; int64_t lo; int64_t hi; } kInts[] = {
                 {1, "enabled", INT_MIN, INT_MAX},    {2, "type", INT_MIN, INT_MAX},
                 {4, "size", INT_MIN, INT_MAX},       {5, "flags", INT64_MIN, INT64_MAX},
@@ -383,11 +351,6 @@ VTableDef define_breakpoints() {
 
             bool ok = false;
 
-            // Identity of the breakpoint we are about to insert, so the
-            // post-property loops below update *that* bpt and not an unrelated
-            // one. For the addr branch we match by ea; for the symbolic /
-            // relative / source branches the bpt list is location-ordered (not
-            // newest-last), so we must match by location.
             bool match_by_ea = is_non_null(0);
             ea_t target_ea = match_by_ea ? insert_ea : BADADDR;
             bpt_location_t target_loc;
@@ -433,9 +396,6 @@ VTableDef define_breakpoints() {
 
             if (!ok) return false;
 
-            // Compare two breakpoint locations without going through the
-            // UI-callback-backed operator== (which is unavailable headless):
-            // equal type, and equal string+offset (or ea for absolute).
             auto loc_eq = [](const bpt_location_t& a, const bpt_location_t& b) -> bool {
                 if (a.type() != b.type()) return false;
                 if (a.type() == BPLT_ABS) return a.ea() == b.ea();
@@ -449,7 +409,6 @@ VTableDef define_breakpoints() {
                 return (pa ? pa : "") == std::string(pb ? pb : "");
             };
 
-            // Locate the just-inserted bpt into `bpt`; returns false if not found.
             auto find_inserted = [&](bpt_t& bpt) -> bool {
                 int n = get_bpt_qty();
                 for (int j = 0; j < n; ++j) {
@@ -463,8 +422,6 @@ VTableDef define_breakpoints() {
                 return false;
             };
 
-            // Apply optional properties after creation, all against the bpt we
-            // just inserted (located via find_inserted).
             if (is_non_null(7)) {
                 const char* cond = get_text(7);
                 if (cond) {
@@ -487,9 +444,6 @@ VTableDef define_breakpoints() {
             if (is_non_null(5)) {
                 bpt_t bpt;
                 if (find_inserted(bpt)) {
-                    // Preserve BPT_ENABLED from current state, matching the
-                    // UPDATE flags setter, so a raw flags write does not undo
-                    // the bpt's enabled status.
                     uint32 cur_enabled = bpt.flags & BPT_ENABLED;
                     bpt.flags = (static_cast<uint32>(get_int64(5)) & ~BPT_ENABLED) | cur_enabled;
                     update_bpt(&bpt);
@@ -521,10 +475,6 @@ VTableDef define_breakpoints() {
         .build();
 }
 
-// ============================================================================
-// Registry
-// ============================================================================
-
 DebuggerRegistry::DebuggerRegistry()
     : breakpoints(define_breakpoints())
 {}
@@ -534,5 +484,5 @@ void DebuggerRegistry::register_all(xsql::Database& db) {
     db.create_table("breakpoints", "breakpoints");
 }
 
-} // namespace debugger
-} // namespace idasql
+}
+}

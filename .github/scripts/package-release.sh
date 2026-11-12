@@ -12,6 +12,9 @@ reviewed_revisions="${3:-}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(realpath "${script_dir}/../..")"
 version_header="${repo_root}/src/common/idasql_version.hpp"
+# Shipped in every archive: idasql's license and the third-party notices (ida-hcli, MIT).
+license_file="${repo_root}/LICENSE"
+notices_file="${repo_root}/THIRD-PARTY-NOTICES.md"
 manifest_template="${repo_root}/ida-plugin.json.in"
 version="$(
   sed -nE \
@@ -27,7 +30,7 @@ mkdir -p "${output}"
 incoming="$(realpath "${incoming}")"
 output="$(realpath "${output}")"
 work="$(mktemp -d "${output}/.package-work.XXXXXX")"
-trap 'rm -rf -- "${work}"' EXIT
+# Keep scratch files for diagnosis; the build environment owns directory cleanup.
 
 require_file() {
   if [[ ! -f "$1" ]]; then
@@ -77,9 +80,8 @@ require_matching_manifest() {
   local ida_version="$3"
 
   require_file "${actual}"
-  if ! diff --brief \
-    <(jq --sort-keys . "${expected}") \
-    <(jq --sort-keys . "${actual}") >/dev/null; then
+  if ! jq -e -s 'length == 2 and .[0] == .[1]' \
+    "${expected}" "${actual}" >/dev/null; then
     echo "manifest does not match ida-plugin.json.in for IDA ${ida_version}: ${actual}" >&2
     exit 1
   fi
@@ -95,7 +97,7 @@ require_metadata() {
 
   require_file "${metadata}"
   require_file "${sha_file}"
-  jq -e \
+  if ! jq -e \
     --arg ida_version "${ida_version}" \
     --arg sdk_ref "${sdk_ref}" \
     --arg platform "${platform}" \
@@ -109,7 +111,10 @@ require_metadata() {
       and (.libxsql_sha | test("^[0-9a-fA-F]{40}$"))
       and (.fastmcpp_origin | test("0xeb/fastmcpp"))
       and (.fastmcpp_sha | test("^[0-9a-fA-F]{40}$"))' \
-    "${metadata}" >/dev/null
+    "${metadata}" >/dev/null; then
+    echo "invalid build metadata for IDA ${ida_version} / ${platform}: ${metadata}" >&2
+    exit 1
+  fi
 
   local file_sha metadata_sha
   file_sha="$(tr -d '\r\n' < "${sha_file}")"
@@ -175,7 +180,7 @@ create_archive() {
   local files=("$@")
 
   (
-    cd "${source_dir}"
+    cd "${source_dir}" || exit 1
     zip -X -D -9 "${archive_path}" "${files[@]}"
   )
   diff -u \
@@ -186,16 +191,16 @@ create_archive() {
 mapfile -t metadata_files < <(
   find "${incoming}" -type f -name build-metadata.json -print | sort
 )
-if [[ "${#metadata_files[@]}" != "12" ]]; then
-  echo "expected metadata from 12 matrix builds, found ${#metadata_files[@]}" >&2
+if [[ "${#metadata_files[@]}" != "17" ]]; then
+  echo "expected metadata from 17 matrix builds, found ${#metadata_files[@]}" >&2
   exit 1
 fi
 
 mapfile -t ida_cmake_sha_files < <(
   find "${incoming}" -type f -name ida-cmake-sha.txt -print | sort
 )
-if [[ "${#ida_cmake_sha_files[@]}" != "12" ]]; then
-  echo "expected ida-cmake provenance from 12 matrix builds, found ${#ida_cmake_sha_files[@]}" >&2
+if [[ "${#ida_cmake_sha_files[@]}" != "17" ]]; then
+  echo "expected ida-cmake provenance from 17 matrix builds, found ${#ida_cmake_sha_files[@]}" >&2
   exit 1
 fi
 
@@ -223,7 +228,8 @@ if [[ -n "${reviewed_revisions}" ]]; then
       and (.dependencies.fastmcpp.sha | test("^[0-9a-f]{40}$"))
       and (.ida_sdks["9.2"].sha | test("^[0-9a-f]{40}$"))
       and (.ida_sdks["9.3"].sha | test("^[0-9a-f]{40}$"))
-      and (.ida_sdks["9.4"].sha | test("^[0-9a-f]{40}$"))' \
+      and (.ida_sdks["9.4"].sha | test("^[0-9a-f]{40}$"))
+      and (.ida_sdks["9.5"].sha | test("^[0-9a-f]{40}$"))' \
     "${reviewed_revisions}" >/dev/null
   require_reviewed_dependency "ida_cmake" "${ida_cmake_shas[0]}"
   require_reviewed_dependency "libxsql" "${libxsql_sha}"
@@ -247,12 +253,16 @@ jq -s 'sort_by(.ida_version, .platform)' "${metadata_files[@]}" \
 
 release_archives=()
 
-for ida in 92 93 94; do
+require_file "${license_file}"
+require_file "${notices_file}"
+
+for ida in 92 93 94 95; do
   ida_version="${ida:0:1}.${ida:1:1}"
   case "${ida}" in
     92) sdk_ref="v9.2.0-sdk.1" ;;
     93) sdk_ref="v9.3.0-sdk.3" ;;
     94) sdk_ref="v9.4.0-release" ;;
+    95) sdk_ref="v9.5.0-release" ;;
   esac
 
   linux_x64="${incoming}/build-ida${ida}-linux-x86_64"
@@ -269,7 +279,7 @@ for ida in 92 93 94; do
     require_metadata "${linux_arm64}" "${ida_version}" "${sdk_ref}" "linux-arm64"
     artifact_dirs+=("${linux_arm64}")
   fi
-  if [[ "${ida}" == "94" ]]; then
+  if [[ "${ida}" -ge 94 ]]; then
     require_metadata \
       "${windows_arm64}" "${ida_version}" "${sdk_ref}" "windows-arm64"
     artifact_dirs+=("${windows_arm64}")
@@ -306,7 +316,7 @@ for ida in 92 93 94; do
     require_file "${linux_arm64}/plugin/idasql.so"
     require_file "${linux_arm64}/cli/idasql"
   fi
-  if [[ "${ida}" == "94" ]]; then
+  if [[ "${ida}" -ge 94 ]]; then
     require_file "${windows_arm64}/plugin/idasql.dll"
     require_file "${windows_arm64}/cli/idasql.exe"
   fi
@@ -320,8 +330,11 @@ for ida in 92 93 94; do
   cp "${windows}/plugin/idasql.dll" "${plugin_dir}/"
   cp "${linux_x64}/plugin/idasql.so" "${plugin_dir}/"
   cp "${macos}/plugin/idasql.dylib" "${plugin_dir}/"
+  cp "${license_file}" "${notices_file}" "${plugin_dir}/"
   plugin_files=(
     "ida-plugin.json"
+    "LICENSE"
+    "THIRD-PARTY-NOTICES.md"
     "idasql.dll"
     "idasql.so"
     "idasql.dylib"
@@ -330,9 +343,9 @@ for ida in 92 93 94; do
   create_archive "${plugin_archive}" "${plugin_dir}" "${plugin_files[@]}"
   release_archives+=("${plugin_name}.zip")
 
-  # CLI programs are manual downloads, not IDA plugin packages. Keep them in a
+  # CLI programs are separate downloads, not IDA plugin packages. Keep them in a
   # descriptor-free archive whose paths state the host architecture.
-  cli_name="idasql-v${version}-ida${ida}-cli-manual"
+  cli_name="idasql-v${version}-ida${ida}-cli"
   cli_dir="${work}/${cli_name}"
   mkdir -p \
     "${cli_dir}/windows-x86_64" \
@@ -340,7 +353,7 @@ for ida in 92 93 94; do
     "${cli_dir}/macos-arm64"
   printf '%s\n' \
     "IDASQL ${version} command-line tools for IDA ${ida_version}." \
-    "This is a manual CLI archive, not an HCLI plugin package." \
+    "This is the command-line archive, not an HCLI plugin package." \
     "Copy the executable for your host architecture next to the IDA executable." \
     > "${cli_dir}/INSTALL.txt"
   cp "${windows}/cli/idasql.exe" "${cli_dir}/windows-x86_64/"
@@ -349,8 +362,11 @@ for ida in 92 93 94; do
   chmod 0755 \
     "${cli_dir}/linux-x86_64/idasql" \
     "${cli_dir}/macos-arm64/idasql"
+  cp "${license_file}" "${notices_file}" "${cli_dir}/"
   cli_files=(
     "INSTALL.txt"
+    "LICENSE"
+    "THIRD-PARTY-NOTICES.md"
     "windows-x86_64/idasql.exe"
     "linux-x86_64/idasql"
     "macos-arm64/idasql"
@@ -361,7 +377,7 @@ for ida in 92 93 94; do
     chmod 0755 "${cli_dir}/linux-arm64/idasql"
     cli_files+=("linux-arm64/idasql")
   fi
-  if [[ "${ida}" == "94" ]]; then
+  if [[ "${ida}" -ge 94 ]]; then
     mkdir -p "${cli_dir}/windows-arm64"
     cp "${windows_arm64}/cli/idasql.exe" "${cli_dir}/windows-arm64/"
     cli_files+=("windows-arm64/idasql.exe")
@@ -371,23 +387,26 @@ for ida in 92 93 94; do
   release_archives+=("${cli_name}.zip")
 
   # HCLI does not currently model Linux or Windows ARM64 native entry points.
-  # Publish those plugin binaries separately for explicit manual installation.
+  # Publish those plugin binaries separately, for installation by hand.
   if [[ "${ida}" != "92" ]]; then
-    arm_name="idasql-v${version}-ida${ida}-arm64-plugin-manual"
+    arm_name="idasql-v${version}-ida${ida}-arm64-plugin"
     arm_dir="${work}/${arm_name}"
     mkdir -p "${arm_dir}/linux-arm64"
     printf '%s\n' \
       "IDASQL ${version} ARM64 plugins for IDA ${ida_version}." \
-      "This is a manual installation archive, not an HCLI plugin package." \
+      "This archive is installed by hand, not through HCLI." \
       "Copy the binary for your host architecture into IDA's plugins directory." \
       "The archive intentionally has no ida-plugin.json descriptor." \
       > "${arm_dir}/INSTALL.txt"
     cp "${linux_arm64}/plugin/idasql.so" "${arm_dir}/linux-arm64/"
+    cp "${license_file}" "${notices_file}" "${arm_dir}/"
     arm_files=(
       "INSTALL.txt"
+      "LICENSE"
+      "THIRD-PARTY-NOTICES.md"
       "linux-arm64/idasql.so"
     )
-    if [[ "${ida}" == "94" ]]; then
+    if [[ "${ida}" -ge 94 ]]; then
       mkdir -p "${arm_dir}/windows-arm64"
       cp "${windows_arm64}/plugin/idasql.dll" "${arm_dir}/windows-arm64/"
       arm_files+=("windows-arm64/idasql.dll")

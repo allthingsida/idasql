@@ -3,17 +3,6 @@
 //
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
-//
-// notepad — the one free-text note IDA keeps inside each database, shown in
-// the "Database notepad" window. Read and written through nalt.hpp's
-// get_ida_notepad_text / set_ida_notepad_text, which work under idalib too.
-//
-// nalt.hpp reserves 1000 indexes (1MB) for the notepad text: 1,024,000
-// bytes, the terminating NUL included, which is also what IDA's notepad
-// window keeps. Observed on IDA 9.0-9.4: the text is stored byte for byte
-// (IDA does not touch line ends; the window writes CRLF), and a write longer
-// than the field is cut off without its NUL. So this table writes CRLF like
-// the window, shows \n, and refuses text above that size.
 
 #include <idasql/platform.hpp>
 
@@ -28,7 +17,6 @@ namespace idasql {
 namespace metadata {
 namespace {
 
-// 1000 netnode indexes of MAXSPECSIZE bytes (nalt.hpp), the NUL included.
 constexpr size_t kNotepadLimit = 1024000;
 
 std::string read_stored_text() {
@@ -70,7 +58,7 @@ std::string with_commas(size_t n) {
     return s;
 }
 
-} // namespace
+}
 
 CachedTableDef<NotepadRow> define_notepad() {
     return cached_table<NotepadRow>("notepad")
@@ -128,5 +116,5 @@ CachedTableDef<NotepadRow> define_notepad() {
         .build();
 }
 
-} // namespace metadata
-} // namespace idasql
+}
+}

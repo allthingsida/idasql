@@ -4,12 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_dbg.hpp - Debugger-related IDA entities as virtual tables
- *
- * Tables: breakpoints
- */
-
 #pragma once
 
 #include <idasql/platform.hpp>
@@ -37,5 +31,5 @@ struct DebuggerRegistry {
     void register_all(xsql::Database& db);
 };
 
-} // namespace debugger
-} // namespace idasql
+}
+}

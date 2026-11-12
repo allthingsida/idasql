@@ -4,11 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * types_enums.hpp - `types_enum_values` table (enum constants) and the per-enum
- * value iterator.
- */
-
 #pragma once
 
 #include "types_common.hpp"
@@ -41,10 +36,6 @@ struct EnumTypeRef {
 bool build_enum_value_entry(uint32_t ordinal, int value_index,
                             EnumValueEntry &entry);
 
-/**
- * Iterator for enum values of a specific enum type.
- * Used when query has: WHERE type_ordinal = X
- */
 class EnumValuesInTypeIterator : public xsql::RowIterator {
   uint32_t type_ordinal_;
   std::string type_name_;
@@ -63,5 +54,5 @@ public:
 
 CachedTableDef<EnumValueEntry> define_types_enum_values();
 
-} // namespace types
-} // namespace idasql
+}
+}

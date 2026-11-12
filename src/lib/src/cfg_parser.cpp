@@ -23,7 +23,6 @@ std::string read_all(const std::string& path, bool* ok) {
     return ss.str();
 }
 
-// Strip // and /* */ comments outside "strings" and 'chars'; keep newlines.
 std::string strip_comments(const std::string& s) {
     std::string o;
     o.reserve(s.size());
@@ -46,7 +45,7 @@ std::string strip_comments(const std::string& s) {
                 o.push_back(c);
                 if (c == '\\' && n) { o.push_back(n); ++i; }
                 else if ((st == STR && c == '"') || (st == CHR && c == '\'')) st = N;
-                else if (c == '\n') st = N;  // unterminated: recover at the line end
+                else if (c == '\n') st = N;
                 break;
             case LINE:
                 if (c == '\n') { st = N; o.push_back('\n'); }
@@ -67,7 +66,6 @@ std::string trim(const std::string& s) {
     return s.substr(a, b - a);
 }
 
-// Collapse whitespace runs outside strings to one space.
 std::string collapse(const std::string& s) {
     std::string o;
     bool in_str = false, sp = false;
@@ -88,7 +86,6 @@ std::string collapse(const std::string& s) {
     return o;
 }
 
-// Net bracket depth change of a line, ignoring strings.
 int bracket_delta(const std::string& s) {
     int d = 0;
     bool in_str = false;
@@ -147,7 +144,6 @@ std::string expand(const std::string& v,
     return o;
 }
 
-// #if expression: `defined(X)`, `!defined(X)`, `__IDAVER__ <op> N`; else false.
 bool eval_if(const std::string& e0, const Context& ctx) {
     std::string e = trim(e0);
     bool neg = false;
@@ -176,7 +172,6 @@ bool eval_if(const std::string& e0, const Context& ctx) {
     return false;
 }
 
-// IDA reads the first file found: the including file's directory, then dirs.
 std::string find_include(const std::string& name, const Context& ctx,
                          const std::string& cur_dir) {
     std::vector<std::string> dirs = ctx.dirs;
@@ -189,7 +184,6 @@ std::string find_include(const std::string& name, const Context& ctx,
     return {};
 }
 
-// `value` minus trailing ';' (recorded in *terminated).
 std::string strip_semicolons(std::string value, bool* terminated) {
     value = trim(value);
     while (!value.empty() && value.back() == ';') {
@@ -200,7 +194,7 @@ std::string strip_semicolons(std::string value, bool* terminated) {
     return value;
 }
 
-}  // namespace
+}
 
 bool parse_file(const std::string& path, const Context& ctx,
                 std::vector<Entry>& out,
@@ -237,9 +231,6 @@ bool parse_file(const std::string& path, const Context& ctx,
         if (!line.empty() && line.back() == '\r') line.pop_back();
         const std::string t = trim(line);
         if (has_pending) {
-            // A value ends at ';', or at its line end once its brackets balance,
-            // unless the next line continues it (a list over several lines,
-            // adjacent string literals). A new statement or directive ends it.
             bool new_stmt = false;
             if (!t.empty() && t[0] == '#') {
                 new_stmt = pend_depth <= 0;
@@ -252,7 +243,6 @@ bool parse_file(const std::string& path, const Context& ctx,
             if (new_stmt) {
                 flush();
             } else if (!t.empty() && t[0] == '#') {
-                // a directive inside a bracketed value: handled below
             } else {
                 if (!t.empty()) {
                     pending_raw += " " + t;
@@ -303,7 +293,6 @@ bool parse_file(const std::string& path, const Context& ctx,
             }
             continue;
         }
-        // KEY = value at the top level?
         if (is_ident_start(t[0])) {
             size_t k = 0;
             while (k < t.size() && is_ident(t[k])) ++k;
@@ -324,9 +313,6 @@ bool parse_file(const std::string& path, const Context& ctx,
     }
     flush();
 
-    // Commented-out directives, `// KEY = value` at the start of a line: the
-    // files document a default that way. Upper-case keys only, so prose such
-    // as "// x = y" is not taken for a directive.
     std::istringstream rin(raw);
     std::string rl;
     while (std::getline(rin, rl)) {
@@ -356,5 +342,5 @@ bool parse_file(const std::string& path, const Context& ctx,
     return true;
 }
 
-}  // namespace cfgparse
-}  // namespace idasql
+}
+}

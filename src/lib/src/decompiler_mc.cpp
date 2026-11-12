@@ -7,7 +7,7 @@
 #include "decompiler.hpp"
 
 #include "function_rowid.hpp"
-#include "types_members.hpp" // idasql::types::parse_type_declarator (array-aware)
+#include "types_members.hpp"
 #include "checkpoints.hpp"
 
 #include <idasql/string_utils.hpp>
@@ -25,12 +25,6 @@
 
 namespace idasql {
 namespace decompiler {
-
-// ============================================================================
-// Hex-Rays microcode leg of the cross-tool low-IR (native `microcode` /
-// `microcode_operands` tables + the ir_ops family of views), paired with the
-// ctree/pseudocode implementation in decompiler_ctree.cpp.
-// ============================================================================
 
 static const char* microcode_canonical_op(int opcode) {
     switch (opcode) {
@@ -60,10 +54,10 @@ static const char* microcode_canonical_op(int opcode) {
         case m_sar:   return "INT_SRIGHT";
         case m_setz:  return "INT_EQUAL";
         case m_setnz: return "INT_NOTEQUAL";
-        case m_setb:  return "INT_LESS";        // unsigned below (CF=1)
-        case m_setbe: return "INT_LESSEQUAL";   // unsigned below-or-equal
-        case m_setl:  return "INT_SLESS";       // signed less
-        case m_setle: return "INT_SLESSEQUAL";  // signed less-or-equal
+        case m_setb:  return "INT_LESS";
+        case m_setbe: return "INT_LESSEQUAL";
+        case m_setl:  return "INT_SLESS";
+        case m_setle: return "INT_SLESSEQUAL";
         case m_jcnd:
         case m_jnz: case m_jz:  case m_jae: case m_jb: case m_ja:
         case m_jbe: case m_jg:  case m_jge: case m_jl: case m_jle:
@@ -80,15 +74,14 @@ static const char* microcode_canonical_op(int opcode) {
         case m_fdiv:  return "FLOAT_DIV";
         case m_fneg:  return "FLOAT_NEG";
         case m_f2i:
-        case m_f2u:   return "TRUNC";           // fp -> integer
+        case m_f2u:   return "TRUNC";
         case m_i2f:
         case m_u2f:   return "INT2FLOAT";
         case m_f2f:   return "FLOAT2FLOAT";
-        default:      return "";                // no clean canonical (honest absence)
+        default:      return "";
     }
 }
 
-// mba_maturity_t <-> rung name (the cross-tool maturity axis).
 static const char* mmat_name(mba_maturity_t m) {
     switch (m) {
         case MMAT_GENERATED:    return "generated";
@@ -138,7 +131,7 @@ static uint8_t mmat_ordinal(const std::string& name) {
         return 5;
     if (name == "glbopt3")
         return 6;
-    return 7; // lvars (and the defensive fallback used by mmat_name)
+    return 7;
 }
 
 static bool microcode_scan_interrupted() {
@@ -186,13 +179,6 @@ std::optional<std::string> microcode_error(ea_t func_addr, const std::string& ma
     return std::nullopt;
 }
 
-// `report_generation_failure` distinguishes the two callers. A pushed-down
-// `WHERE func_addr = X` asked about exactly one function, so a gen_microcode
-// failure there is the answer and must surface. A full scan must instead skip
-// the function and keep going -- every real binary contains functions Hex-Rays
-// cannot lift, and aborting on the first one made unfiltered `microcode` /
-// `ir_ops` / `ir_v_*` queries fail outright. This mirrors CtreeGenerator, which
-// silently skips functions it cannot decompile.
 bool collect_microcode(std::vector<MicrocodeRow>& rows, ea_t func_addr,
                        mba_maturity_t reqmat = MMAT_LVARS,
                        bool require_exact_maturity = false,
@@ -205,7 +191,6 @@ bool collect_microcode(std::vector<MicrocodeRow>& rows, ea_t func_addr,
     hexrays_failure_t hf;
     mba_t* mba = nullptr;
     {
-        // A read: IDB changes Hex-Rays makes while lifting are not writes.
         checkpoints::ScopedDerivedWrites derived;
         mba = idasql_gen_microcode(func_addr, &hf, nullptr, DECOMP_NO_WAIT, reqmat);
     }
@@ -224,7 +209,6 @@ bool collect_microcode(std::vector<MicrocodeRow>& rows, ea_t func_addr,
         return false;
     }
 
-    // Emit the RETURNED maturity (honest under coercion), not the requested one.
     const char* mat = mmat_name(mba->maturity);
     const char* stg = mmat_stage(mba->maturity);
 
@@ -261,11 +245,10 @@ bool collect_microcode(std::vector<MicrocodeRow>& rows, ea_t func_addr,
         delete mba;
         return false;
     }
-    delete mba;  // gen_microcode returns an mba the caller owns
+    delete mba;
     return true;
 }
 
-// minsn operand (l/r/d) -> one of the 5 canonical kinds, or "" if outside the model.
 static const char* mop_canonical_kind(const mop_t& m) {
     switch (m.t) {
         case mop_r:              return "reg";
@@ -277,7 +260,6 @@ static const char* mop_canonical_kind(const mop_t& m) {
     }
 }
 
-// Operand rows (5-kind model) for one function's microcode at a maturity rung.
 bool collect_microcode_operands(std::vector<MicrocodeOperandRow>& rows, ea_t func_addr,
                                 mba_maturity_t reqmat = MMAT_LVARS,
                                 bool require_exact_maturity = false,
@@ -289,7 +271,6 @@ bool collect_microcode_operands(std::vector<MicrocodeOperandRow>& rows, ea_t fun
     hexrays_failure_t hf;
     mba_t* mba = nullptr;
     {
-        // A read: IDB changes Hex-Rays makes while lifting are not writes.
         checkpoints::ScopedDerivedWrites derived;
         mba = idasql_gen_microcode(func_addr, &hf, nullptr, DECOMP_NO_WAIT, reqmat);
     }
@@ -335,8 +316,6 @@ bool collect_microcode_operands(std::vector<MicrocodeOperandRow>& rows, ea_t fun
                 const char* d = m.dstr();
                 r.text = d ? d : "";
                 r.size = m.size;
-                // `value` is an integer column. Preserve mop_fn floating literals
-                // losslessly in `text` and leave `value` SQL NULL.
                 if (m.t == mop_n) { r.value = static_cast<int64_t>(m.value(false)); r.has_value = true; }
                 r.maturity = mat;
                 r.stage = stg;
@@ -353,8 +332,6 @@ bool collect_microcode_operands(std::vector<MicrocodeOperandRow>& rows, ea_t fun
     return true;
 }
 
-// Column order (must match the .column_* declarations) — the constraint-filter
-// factory reads the pushed func_addr / maturity by index.
 enum {
     MC_FUNC_ADDR = 0, MC_BLOCK_NUM, MC_SEQ, MC_ADDR, MC_OPCODE,
     MC_CANONICAL_OP, MC_MATURITY, MC_STAGE, MC_TEXT, MC_L_TEXT, MC_R_TEXT, MC_D_TEXT
@@ -364,11 +341,6 @@ enum {
     MO_TEXT, MO_VALUE, MO_SIZE, MO_MATURITY, MO_STAGE
 };
 
-// Generator over microcode ops: one function when func_addr was constrained, or
-// all functions otherwise, at each requested maturity rung. A function Hex-Rays
-// cannot lift contributes no rows, never an error: a pushed-down func_addr looks
-// exactly like one probe of a join or an IN list, and one unliftable function must
-// not fail the whole statement. microcode_error(func_addr) says why it failed.
 template <typename Row, bool (*Collect)(std::vector<Row>&, ea_t, mba_maturity_t, bool, bool)>
 class MicrocodeRungGenerator : public xsql::Generator<Row> {
     std::vector<mba_maturity_t> rungs_;
@@ -402,7 +374,7 @@ class MicrocodeRungGenerator : public xsql::Generator<Row> {
             const mba_maturity_t rung = rungs_[rung_idx_++];
             current_.clear();
             if (Collect(current_, func_, rung, require_exact_maturity_,
-                        /*report_generation_failure=*/false) &&
+false) &&
                 !current_.empty()) {
                 row_idx_ = 0;
                 return true;
@@ -431,17 +403,12 @@ public:
 
 using MicrocodeGenerator = MicrocodeRungGenerator<MicrocodeRow, collect_microcode>;
 
-// Generator over microcode operands (same func/maturity selection).
 using MicrocodeOperandGenerator =
     MicrocodeRungGenerator<MicrocodeOperandRow, collect_microcode_operands>;
 
-// The maturity rungs, in IDA's order.
 static const mba_maturity_t kAllRungs[] = {MMAT_GENERATED, MMAT_PREOPTIMIZED, MMAT_LOCOPT, MMAT_CALLS,
                                            MMAT_GLBOPT1,   MMAT_GLBOPT2,      MMAT_GLBOPT3, MMAT_LVARS};
 
-// Does rung `name` satisfy `maturity <op> value` the way SQLite would compare it?
-// The column is TEXT: a number on the right is compared as its text, NULL matches
-// nothing, and a blob sorts after every text (so only < and <= hold).
 static bool rung_matches(const char* name, xsql::ConstraintOp op, xsql::FunctionArg value) {
     if (value.is_null()) return false;
     if (value.type() == SQLITE_BLOB)
@@ -460,10 +427,6 @@ static bool rung_matches(const char* name, xsql::ConstraintOp op, xsql::Function
     return false;
 }
 
-// Shared constraint parsing: optional func_addr + any maturity predicate the
-// planner hands over (=, LIKE, <, <=, >, >=; IN arrives as one = per value).
-// The rungs are exactly those whose name satisfies every predicate; without one,
-// the default rung (lvars).
 static void parse_ir_constraints(const std::vector<xsql::GeneratorConstraintArg>& args,
                                  int func_addr_col, int maturity_col,
                                  ea_t& target, bool& target_constrained,
@@ -474,8 +437,6 @@ static void parse_ir_constraints(const std::vector<xsql::GeneratorConstraintArg>
     maturity_constrained = false;
     valid = true;
     std::vector<mba_maturity_t> candidates(std::begin(kAllRungs), std::end(kAllRungs));
-    // Both constraints are omit=1: a func_addr no integer equals (4096.5,
-    // NULL, 'a') matches no row, and each maturity predicate is applied here.
     for (const auto& arg : args) {
         if (arg.column_index == func_addr_col) {
             if (arg.op != xsql::ConstraintOp::Eq) continue;
@@ -520,10 +481,8 @@ std::unique_ptr<xsql::Generator<MicrocodeOperandRow>> make_microcode_operand_gen
 }
 
 GeneratorTableDef<MicrocodeRow> define_microcode() {
-    // Column order MUST match the MC_* enum (the constraint-filter reads by index).
     return generator_table<MicrocodeRow>("microcode")
         .estimate_rows([]() -> size_t { return get_func_qty() * 30; })
-        // Unconstrained full scan: all functions at the default rung (MMAT_LVARS).
         .generator([]() -> std::unique_ptr<xsql::Generator<MicrocodeRow>> {
             return std::make_unique<MicrocodeGenerator>();
         })
@@ -541,7 +500,6 @@ GeneratorTableDef<MicrocodeRow> define_microcode() {
         .column_text("l_text", [](const MicrocodeRow& r) -> std::string { return r.l_text; })
         .column_text("r_text", [](const MicrocodeRow& r) -> std::string { return r.r_text; })
         .column_text("d_text", [](const MicrocodeRow& r) -> std::string { return r.d_text; })
-        // WHERE func_addr=X [AND maturity <op> ...] -> one gen_microcode per selected rung.
         .constraint_filter(
             { xsql::optional_eq("func_addr"), xsql::optional_eq("maturity"),
               xsql::optional_like("maturity"), xsql::optional_gt("maturity"),
@@ -552,7 +510,6 @@ GeneratorTableDef<MicrocodeRow> define_microcode() {
 }
 
 GeneratorTableDef<MicrocodeOperandRow> define_microcode_operands() {
-    // Column order MUST match the MO_* enum.
     return generator_table<MicrocodeOperandRow>("microcode_operands")
         .estimate_rows([]() -> size_t { return get_func_qty() * 60; })
         .generator([]() -> std::unique_ptr<xsql::Generator<MicrocodeOperandRow>> {
@@ -579,22 +536,7 @@ GeneratorTableDef<MicrocodeOperandRow> define_microcode_operands() {
         .build();
 }
 
-
-// ============================================================================
-// Cross-tool low-IR views (ir_ops / ir_v_* / ir_operands / ir_maturities) over
-// the microcode + microcode_operands tables. Registered by
-// DecompilerRegistry::register_all() after the microcode generator tables.
-// ============================================================================
 bool register_microcode_views(xsql::Database& db) {
-    // ------------------------------------------------------------------------
-    // Cross-tool low-IR (ir_ops family) over the microcode table. idasql's
-    // native leg is Hex-Rays microcode (MMAT_LVARS); ir_ops maps its mcode_t
-    // opcodes to the canonical P-code-style vocabulary (op) while preserving the
-    // native mnemonic (native_op). is_ssa=0: MMAT_LVARS microcode is SSA-like
-    // but not explicit SSA (no PHI), so we do not claim SSA. The ir_v_* views
-    // are the portable, engine-agnostic surface shared with the other tools.
-    // Always scope by func_addr (pushes down to the microcode generator).
-    // ------------------------------------------------------------------------
     if (db.exec(R"(
         CREATE VIEW IF NOT EXISTS ir_ops AS
         SELECT
@@ -651,10 +593,6 @@ bool register_microcode_views(xsql::Database& db) {
     )") != xsql::Status::ok)
         return false;
 
-    // ir_operands — the portable 8-column operand shape. It is deliberately
-    // fixed to the default lvars rung because the cross-tool schema has no
-    // maturity coordinate; lower-rung IDASQL queries must join the native
-    // microcode_operands table on func_addr + seq + maturity.
     if (db.exec(R"(
         CREATE VIEW IF NOT EXISTS ir_operands AS
         SELECT func_addr, op_seq, operand_index, role,
@@ -664,9 +602,6 @@ bool register_microcode_views(xsql::Database& db) {
     )") != xsql::Status::ok)
         return false;
 
-    // ir_maturities — the microcode maturity ladder (discoverability). is_default is the
-    // rung used when a query does not constrain maturity (MMAT_LVARS). is_ssa=0 (microcode
-    // is SSA-like, not explicit) on every rung.
     if (db.exec(R"(
         CREATE VIEW IF NOT EXISTS ir_maturities AS
         SELECT 'generated'    AS maturity, 'raw'       AS stage, 0 AS ordinal, 0 AS is_default, 0 AS is_ssa
@@ -683,5 +618,5 @@ bool register_microcode_views(xsql::Database& db) {
     return true;
 }
 
-} // namespace decompiler
-} // namespace idasql
+}
+}

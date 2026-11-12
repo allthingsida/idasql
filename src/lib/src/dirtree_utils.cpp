@@ -87,11 +87,6 @@ bool ok_or_exists(dterr_t err) {
   return err == DTE_OK || err == DTE_ALREADY_EXISTS;
 }
 
-// IDA names some leaves after their inode and marks that with a leading
-// control byte (a bookmark leaf is "\x01" followed by its hex address), and
-// get_abspath(DTN_FULL_NAME) keeps the marker. The path columns show the
-// printable form: control bytes at the start of a component are dropped.
-// Calls back into the dirtree keep the tree's own spelling (tree_path).
 std::string printable_abspath(const qstring &qpath) {
   std::string out;
   out.reserve(qpath.length());
@@ -157,8 +152,6 @@ struct CollectVisitor : public dirtree_visitor_t {
   }
 };
 
-// Pushed-down dirtree_entries constraints. They are omit=1, so an absent
-// optional means "unconstrained" and a present one must match exactly.
 struct DirtreeEntryFilter {
   std::optional<std::string> path_eq;
   std::optional<std::string> path_like;
@@ -288,7 +281,7 @@ bool validate_writable_tree(const StandardTreeInfo &info,
   return false;
 }
 
-} // namespace
+}
 
 const std::vector<StandardTreeInfo> &standard_trees() {
   static const std::vector<StandardTreeInfo> trees = {
@@ -406,8 +399,6 @@ int path_depth(std::string_view full_path) {
   return static_cast<int>(std::count(path.begin(), path.end(), '/'));
 }
 
-// SQL's own LIKE: case-insensitive ASCII, no escape character (a LIKE without
-// ESCAPE has none, and SQLite only pushes that form down).
 bool sqlite_like(std::string_view value, std::string_view pattern) {
   std::string v(value);
   std::string p(pattern);
@@ -671,9 +662,6 @@ bool rename_folder(const StandardTreeInfo &info, std::string_view from,
     return false;
   }
 
-  // Reject renaming a folder into its own descendant (e.g. a -> a/b/c). The
-  // rename would fail, and doing this check before ensure_folder() avoids
-  // leaving a freshly-created destination parent chain behind.
   if (dst == src || dst.compare(0, src.size() + 1, src + "/") == 0) {
     if (error)
       *error = "dirtree_folders: cannot rename '" + src +
@@ -727,9 +715,6 @@ bool remove_empty_folder(const StandardTreeInfo &info, std::string_view folder,
 GeneratorTableDef<DirtreeEntryRow> define_dirtree_entries() {
   auto factory = [](const std::vector<xsql::GeneratorConstraintArg> &args)
       -> std::unique_ptr<xsql::Generator<DirtreeEntryRow>> {
-    // Every constraint is omit=1, so a value its column could never hold --
-    // NULL, a blob, is_dir = 0.5, an unknown tree -- matches no row (an
-    // unknown tree used to fall back to every tree).
     const StandardTreeInfo *selected_tree = nullptr;
     DirtreeEntryFilter filter;
     for (const auto &arg : args) {
@@ -756,9 +741,6 @@ GeneratorTableDef<DirtreeEntryRow> define_dirtree_entries() {
         if (!selected_tree)
           return nullptr;
       } else if (column == 1 && arg.op == xsql::ConstraintOp::Like) {
-        // These constraints are omit=1 (SQLite does not re-check the rows), so
-        // they compare the raw value exactly as SQL would: no path
-        // normalization, no implicit leading '/'.
         filter.path_like = *text;
       } else if (column == 1) {
         filter.path_eq = *text;
@@ -785,8 +767,6 @@ GeneratorTableDef<DirtreeEntryRow> define_dirtree_entries() {
         collect_one(info);
     }
 
-    // Surface a tree load()/traverse() failure as a query error instead of
-    // silently returning zero rows.
     if (!error.empty())
       xsql::set_vtab_error(error);
 
@@ -818,10 +798,6 @@ GeneratorTableDef<DirtreeEntryRow> define_dirtree_entries() {
 GeneratorTableDef<DirtreeFolderRow> define_dirtree_folders() {
   auto factory = [](const std::vector<xsql::GeneratorConstraintArg> &args)
       -> std::unique_ptr<xsql::Generator<DirtreeFolderRow>> {
-    // omit=1, as for dirtree_entries: a NULL or blob value or an unknown tree
-    // matches no folder. That matters for DELETE, which walks this plan: an
-    // unknown tree, or a path that normalized to the root ('/', ''), used to
-    // select every folder of every tree.
     const StandardTreeInfo *selected_tree = nullptr;
     std::optional<std::string> path_eq;
     std::optional<std::string> path_like;
@@ -841,7 +817,7 @@ GeneratorTableDef<DirtreeFolderRow> define_dirtree_folders() {
       } else if (arg.op == xsql::ConstraintOp::Like) {
         path_like = *text;
       } else {
-        path_eq = *text;  // omit=1: exact SQL equality, see dirtree_entries
+        path_eq = *text;
       }
     }
 
@@ -865,8 +841,6 @@ GeneratorTableDef<DirtreeFolderRow> define_dirtree_folders() {
         collect_one(info);
     }
 
-    // Surface a tree load()/traverse() failure as a query error instead of
-    // silently returning zero rows.
     if (!error.empty())
       xsql::set_vtab_error(error);
 
@@ -961,5 +935,5 @@ GeneratorTableDef<DirtreeFolderRow> define_dirtree_folders() {
       .build();
 }
 
-} // namespace dirtrees
-} // namespace idasql
+}
+}

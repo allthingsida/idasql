@@ -4,27 +4,21 @@
 #
 # This file is licensed under the Human-Origin Source License v1.0.
 # See LICENSE.
-#
 
-# idasql CLI - Command-line SQL interface to IDA databases
-# Built as part of the main idasql project
-
-# idasql CLI executable
 ida_add_idalib(idasql_cli
     TYPE EXECUTABLE
     SOURCES
         main.cpp
+        commands.cpp
 )
 target_link_libraries(idasql_cli PRIVATE xsql::xsql)
 target_link_libraries(idasql_cli PRIVATE idasql)
 target_include_directories(idasql_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include)
 target_compile_definitions(idasql_cli PRIVATE USE_IDA_SDK USE_HEXRAYS)
 if(WIN32)
-    # Prevent Windows.h from defining min/max macros (collides with std::max in xsql/query_script.hpp)
     target_compile_definitions(idasql_cli PRIVATE NOMINMAX)
 endif()
 
-# Output name: idasql (not idasql_cli), placed next to ida.exe for idalib
 set_target_properties(idasql_cli PROPERTIES
     OUTPUT_NAME "idasql"
     RUNTIME_OUTPUT_DIRECTORY "${IDABIN}"
@@ -33,20 +27,17 @@ set_target_properties(idasql_cli PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${IDABIN}"
 )
 
-# Add Windows manifest for UTF-8 support (Windows 10 1903+)
 if(WIN32)
     target_sources(idasql_cli PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/idasql.manifest
     )
 endif()
 
-# Windows VS_VERSION_INFO resource
 xsql_add_versioninfo(idasql_cli
     FILETYPE          VFT_APP
     DESCRIPTION       "idasql command-line interface for IDA databases"
     ORIGINAL_FILENAME "idasql.exe")
 
-# Platform-specific settings
 if(MSVC)
     target_compile_options(idasql_cli PRIVATE /bigobj)
     file(TO_NATIVE_PATH "${IDABIN}" IDABIN_NATIVE)
@@ -66,7 +57,6 @@ elseif(UNIX)
     )
 endif()
 
-# MCP support (from parent project)
 if(IDASQL_WITH_MCP)
     target_sources(idasql_cli PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../common/mcp_server.cpp
@@ -80,15 +70,12 @@ if(IDASQL_WITH_MCP)
     message(STATUS "idasql_cli: MCP support enabled")
 endif()
 
-# HTTP server support
 target_sources(idasql_cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/http_server.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/binary_query.cpp
 )
 target_compile_definitions(idasql_cli PRIVATE XSQL_HAS_THINCLIENT)
 
-# cpp-httplib: provided transitively by xsql::xsql when XSQL_WITH_THINCLIENT=ON.
-# Only fetch standalone if the target doesn't already exist (e.g. standalone build).
 if(NOT TARGET httplib)
     include(FetchContent)
     FetchContent_Declare(
@@ -99,5 +86,3 @@ if(NOT TARGET httplib)
     FetchContent_MakeAvailable(cpp_httplib)
     target_include_directories(idasql_cli PRIVATE ${cpp_httplib_SOURCE_DIR})
 endif()
-
-# idasql.exe is placed next to ida.exe via RUNTIME_OUTPUT_DIRECTORY above.

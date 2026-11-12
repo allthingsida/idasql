@@ -11,24 +11,16 @@ using namespace idasql::core;
 namespace idasql {
 namespace symbols {
 
-// ============================================================================
-// IMPORTS Table
-// ============================================================================
-
 std::string get_import_module_name_safe(int idx) {
   qstring name;
   get_import_module_name(&name, idx);
   return std::string(name.c_str());
 }
-// ============================================================================
-// IMPORTS Table (query-scoped cache)
-// ============================================================================
 
 CachedTableDef<ImportInfo> define_imports() {
   return cached_table<ImportInfo>("imports")
       .no_shared_cache()
       .estimate_rows([]() -> size_t {
-        // Estimate: ~100 imports per module
         return get_import_module_qty() * 100;
       })
       .cache_builder([](std::vector<ImportInfo> &cache) {
@@ -55,7 +47,7 @@ CachedTableDef<ImportInfo> define_imports() {
                   info.full_path = path_it->second.full_path;
                 }
                 ctx->cache->push_back(info);
-                return 1; // continue enumeration
+                return 1;
               },
               &ctx);
         }
@@ -109,5 +101,5 @@ CachedTableDef<ImportInfo> define_imports() {
       .build();
 }
 
-} // namespace symbols
-} // namespace idasql
+}
+}

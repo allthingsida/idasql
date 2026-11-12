@@ -3,16 +3,6 @@
 //
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
-//
-// binary — orientation/metadata table, canonical key/value/type shape
-// (one row per fact). Columns: (key TEXT, value TEXT, type TEXT) with
-// type in {string, hex, bool, int}. Canonical core keys shared with
-// bnsql/ghidrasql/r2sql: tool_name, tool_version, processor, filetype,
-// image_base, entry_point, min_addr, max_addr, is_64bit, bits, endianness,
-// filename, summary, md5, sha256. idasql extras: idasql_version, entry_name,
-// funcs_count, segments_count, names_count, strings_count, input_file_path,
-// idb_path. (The old wide column start_addr became the canonical key
-// entry_point; db_info still carries a start_addr key.)
 
 #include <idasql/platform.hpp>
 
@@ -76,7 +66,6 @@ static void collect_binary(std::vector<MetadataItem>& rows) {
     const int segments_count = static_cast<int>(get_segm_qty());
     const int strings_count = static_cast<int>(get_strlist_qty());
 
-    // summary first: agents doing `SELECT * FROM binary` see the digest up top.
     {
         std::ostringstream summary;
         summary << processor << " " << (is_64bit ? "64-bit" : "32-bit");
@@ -91,12 +80,10 @@ static void collect_binary(std::vector<MetadataItem>& rows) {
         add_str("summary", summary.str());
     }
 
-    // Tool identity.
     add_str("tool_name", "idasql");
     add_str("tool_version", IDASQL_VERSION_STRING);
-    add_str("idasql_version", IDASQL_VERSION_STRING);  // legacy-named extra
+    add_str("idasql_version", IDASQL_VERSION_STRING);
 
-    // Canonical core keys.
     add_str("processor", processor);
     {
         char ftype[MAXSTR];
@@ -110,14 +97,11 @@ static void collect_binary(std::vector<MetadataItem>& rows) {
     add_int("bits", inf_get_app_bitness());
     add_str("endianness", inf_is_be() ? "big" : "little");
 
-    // File identity. Every API is bounded by the buffer size we pass and
-    // guarded by its return code, falling back to an empty string when absent.
     {
         char fname[QMAXPATH];
         add_str("filename", (get_root_filename(fname, sizeof(fname)) > 0) ? fname : "");
     }
 
-    // idasql extras.
     add_str("entry_name", entry_name);
     add_int("funcs_count", funcs_count);
     add_int("segments_count", segments_count);
@@ -129,13 +113,10 @@ static void collect_binary(std::vector<MetadataItem>& rows) {
                 (get_input_file_path(fpath, sizeof(fpath)) > 0) ? fpath : "");
     }
     {
-        // Full path of the IDB/I64 on disk (may differ from input_file_path if moved).
         const char* idb = get_path(PATH_TYPE_IDB);
         add_str("idb_path", (idb != nullptr) ? idb : "");
     }
 
-    // Best-effort core hashes (kept even when empty: the row's presence is the
-    // idasql contract; value is "" when the input file hash is unavailable).
     {
         uchar md5[16];
         add_str("md5", retrieve_input_file_md5(md5) ? to_hex(md5, sizeof(md5)) : "");
@@ -147,7 +128,7 @@ static void collect_binary(std::vector<MetadataItem>& rows) {
     }
 }
 
-} // namespace
+}
 
 CachedTableDef<MetadataItem> define_binary() {
     return cached_table<MetadataItem>("binary")
@@ -168,5 +149,5 @@ CachedTableDef<MetadataItem> define_binary() {
         .build();
 }
 
-} // namespace metadata
-} // namespace idasql
+}
+}

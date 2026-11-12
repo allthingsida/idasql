@@ -6,7 +6,7 @@
 
 #include "types_member_xrefs.hpp"
 
-#include "types_members.hpp" // get_type_ordinal_by_name
+#include "types_members.hpp"
 #include "xrefs.hpp"
 
 #include <algorithm>
@@ -17,24 +17,19 @@ namespace types {
 
 namespace {
 
-constexpr int kMaxNestDepth = 16;     // guard against pathological nesting
-constexpr int kMaxStroffPath = 32;    // tid path buffer for get_stroff_path
+constexpr int kMaxNestDepth = 16;
+constexpr int kMaxStroffPath = 32;
 
-// A resolved leaf member to enumerate xrefs for. `type_ordinal`/`type_name` are
-// always the top-level queried type; `member_path` is the dotted path to the
-// (possibly nested) member; `offset_bits` is cumulative within the top type.
 struct LeafMember {
   uint32_t type_ordinal;
   std::string type_name;
-  int member_index;        // index within the immediate containing type
-  std::string member_name; // leaf name
-  std::string member_path; // dotted path from the queried type
-  int64_t offset_bits;     // cumulative bit offset within the queried type
+  int member_index;
+  std::string member_name;
+  std::string member_path;
+  int64_t offset_bits;
   tid_t member_id;
 };
 
-// Recursively collect a type's members (and embedded value struct/union members)
-// into `out`. `tif` is the type currently being walked; `top_*` stay constant.
 void expand_members(const tinfo_t &tif, uint32_t top_ord,
                     const std::string &top_name, int64_t base_off_bits,
                     const std::string &path_prefix, std::set<uint32_t> &visited,
@@ -57,8 +52,6 @@ void expand_members(const tinfo_t &tif, uint32_t top_ord,
     lm.member_id = tif.get_udm_tid(i);
     out.push_back(lm);
 
-    // Recurse into embedded value struct/union members (not pointers/arrays --
-    // those are references, not containment).
     if (m.type.is_struct() || m.type.is_union()) {
       qstring nested_name;
       uint32_t nested_ord = 0;
@@ -67,7 +60,7 @@ void expand_members(const tinfo_t &tif, uint32_t top_ord,
         const int ord = get_type_ordinal_by_name(ti, nested_name.c_str());
         nested_ord = ord > 0 ? static_cast<uint32_t>(ord) : 0;
         if (nested_ord != 0 && visited.count(nested_ord)) {
-          continue; // cycle guard (self-referential by value)
+          continue;
         }
         if (nested_ord != 0) visited.insert(nested_ord);
       }
@@ -120,8 +113,6 @@ std::vector<LeafMember> resolve_by_member_id(tid_t tid) {
   return leaves;
 }
 
-// The structure offset an operand's value encodes: the immediate for o_imm, the
-// displacement for o_displ/o_mem, 0 for a bare register phrase.
 adiff_t stroff_operand_value(const op_t &op) {
   switch (op.type) {
     case o_imm: return static_cast<adiff_t>(op.value);
@@ -130,10 +121,6 @@ adiff_t stroff_operand_value(const op_t &op) {
   }
 }
 
-// From byte offset `off` inside `cur`, walk member offsets down to member
-// `want`. A union member is chosen by the next selector (`sel`, `nsel`: the
-// stroff path's union selections); a union with no selector left is ambiguous.
-// Fills the byte offset of the access inside `want`.
 bool walk_to_member(tinfo_t cur, int64_t off, const tid_t *sel, int nsel, tid_t want,
                     int64_t &off_in_member) {
   for (int depth = 0; depth <= kMaxNestDepth && off >= 0; ++depth) {
@@ -163,11 +150,6 @@ bool walk_to_member(tinfo_t cur, int64_t off, const tid_t *sel, int nsel, tid_t 
   return false;
 }
 
-// Does operand n's struct-offset expression land on member `want`? The path
-// IDA stores starts at the accessed structure (get_stroff_path: ids[0] is the
-// structure; further ids only select union members), so the member is found by
-// walking offsets down from that root: value + delta is the offset inside it.
-// Fills the byte offset of the access inside the member and the root type's name.
 bool stroff_hits_member(const insn_t &insn, int n, tid_t want, int64_t &off_in_member,
                         qstring &root_name) {
   tid_t path[kMaxStroffPath];
@@ -182,11 +164,6 @@ bool stroff_hits_member(const insn_t &insn, int n, tid_t want, int64_t &off_in_m
   return walk_to_member(root, off, path + 1, std::min(cnt, kMaxStroffPath) - 1, want, off_in_member);
 }
 
-// Does stack-variable operand n land on member `want`? The operand names a
-// frame location (calc_stkvar_struc_offset); the frame member there is the
-// variable, and when its type is a structure the walk continues inside it
-// (`[ebp+entry.balance]`). Fills the access's offset inside the member and the
-// variable's type name.
 bool stkvar_hits_member(const insn_t &insn, int n, tid_t want, int64_t &off_in_member,
                         qstring &root_name) {
   tinfo_t frame;
@@ -209,8 +186,6 @@ bool stkvar_hits_member(const insn_t &insn, int n, tid_t want, int64_t &off_in_m
                         nullptr, 0, want, off_in_member);
 }
 
-// Iterator: walks the resolved leaf members, and for each enumerates xrefs to
-// its member tid. Leaves with no xrefs are skipped (produce no rows).
 class MemberXrefsIterator : public xsql::RowIterator {
 public:
   explicit MemberXrefsIterator(std::vector<LeafMember> leaves)
@@ -246,7 +221,7 @@ public:
       case 6:  ctx.result_int64(lm.offset_bits); break;
       case 7:  ctx.result_int64(static_cast<int64_t>(lm.member_id)); break;
       case 8:  ctx.result_int64(static_cast<int64_t>(frm_)); break;
-      case 9:  ctx.result_int64(static_cast<int64_t>(lm.member_id)); break; // xref_to
+      case 9:  ctx.result_int64(static_cast<int64_t>(lm.member_id)); break;
       case 10: ctx.result_int(static_cast<int>(xb_.type)); break;
       case 11: ctx.result_text(kind_.c_str()); break;
       case 12: func_ea_ != BADADDR ? ctx.result_int64(static_cast<int64_t>(func_ea_))
@@ -282,7 +257,6 @@ private:
     return false;
   }
 
-  // Compute per-row context (function + best-effort operand/access/disasm).
   void populate_row() {
     frm_ = xb_.from;
     func_ea_ = idasql_func_start(frm_);
@@ -315,8 +289,6 @@ private:
           op_ok_ = true;
           op_index_ = n;
           access_off_ = in_member;
-          // Taking the member's address (an offset-of immediate, an lea) touches
-          // no memory: no access size.
           access_size_ = insn.ops[n].type == o_imm || xb_.type == dr_O
                              ? -1
                              : static_cast<int64_t>(get_dtype_size(insn.ops[n].dtype));
@@ -334,7 +306,6 @@ private:
   xrefblk_t xb_{};
   int64_t row_counter_ = 0;
 
-  // current-row context
   ea_t frm_ = BADADDR;
   ea_t func_ea_ = BADADDR;
   qstring func_name_;
@@ -348,13 +319,11 @@ private:
   qstring insn_text_;
 };
 
-} // namespace
+}
 
 GeneratorTableDef<MemberXrefRow> define_struct_member_xrefs() {
   return generator_table<MemberXrefRow>("struct_member_xrefs")
       .estimate_rows([]() -> size_t { return 64; })
-      // Unfiltered full scan is rejected: enumerating every member of every type
-      // is the expensive pattern this table's filters exist to avoid. Require an entry filter.
       .full_scan_error(
           "struct_member_xrefs requires a filter on type_ordinal, type_name, "
           "or member_id (e.g. WHERE type_name = 'MyStruct').")
@@ -377,16 +346,10 @@ GeneratorTableDef<MemberXrefRow> define_struct_member_xrefs() {
       .column_text("instruction_text", [](const MemberXrefRow &r) { return r.instruction_text; })
       .column_int64("access_offset", [](const MemberXrefRow &r) { return r.access_offset; })
       .column_int64("access_size", [](const MemberXrefRow &r) { return r.access_size; })
-      // The structure the operand's offset expression starts from. A nested row
-      // (member_path a.b) is an access through the queried type only when this
-      // equals type_name; otherwise it is an xref to the embedded type's member
-      // from elsewhere.
       .column_text("access_root_type", [](const MemberXrefRow &r) { return r.access_root_type; })
       .filter_eq(
           "type_ordinal",
           [](int64_t ord) -> std::unique_ptr<xsql::RowIterator> {
-            // Type ordinals are uint32; reject anything out of range rather than
-            // truncating (e.g. 4294967297 -> 1 would resolve ordinal-1's members).
             if (ord <= 0 || ord > static_cast<int64_t>(UINT32_MAX))
               return std::make_unique<MemberXrefsIterator>(std::vector<LeafMember>{});
             return std::make_unique<MemberXrefsIterator>(
@@ -395,7 +358,10 @@ GeneratorTableDef<MemberXrefRow> define_struct_member_xrefs() {
           1.0, 20.0)
       .filter_eq_text(
           "type_name",
-          [](const char *name) -> std::unique_ptr<xsql::RowIterator> {
+          [](const auto& value) -> std::unique_ptr<xsql::RowIterator> {
+              const std::string full_name(value);
+              if (full_name.find('\0') != std::string::npos) return nullptr;
+              const char* name = full_name.c_str();
             return std::make_unique<MemberXrefsIterator>(
                 resolve_by_name(name ? name : ""));
           },
@@ -410,5 +376,5 @@ GeneratorTableDef<MemberXrefRow> define_struct_member_xrefs() {
       .build();
 }
 
-} // namespace types
-} // namespace idasql
+}
+}

@@ -4,13 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_ext.hpp - Additional IDA entities as virtual tables
- *
- * Tables: fixups, hidden_ranges, problems, fchunks, signatures, available_signatures,
- *         local_types, mappings
- */
-
 #pragma once
 
 #include <idasql/platform.hpp>
@@ -35,25 +28,23 @@ struct ProblemEntry {
     std::string type_name;
 };
 
-// One entry of the database's FLIRT signature list.
 struct SignatureEntry {
     int index = 0;
-    std::string name;      // as IDA stores it: a short name or an absolute path
-    std::string title;     // the library's name, "" when the file is not found
-    int state = 0;         // IDASGN_APPLIED / IDASGN_CURRENT / IDASGN_PLANNED
-    int32 matches = 0;     // library modules the signature recognised
+    std::string name;
+    std::string title;
+    int state = 0;
+    int32 matches = 0;
     std::string optlibs;
 };
 
-// One .sig file IDA would find for the current processor.
 struct AvailableSignature {
-    std::string name;      // file name without ".sig": what INSERT takes
+    std::string name;
     std::string title;
     std::string path;
-    std::string source;    // "idausr", "idasgn" or "idadir"
-    int is_startup = -1;   // -1: unknown (no header reader on this SDK)
-    int64_t modules = -1;  // -1: unknown
-    bool in_list = false;  // already in the database's signature list
+    std::string source;
+    int is_startup = -1;
+    int64_t modules = -1;
+    bool in_list = false;
 };
 
 struct LocalTypeEntry {
@@ -94,5 +85,5 @@ struct ExtendedRegistry {
     void register_all(xsql::Database& db);
 };
 
-} // namespace extended
-} // namespace idasql
+}
+}

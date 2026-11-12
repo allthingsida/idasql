@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * code_loops.hpp - `disasm_loops` table (natural loops per function).
- */
-
 #pragma once
 
 #include "core_common.hpp"
@@ -24,11 +20,9 @@ struct LoopInfo {
   ea_t back_edge_block_end;
 };
 
-// Back edges of the function containing `func_ea` (a tail address selects
-// its owner); nothing outside a function.
 void collect_loops_for_func(std::vector<LoopInfo> &loops, ea_t func_ea);
 
 GeneratorTableDef<LoopInfo> define_disasm_loops();
 
-} // namespace code
-} // namespace idasql
+}
+}

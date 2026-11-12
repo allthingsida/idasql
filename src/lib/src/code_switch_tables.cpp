@@ -3,16 +3,12 @@
 //
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
-//
-// `switch_tables` — reconstructed switch/case jump tables via the IDA analyzer's
-// get_switch_info(). Canonical cross-tool surface, matching ghidrasql:
-// func_addr, instr_addr, table_addr, min_case, max_case, case_count, default_addr.
 
 #include "code_switch_tables.hpp"
 #include "function_rowid.hpp"
 
 #include <nalt.hpp>
-#include <xref.hpp>   // calc_switch_cases, casevec_t
+#include <xref.hpp>
 
 using namespace idasql::core;
 
@@ -21,8 +17,6 @@ namespace code {
 
 namespace {
 
-// `func_ea` when it is a function's entry address, else BADADDR: func_addr is
-// the owner's ENTRY address, and an interior or tail address matches nothing.
 ea_t func_start_at(ea_t func_ea) {
   return idasql_is_func_start(func_ea) ? func_ea : BADADDR;
 }
@@ -59,8 +53,6 @@ bool for_each_func_code(ea_t func_ea, Visit visit) {
   return !switch_scan_interrupted();
 }
 
-// Derive bounds from the actual case labels. switch_info_t::lowcase aliases the
-// sparse switch's value-table address, so it is not a valid sparse bound.
 void collect_switch_bounds(ea_t ea, const switch_info_t &si,
                            SwitchTableInfo &row) {
   casevec_t cases;
@@ -85,9 +77,6 @@ void collect_switch_bounds(ea_t ea, const switch_info_t &si,
   }
 }
 
-// Walk one function's instructions and reconstruct every switch it contains.
-// get_switch_info(&si, ea) returns > 0 when `ea` participates in a switch idiom;
-// dedup by the idiom start (si.startea) so a switch is emitted exactly once.
 bool collect_switches_in_func(ea_t func_ea, std::vector<SwitchTableInfo> &out) {
   if (func_ea == BADADDR)
     return true;
@@ -116,12 +105,6 @@ bool collect_switches_in_func(ea_t func_ea, std::vector<SwitchTableInfo> &out) {
   return completed;
 }
 
-// Enumerate the per-case (value -> target) rows of every switch in the function
-// whose entry is `func_ea`. The processor's calc_switch_cases() fills `cv`
-// (casevec_t: cv[i] is the value(s) mapped to targets[i] — IDA groups multiple
-// case labels per target) and `targets` (eavec_t). Emit one row per (value,
-// target), plus a default row (case_value NULL, is_default=1) when the switch
-// has a default. dedup by idiom start, like collect_switches_in_func.
 bool collect_switch_cases_in_func(ea_t func_ea, std::vector<SwitchCaseInfo> &out) {
   if (func_ea == BADADDR)
     return true;
@@ -136,10 +119,6 @@ bool collect_switch_cases_in_func(ea_t func_ea, std::vector<SwitchCaseInfo> &out
     seen.push_back(key);
 
     int64_t idx = 0;
-    // The GLOBAL kernel calc_switch_cases (xref.hpp) computes cases for standard
-    // switches (the processor_t::calc_switch_cases NOTIFICATION is only for custom jump
-    // tables and returns nothing here). Returns false when cases can't be computed; the
-    // switch still appears in switch_tables, just with no detail rows here.
     casevec_t cv;
     eavec_t targets;
     if (::calc_switch_cases(&cv, &targets, ea, si)) {
@@ -163,7 +142,7 @@ bool collect_switch_cases_in_func(ea_t func_ea, std::vector<SwitchCaseInfo> &out
       r.switch_instr_addr = ea;
       r.case_index = idx++;
       r.target_addr = si.defjump;
-      r.is_default = true;   // case_value surfaced as NULL
+      r.is_default = true;
       out.push_back(std::move(r));
     }
   });
@@ -172,9 +151,8 @@ bool collect_switch_cases_in_func(ea_t func_ea, std::vector<SwitchCaseInfo> &out
   return completed;
 }
 
-}  // namespace
+}
 
-// WHERE func_addr = X pushdown: reconstruct only that function's switches.
 class SwitchTablesInFuncIterator : public xsql::RowIterator {
   std::vector<SwitchTableInfo> rows_;
   size_t idx_ = 0;
@@ -243,7 +221,6 @@ public:
   }
 };
 
-// Full-scan generator: every function, every switch.
 class SwitchTablesGenerator : public xsql::Generator<SwitchTableInfo> {
   size_t func_idx_ = 0;
   std::vector<SwitchTableInfo> current_;
@@ -339,7 +316,6 @@ GeneratorTableDef<SwitchTableInfo> define_switch_tables() {
       .build();
 }
 
-// WHERE func_addr = X pushdown: enumerate only that function's switch cases.
 class SwitchCasesInFuncIterator : public xsql::RowIterator {
   std::vector<SwitchCaseInfo> rows_;
   size_t idx_ = 0;
@@ -383,7 +359,6 @@ public:
   }
 };
 
-// Full-scan generator: every function, every switch, every case.
 class SwitchCasesGenerator : public xsql::Generator<SwitchCaseInfo> {
   size_t func_idx_ = 0;
   std::vector<SwitchCaseInfo> current_;
@@ -441,7 +416,6 @@ GeneratorTableDef<SwitchCaseInfo> define_switch_cases() {
                     })
       .column_int64("case_index",
                     [](const SwitchCaseInfo &r) -> int64_t { return r.case_index; })
-      // NULL for the default row (is_default=1) — the default has no case value.
       .column("case_value", xsql::ColumnType::Integer,
               [](xsql::FunctionContext &ctx, const SwitchCaseInfo &r) {
                 if (r.is_default)
@@ -467,5 +441,5 @@ GeneratorTableDef<SwitchCaseInfo> define_switch_cases() {
       .build();
 }
 
-} // namespace code
-} // namespace idasql
+}
+}

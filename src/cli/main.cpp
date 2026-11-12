@@ -25,7 +25,6 @@
 #include <cstdint>
 #include <memory>
 
-// Windows UTF-8 console support
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -38,19 +37,21 @@
 #include "../common/http_format.hpp"
 #include "../common/idasql_commands.hpp"
 #include "../common/pin_commands.hpp"
+#include "../common/remote_commands.hpp"
 #include <idasql/autostart_pin.hpp>
 #include "../common/json_utils.hpp"
 #include "../common/sql_script.hpp"
 #include "../common/binary_query.hpp"
 
 #include "../common/idasql_version.hpp"
+#include "commands.hpp"
+#include "../lib/src/instances.hpp"
+#include "../lib/src/ui_actions.hpp"
 
-// MCP integration (optional, enabled via IDASQL_WITH_MCP)
 #ifdef IDASQL_HAS_MCP
 #include "../common/mcp_server.hpp"
 #endif
 
-// Global signal handler state
 namespace {
     std::atomic<bool> g_quit_requested{false};
 #ifdef IDASQL_HAS_MCP
@@ -64,11 +65,6 @@ extern "C" void signal_handler(int sig) {
     g_quit_requested.store(true);
 }
 
-// ============================================================================
-// Table Printing (shared between remote and local modes)
-// ============================================================================
-
-// Table-style output
 struct TablePrinter {
     std::vector<std::string> columns;
     std::vector<std::vector<std::string>> rows;
@@ -99,13 +95,11 @@ struct TablePrinter {
     void print() {
         if (columns.empty()) return;
 
-        // Header separator
         std::string sep = "+";
         for (size_t w : widths) {
             sep += std::string(w + 2, '-') + "+";
         }
 
-        // Header
         std::cout << sep << "\n| ";
         for (size_t i = 0; i < columns.size(); i++) {
             std::cout << std::left;
@@ -114,7 +108,6 @@ struct TablePrinter {
         }
         std::cout << "\n" << sep << "\n";
 
-        // Rows
         for (const auto& row : rows) {
             std::cout << "| ";
             for (size_t i = 0; i < row.size(); i++) {
@@ -129,15 +122,6 @@ struct TablePrinter {
     }
 };
 
-// ============================================================================
-// Local Mode - Uses IDA SDK (delay-loaded on Windows)
-// ============================================================================
-// From here on, code may call IDA functions. On Windows with /DELAYLOAD,
-// ida.dll and idalib.dll are loaded on first use.
-//
-// Platform-specific include order:
-// - Windows: json before IDA (IDA poisons stdlib functions)
-// - macOS/Linux: IDA before json
 #include <idasql/platform_undef.hpp>
 
 #ifdef _WIN32
@@ -149,11 +133,9 @@ struct TablePrinter {
 #endif
 #include <idasql/idapython.hpp>
 #include <idalib.hpp>
-#include <kernwin.hpp>  // batch
-#include <loader.hpp>  // save_database()
+#include <kernwin.hpp>
+#include <loader.hpp>
 
-// Cross-SDK feature flags (IDASQL_HAS_DEEP_LINKS) and the SDK-free deep-link module.
-// ida_compat.hpp's inline shims need these SDK headers first.
 #include <auto.hpp>
 #include <netnode.hpp>
 #include "../lib/src/ida_compat.hpp"
@@ -206,11 +188,6 @@ static void print_script_result_tables(const xsql::ScriptResult& script_result) 
     }
 }
 
-// ============================================================================
-// REPL - Interactive Mode (Local)
-// ============================================================================
-
-// Forward declaration (defined in HTTP section below)
 static std::string query_result_to_json(
     idasql::Database& db, const std::string& sql, const xsql::ScriptOptions& options);
 
@@ -227,14 +204,12 @@ static void run_repl(idasql::Database& db) {
             break;
         }
 
-        // Prompt
         std::cout << (query.empty() ? "idasql> " : "   ...> ");
         std::cout.flush();
 
         if (!std::getline(std::cin, line)) break;
         if (line.empty()) continue;
 
-        // Handle dot commands
         if (query.empty() && !line.empty() && line[0] == '.') {
             idasql::CommandCallbacks callbacks;
             callbacks.get_tables = [&db]() -> std::string {
@@ -257,7 +232,6 @@ static void run_repl(idasql::Database& db) {
             };
 
 #ifdef IDASQL_HAS_MCP
-            // MCP server callbacks
             callbacks.mcp_status = []() -> std::string {
                 if (g_mcp_server && g_mcp_server->is_running()) {
                     return idasql::format_mcp_status(
@@ -273,63 +247,52 @@ static void run_repl(idasql::Database& db) {
                         g_mcp_server->port(), true, g_mcp_server->bind_addr());
                 }
 
-                // Create MCP server if needed
                 if (!g_mcp_server) {
                     g_mcp_server = std::make_unique<idasql::IDAMCPServer>();
                 }
 
-                // With no explicit port, fall back to the pinned host/port
-                // (shared rule; see autostart::apply_pin_fallback).
                 std::string addr = bind_addr;
                 idasql::autostart::apply_pin_fallback(
                     idasql::autostart::load().mcp, req_port, addr);
 
-                // SQL executor - will be called on main thread via wait()
                 idasql::QueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
                     auto result = idasql::run_sql_script(db, sql);
                     return xsql::script_result_to_text(result);
                 };
 
-                // Start with use_queue=true for CLI mode (main thread execution)
                 g_mcp_server->set_deep_links_available(IDASQL_HAS_DEEP_LINKS != 0);
                 int port = g_mcp_server->start(req_port, sql_cb, addr, true);
                 if (port <= 0) {
                     return "Error: Failed to start MCP server\n";
                 }
+                idasql::instances::self().set_mcp(idasql::instances::mcp_url(g_mcp_server->bind_addr(), port), false);
 
-                // Print info
                 std::cout << idasql::format_mcp_info(port, g_mcp_server->bind_addr());
                 std::cout << "Press Ctrl+C to stop MCP server and return to REPL...\n\n";
                 std::cout.flush();
 
-                // Copy the paste-ready MCP client config to the clipboard NOW, at
-                // bind time -- run_until_stopped() below blocks until Ctrl+C.
                 (void)xsql::thinclient::try_copy_text_to_clipboard_windows(
                     xsql::thinclient::build_mcp_clipboard_payload(
                         "idasql", g_mcp_server->bind_addr(), port));
 
-                // Install signal handler so Ctrl+C sets g_quit_requested
                 g_quit_requested.store(false);
                 auto old_handler = std::signal(SIGINT, signal_handler);
 #ifdef _WIN32
                 auto old_break_handler = std::signal(SIGBREAK, signal_handler);
 #endif
 
-                // Set interrupt check to stop on Ctrl+C
                 g_mcp_server->set_interrupt_check([]() {
                     return g_quit_requested.load();
                 });
 
-                // Enter wait loop - processes MCP commands on main thread
-                // This blocks until Ctrl+C or .mcp stop via another client
                 g_mcp_server->run_until_stopped();
+                idasql::instances::self().set_mcp("", false);
 
-                // Restore previous signal handler
                 std::signal(SIGINT, old_handler);
 #ifdef _WIN32
                 std::signal(SIGBREAK, old_break_handler);
 #endif
-                g_quit_requested.store(false);  // Reset for continued REPL use
+                g_quit_requested.store(false);
 
                 return "MCP server stopped. Returning to REPL.\n";
             };
@@ -343,7 +306,6 @@ static void run_repl(idasql::Database& db) {
             };
 #endif
 
-            // HTTP server callbacks
             callbacks.http_status = []() -> std::string {
                 if (g_repl_http_server && g_repl_http_server->is_running()) {
                     return idasql::format_http_status(
@@ -359,67 +321,55 @@ static void run_repl(idasql::Database& db) {
                         g_repl_http_server->port(), true, g_repl_http_server->bind_addr());
                 }
 
-                // Create HTTP server if needed
                 if (!g_repl_http_server) {
                     g_repl_http_server = std::make_unique<idasql::IDAHTTPServer>();
                 }
 
-                // With no explicit port, fall back to the pinned host/port/token
-                // (shared rule; see autostart::apply_pin_fallback).
                 std::string addr = bind_addr;
                 std::string auth_token = token;
                 idasql::autostart::apply_pin_fallback(
                     idasql::autostart::load().http, req_port, addr, &auth_token);
 
-                // SQL executor - called on main thread via run_until_stopped()
                 idasql::HTTPQueryCallback sql_cb =
                     [&db](const std::string& sql, const xsql::ScriptOptions& options) {
                         return idasql::run_sql_script(
                             db, sql, idasql::with_default_timeout(options));
                     };
 
-                // Start with use_queue=true (CLI mode)
                 int port = g_repl_http_server->start(req_port, sql_cb, addr, true, auth_token);
                 if (port <= 0) {
                     return "Error: Failed to start HTTP server\n";
                 }
+                idasql::instances::self().set_http(
+                    idasql::instances::http_url(g_repl_http_server->bind_addr(), port), !auth_token.empty());
 
-                // Print info
                 std::cout << idasql::format_http_info(
                     port, g_repl_http_server->bind_addr(), "Press Ctrl+C to stop and return to REPL.");
                 std::cout.flush();
 
-                // Copy the paste-ready agent instructions (with the effective
-                // token) to the clipboard NOW, at bind time -- the
-                // run_until_stopped() wait loop below blocks until Ctrl+C, so this
-                // is the only correct moment to copy.
                 (void)xsql::thinclient::try_copy_text_to_clipboard_windows(
                     xsql::thinclient::build_http_clipboard_payload(
                         "idasql", g_repl_http_server->bind_addr(), port,
                         idasql::default_binary_query(), auth_token));
 
-                // Install signal handler so Ctrl+C sets g_quit_requested
                 g_quit_requested.store(false);
                 auto old_handler = std::signal(SIGINT, signal_handler);
 #ifdef _WIN32
                 auto old_break_handler = std::signal(SIGBREAK, signal_handler);
 #endif
 
-                // Set interrupt check to stop on Ctrl+C
                 g_repl_http_server->set_interrupt_check([]() {
                     return g_quit_requested.load();
                 });
 
-                // Enter wait loop - processes HTTP commands on main thread
-                // This blocks until Ctrl+C or /shutdown
                 g_repl_http_server->run_until_stopped();
+                idasql::instances::self().set_http("", false);
 
-                // Restore previous signal handler
                 std::signal(SIGINT, old_handler);
 #ifdef _WIN32
                 std::signal(SIGBREAK, old_break_handler);
 #endif
-                g_quit_requested.store(false);  // Reset for continued REPL use
+                g_quit_requested.store(false);
 
                 return "HTTP server stopped. Returning to REPL.\n";
             };
@@ -432,17 +382,15 @@ static void run_repl(idasql::Database& db) {
                 return "HTTP server not running\n";
             };
 
-            // Pin commands work in the CLI too (writes persist only with
-            // -w/--write, like any other IDB edit); autostart-on-load is
-            // plugin-only.
             idasql::wire_pin_callbacks(callbacks);
+            idasql::wire_remote_callbacks(callbacks, false);
 
             std::string output;
             auto result = idasql::handle_command(line, callbacks, output);
 
             switch (result) {
                 case idasql::CommandResult::QUIT:
-                    goto exit_repl;  // Exit the while loop
+                    goto exit_repl;
                 case idasql::CommandResult::HANDLED:
                     if (!output.empty()) {
                         std::cout << output;
@@ -450,21 +398,15 @@ static void run_repl(idasql::Database& db) {
                     }
                     continue;
                 case idasql::CommandResult::NOT_HANDLED:
-                    // Fall through to standard handling
                     break;
             }
         }
 
-        // Standard SQL mode: accumulate query
         query += line + " ";
 
-        // Execute if complete (ends with ;)
         size_t last = line.length() - 1;
         while (last > 0 && (line[last] == ' ' || line[last] == '\t')) last--;
         if (line[last] == ';') {
-            // Route through the canonical script path (same as -q) so a multi-
-            // statement line like "SELECT 1; SELECT 2;" runs every statement and
-            // surfaces per-statement errors — db.query() compiled only the first.
             auto script_result = idasql::run_sql_script(db, query);
             print_script_result_tables(script_result);
             query.clear();
@@ -475,11 +417,6 @@ exit_repl:
     return;
 }
 
-// ============================================================================
-// Export to SQL
-// ============================================================================
-
-// Parse table list from string (comma or semicolon separated)
 static std::vector<std::string> parse_table_list(const std::string& spec) {
     std::vector<std::string> tables;
     std::string current;
@@ -499,7 +436,6 @@ static std::vector<std::string> parse_table_list(const std::string& spec) {
     return tables;
 }
 
-// Export tables to SQL file
 static bool export_to_sql(idasql::Database& db, const char* path,
                           const std::string& table_spec) {
     std::vector<std::string> tables;
@@ -517,10 +453,6 @@ static bool export_to_sql(idasql::Database& db, const char* path,
     return true;
 }
 
-// ============================================================================
-// File Execution
-// ============================================================================
-
 static bool execute_file(idasql::Database& db, const char* path) {
     std::ifstream file(path);
     if (!file.is_open()) {
@@ -531,19 +463,14 @@ static bool execute_file(idasql::Database& db, const char* path) {
     std::stringstream buffer;
     buffer << file.rdbuf();
 
-    // The same canonical script path as -q: each statement's results print
-    // before the error that stops the script, so a failure keeps its context.
     auto script_result = idasql::run_sql_script(db, buffer.str());
     print_script_result_tables(script_result);
     return script_result.success;
 }
 
-// ============================================================================
-// HTTP Server Mode
-// ============================================================================
-
 static xsql::thinclient::server* g_http_server = nullptr;
 static std::atomic<bool> g_http_stop_requested{false};
+static std::atomic<int> g_close_request{0};
 static std::atomic<std::uint64_t> g_http_cancel_epoch{0};
 
 static void http_signal_handler(int) {
@@ -552,12 +479,9 @@ static void http_signal_handler(int) {
     if (g_http_server) g_http_server->stop();
 }
 
-// Command queue for main-thread execution (needed for Hex-Rays decompiler)
 struct HttpPendingCommand {
     std::string sql;
     xsql::ScriptOptions options;
-    // The epoch the request's should_cancel compares against; re-armed when the
-    // main loop starts the command (http_start_command).
     std::shared_ptr<std::atomic<std::uint64_t>> cancel_cell;
     std::string result;
     bool started = false;
@@ -572,19 +496,12 @@ static std::condition_variable g_http_queue_cv;
 static std::deque<std::shared_ptr<HttpPendingCommand>> g_http_pending_commands;
 static std::atomic<bool> g_http_running{false};
 
-// Queue a command and wait for main thread to execute it
-// A request's should_cancel compares the live /cancel epoch against its own cell.
-// The cell is armed again when the main loop starts the command, so a /cancel
-// aimed at the running query does not reach the ones still waiting (libxsql's
-// own queue does the same).
 static std::shared_ptr<std::atomic<std::uint64_t>> http_arm_cancel(xsql::ScriptOptions& options) {
     auto cell = std::make_shared<std::atomic<std::uint64_t>>(g_http_cancel_epoch.load());
     options.should_cancel = [cell]() { return g_http_cancel_epoch.load() != cell->load(); };
     return cell;
 }
 
-// Marks a popped command started (re-arming its cancellation) unless it was
-// already completed or abandoned by its requester; returns whether to run it.
 static bool http_start_command(HttpPendingCommand& cmd) {
     std::lock_guard<std::mutex> lock(cmd.done_mutex);
     if (cmd.completed) return false;
@@ -597,8 +514,6 @@ static bool http_start_command(HttpPendingCommand& cmd) {
     return true;
 }
 
-// `X-XSQL-Timeout: <ms>`, parsed the way libxsql's own /query route does: a
-// non-negative integer sets the request's deadline; anything else is ignored.
 static void http_apply_request_timeout(const httplib::Request& req, xsql::ScriptOptions& options) {
     if (!req.has_header("X-XSQL-Timeout")) return;
     try {
@@ -623,10 +538,6 @@ static std::string http_queue_and_wait(
 
     {
         std::lock_guard<std::mutex> lock(g_http_queue_mutex);
-        // Re-check running under the queue lock: a shutdown may have flipped
-        // g_http_running (and drained the queue) between the early check above and
-        // here. Pushing after that would enqueue a command the main loop never
-        // pops, and the unbounded wait below would then hang stop()'s join.
         if (!g_http_running.load()) {
             return xsql::json{{"success", false}, {"error", "Server not running"}}.dump();
         }
@@ -643,13 +554,9 @@ static std::string http_queue_and_wait(
     }
     g_http_queue_cv.notify_one();
 
-    // Wait for completion (or queue admission timeout).
     const int timeout_ms = idasql::runtime_settings().queue_admission_timeout_ms();
     std::unique_lock<std::mutex> lock(cmd->done_mutex);
     if (timeout_ms <= 0) {
-        // Also wake on shutdown: without `|| !g_http_running` a command that is
-        // never completed at shutdown (worker already stopped) would spin here
-        // forever, and stop()'s join would hang behind it.
         while (!cmd->completed && g_http_running.load()) {
             cmd->done_cv.wait_for(lock, std::chrono::milliseconds(100));
         }
@@ -667,7 +574,6 @@ static std::string http_queue_and_wait(
                 continue;
             }
 
-            // Timed out before command admission: mark canceled and remove from pending queue.
             if (!cmd->completed && !cmd->started) {
                 cmd->canceled = true;
             }
@@ -690,8 +596,6 @@ static std::string http_queue_and_wait(
         }
     }
 
-    // The wait may have been woken by shutdown before the command ran; surface a
-    // clean error rather than an empty body.
     if (!cmd->completed) {
         return xsql::json{{"success", false}, {"error", "Server stopped"}}.dump();
     }
@@ -748,7 +652,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     cfg.port = port;
     cfg.bind_address = bind_addr.empty() ? "127.0.0.1" : bind_addr;
     if (!auth_token.empty()) cfg.auth_token = auth_token;
-    // Allow non-loopback binds if explicitly requested (with warning)
     if (!bind_addr.empty() && bind_addr != "127.0.0.1" && bind_addr != "localhost") {
         cfg.allow_insecure_no_auth = auth_token.empty();
         std::cerr << "WARNING: Binding to non-loopback address " << bind_addr << "\n";
@@ -776,8 +679,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
             res.set_content(build_cli_http_help_text(), "text/plain");
         });
 
-        // POST /query - Queue command for main thread execution
-        // This is necessary because IDA's Hex-Rays decompiler has thread affinity
         svr.Post("/query", [&auth_token](const httplib::Request& req, httplib::Response& res) {
             if (!auth_token.empty()) {
                 std::string token;
@@ -797,10 +698,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                 res.set_content(xsql::json{{"success", false}, {"error", "Empty query"}}.dump(), "application/json");
                 return;
             }
-            // ?format=text|csv|tsv re-renders the queued JSON envelope for
-            // terminals / unix pipes (idasql::render_query_response). Agents
-            // consume default JSON. An unrecognized value is a 400 (do not
-            // silently emit JSON) — mirrors libxsql's strict-format handling.
             auto fmt_it = req.params.find("format");
             const std::string format = (fmt_it != req.params.end()) ? fmt_it->second : "json";
             if (!idasql::is_valid_query_format(format)) {
@@ -823,8 +720,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
             http_apply_request_timeout(req, options);
             auto cancel_cell = http_arm_cancel(options);
 
-            // Queue command for main-thread execution with the request options
-            // intact, including the cooperative-cancellation predicate.
             std::string result = http_queue_and_wait(req.body, options, cancel_cell);
             auto [body, content_type] = idasql::render_query_response(result, format);
             res.set_content(body, content_type);
@@ -855,7 +750,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                 "application/json");
         });
 
-        // GET /status - Also needs main thread for db.query()
         svr.Get("/status", [&auth_token](const httplib::Request& req, httplib::Response& res) {
             if (!auth_token.empty()) {
                 std::string token;
@@ -870,11 +764,7 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                     return;
                 }
             }
-            // Queue for main thread
             std::string result = http_queue_and_wait("SELECT COUNT(*) FROM funcs");
-            // Parse the canonical script envelope: results[0].rows[0][0]. (The
-            // old top-level "rows" shape was retired when /query moved to the
-            // canonical envelope, so the count was silently falling back to "?".)
             try {
                 auto j = xsql::json::parse(result);
                 if (j.value("success", false) && j.contains("results")
@@ -906,15 +796,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
                 }
             }
             res.set_content(xsql::json{{"success", true}, {"message", "Shutting down"}}.dump(), "application/json");
-            // Signal the main loop to exit; it will call http_server.stop() (which
-            // stops httplib's listen() and joins the server thread) on the way out.
-            // We deliberately do NOT stop from a detached thread here: `svr` is
-            // owned by the stack-local `http_server`, so a detached thread calling
-            // svr.stop() after run_http_mode returns and destroys http_server is a
-            // use-after-free. The httplib response for THIS request is flushed by
-            // the worker independently of the loop's stop(), so shutdown stays
-            // graceful. (The queue/REPL path solves the same race with an explicit
-            // latch in xsql::thinclient::http_query_server.)
             g_http_cancel_epoch.fetch_add(1);
             g_http_stop_requested.store(true);
             g_http_queue_cv.notify_all();
@@ -934,14 +815,8 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     auto old_term_handler = std::signal(SIGTERM, http_signal_handler);
 #endif
 
-    // Start HTTP server on a background thread (resolves random port)
     http_server.run_async();
 
-    // Detect a failed bind before entering the command loop. run_async() returns
-    // once the worker either starts listening or exits (bind failure), and
-    // is_running() reflects that; without this check port() falls back to the
-    // requested port and the banner would print success while the queue loop spun
-    // against a dead server.
     if (!http_server.is_running()) {
         std::cerr << "Error: Failed to start HTTP server on "
                   << cfg.bind_address << ":" << port
@@ -958,6 +833,8 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     }
 
     int actual_port = http_server.port();
+    idasql::instances::self().set_http(idasql::instances::http_url(cfg.bind_address, actual_port),
+                                       !auth_token.empty());
 
     std::cout << "IDASQL HTTP server: http://"
               << xsql::thinclient::format_url_host(cfg.bind_address) << ":" << actual_port << "\n";
@@ -965,7 +842,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     std::cout << "Press Ctrl+C to stop.\n\n";
     std::cout.flush();
 
-    // Main thread processes the command queue (required for Hex-Rays thread affinity)
     while (g_http_running.load() && !g_http_stop_requested.load()) {
         std::shared_ptr<HttpPendingCommand> cmd;
 
@@ -985,7 +861,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
             const bool should_execute = http_start_command(*cmd);
 
             if (should_execute) {
-                // Execute query on main thread - safe for Hex-Rays decompiler
                 std::string result = query_result_to_json(db, cmd->sql, cmd->options);
                 {
                     std::lock_guard<std::mutex> lock(cmd->done_mutex);
@@ -998,11 +873,9 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
         }
     }
 
-    // Cleanup
     g_http_running.store(false);
     g_http_queue_cv.notify_all();
 
-    // Complete any pending commands with error
     std::deque<std::shared_ptr<HttpPendingCommand>> pending;
     {
         std::lock_guard<std::mutex> lock(g_http_queue_mutex);
@@ -1022,7 +895,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
         cmd->done_cv.notify_one();
     }
 
-    // Stop HTTP server (run_async thread joined internally)
     http_server.stop();
 
     std::signal(SIGINT, old_handler);
@@ -1036,10 +908,6 @@ static int run_http_mode(idasql::Database& db, int port, const std::string& bind
     return 0;
 }
 
-// ============================================================================
-// Main
-// ============================================================================
-
 static std::string make_upgrade_json(const idasql::Database& db, const std::string& input) {
     const std::string message = "Database upgraded from 32-bit .idb to 64-bit "
                                 ".i64; reopen with -s <reopen_with>.";
@@ -1052,24 +920,11 @@ static std::string make_upgrade_json(const idasql::Database& db, const std::stri
     }.dump();
 }
 
-// Keep the IDA runtime's own console output off this program's stdout.
-//
-// ida.dll and idalib.dll write through the shared Universal CRT (ucrtbase.dll);
-// this executable links the static CRT, so the two have separate stdio. IDA 9.0
-// and 9.1 print "Loading IDA library from: ..." (9.0 also "Database initialized,
-// ...") on the UCRT stdout; piped, it is flushed at exit and trails our output,
-// which breaks every caller that parses stdout (e.g. the upgrade JSON). The UCRT
-// captured the stdout handle when ida.dll loaded, before main, so redirecting the
-// process handle here is too late; point the UCRT's fd 1 at its stderr instead.
-// Its _dup2 closes the handle fd 1 held -- the same handle our CRT writes to -- so
-// protect that handle across the call, then put it back as the process stdout
-// (_dup2 on fd 0-2 also calls SetStdHandle). Measured on IDA 9.0/9.1/9.2/9.4: the
-// IDA lines move to stderr, our stdout is untouched; 9.2+ print nothing there.
 static void route_ida_runtime_stdout_to_stderr() {
 #ifdef _WIN32
     HMODULE ucrt = GetModuleHandleW(L"ucrtbase.dll");
     if (ucrt == nullptr) {
-        return;  // the IDA runtime does not use the shared UCRT: nothing to move
+        return;
     }
     using dup2_fn = int(__cdecl*)(int, int);
     auto ucrt_dup2 = reinterpret_cast<dup2_fn>(GetProcAddress(ucrt, "_dup2"));
@@ -1085,6 +940,13 @@ static void route_ida_runtime_stdout_to_stderr() {
     SetHandleInformation(out, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0);
     SetStdHandle(STD_OUTPUT_HANDLE, out);
 #endif
+}
+
+static idasql::cli::BuildInfo cli_build_info() {
+    idasql::cli::BuildInfo b;
+    b.ida_sdk_version = IDA_SDK_VERSION;
+    b.deep_links = IDASQL_HAS_DEEP_LINKS != 0;
+    return b;
 }
 
 static void print_usage() {
@@ -1120,15 +982,9 @@ static void print_usage() {
 #endif
               << "  -h, --help           Show this help\n"
               << "  --version            Show version\n"
-#if IDASQL_HAS_DEEP_LINKS
-              << "\n"
-              << "  idasql link <verb>   ida:// deep links (no database "
-                 "needed):\n"
-              << "                       open <uri> | list | status | register | "
-                 "unregister | source | config\n"
-              << "                       `idasql link --help` for details\n"
-#endif
-              << "\n"
+              << "\n";
+    idasql::cli::print_command_list(idasql::cli::build_command_table(cli_build_info()), std::cerr);
+    std::cerr << "\n"
               << "Examples:\n"
               << "  idasql -s test.i64 -q \"SELECT name, size FROM funcs LIMIT 10\"\n"
               << "  idasql -s test.i64 -f queries.sql\n"
@@ -1147,20 +1003,16 @@ static void print_usage() {
 
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
-    // Enable UTF-8 output on Windows console for proper Unicode display
     SetConsoleOutputCP(CP_UTF8);
 #endif
 
-#if IDASQL_HAS_DEEP_LINKS
-    // `idasql link ...` handles ida:// links (and is what a registered
-    // URL handler runs). It never touches idalib, needs no database, and must work
-    // with no IDADIR set, so it is dispatched before anything else.
-    if (argc >= 2 && strcmp(argv[1], "link") == 0) {
-        return idasql::deep_link::run_cli(std::vector<std::string>(argv + 2, argv + argc));
+    {
+        const auto table = idasql::cli::build_command_table(cli_build_info());
+        int rc = 0;
+        if (idasql::cli::dispatch(table, std::vector<std::string>(argv + 1, argv + argc), rc, std::cout, std::cerr))
+            return rc;
     }
-#endif
 
-    // Check for help/version first - before any IDA initialization
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             print_usage();
@@ -1176,17 +1028,16 @@ int main(int argc, char* argv[]) {
     std::string query;
     std::string sql_file;
     std::string export_file;
-    std::string export_tables = "*";  // Default: all tables
-    std::string auth_token;           // --token for --http mode (MCP has no auth)
-    std::string bind_addr;            // --bind for HTTP/MCP mode
+    std::string export_tables = "*";
+    std::string auth_token;
+    std::string bind_addr;
     bool interactive = false;
-    bool write_mode = false;          // -w/--write to save on exit
+    bool write_mode = false;
     bool http_mode = false;
     int http_port = 8080;
     bool mcp_mode = false;
-    int mcp_port = 0;                 // 0 = random port
+    int mcp_port = 0;
 
-    // Parse arguments
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-s") == 0) && i + 1 < argc) {
             db_path = argv[++i];
@@ -1232,7 +1083,6 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) {
             bind_addr = argv[++i];
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            // Already handled above, but skip here to avoid "unknown option"
             continue;
         } else {
             std::cerr << "Unknown option: " << argv[i] << "\n";
@@ -1241,7 +1091,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Validate arguments
     if (db_path.empty()) {
         std::cerr << "Error: Database path required (-s)\n\n";
         print_usage();
@@ -1259,9 +1108,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    //=========================================================================
-    // Local mode - requires IDA SDK
-    //=========================================================================
     route_ida_runtime_stdout_to_stderr();
     int init_rc = init_library();
     if (init_rc != 0) {
@@ -1269,13 +1115,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // This binary is headless: there is nobody to answer a kernel dialog, so a
-    // prompt is an unbounded hang (and, on Windows, a modal parked on the
-    // desktop). IDA's batch flag makes the kernel take the default answer
-    // instead of asking — the plugin already does this around query execution
-    // (batch_guard_t) for the same reason; the CLI needs it for the WHOLE run,
-    // including database open. The legacy 32-bit .idb -> .i64 upgrade path is
-    // the one that actually prompts.
     batch = 1;
 
     qsetenv("IDASQL_ALLOW_LEGACY_IDB_UPGRADE_IN_PROCESS", "1");
@@ -1306,7 +1145,12 @@ int main(int argc, char* argv[]) {
     }
 
     auto save_if_requested = [&]() {
-        if (!write_mode)
+        const int close = g_close_request.load();
+        if (close == 2) {
+            std::cerr << "Closed without saving.\n";
+            return;
+        }
+        if (!write_mode && close != 1)
             return;
         if (save_database()) {
             std::cerr << "Database saved.\n";
@@ -1315,24 +1159,27 @@ int main(int argc, char* argv[]) {
         }
     };
 
-    // HTTP server mode
     if (http_mode) {
+        idasql::ui_actions::set_quit_handler([](bool save, std::string&) {
+            g_close_request.store(save ? 1 : 2);
+            g_http_stop_requested.store(true);
+            g_http_queue_cv.notify_all();
+            return true;
+        });
         int http_result = run_http_mode(db, http_port, bind_addr, auth_token);
+        idasql::ui_actions::set_quit_handler(nullptr);
         save_if_requested();
         db.close();
         return http_result;
     }
 
-    // MCP server mode (standalone, not interactive REPL)
 #ifdef IDASQL_HAS_MCP
     if (mcp_mode) {
-        // SQL executor - will be called on main thread via wait()
         idasql::QueryCallback sql_cb = [&db](const std::string& sql) -> std::string {
             auto result = idasql::run_sql_script(db, sql);
             return xsql::script_result_to_text(result);
         };
 
-        // Create and start MCP server with use_queue=true
         idasql::IDAMCPServer mcp_server;
         mcp_server.set_deep_links_available(IDASQL_HAS_DEEP_LINKS != 0);
         int port = mcp_server.start(mcp_port, sql_cb,
@@ -1343,24 +1190,28 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        idasql::instances::self().set_mcp(idasql::instances::mcp_url(mcp_server.bind_addr(), port), false);
         std::cout << idasql::format_mcp_info(port, mcp_server.bind_addr());
         std::cout << "Press Ctrl+C to stop...\n\n";
         std::cout.flush();
 
-        // Set up signal handler
         g_quit_requested.store(false);
         std::signal(SIGINT, signal_handler);
 #ifdef _WIN32
         std::signal(SIGBREAK, signal_handler);
 #endif
 
-        // Set interrupt check
         mcp_server.set_interrupt_check([]() {
             return g_quit_requested.load();
         });
+        idasql::ui_actions::set_quit_handler([](bool save, std::string&) {
+            g_close_request.store(save ? 1 : 2);
+            g_quit_requested.store(true);
+            return true;
+        });
 
-        // Enter wait loop - processes MCP commands on main thread
         mcp_server.run_until_stopped();
+        idasql::ui_actions::set_quit_handler(nullptr);
 
         std::signal(SIGINT, SIG_DFL);
         std::cout << "\nMCP server stopped.\n";
@@ -1378,35 +1229,26 @@ int main(int argc, char* argv[]) {
 
     int result = 0;
 
-    // Execute based on mode
     if (!export_file.empty()) {
-        // Export mode
         if (!export_to_sql(db, export_file.c_str(), export_tables)) {
             result = 1;
         }
     } else if (!query.empty()) {
-        // Query mode: single-statement and multi-statement go through the same
-        // canonical envelope; output is table form.
         auto query_result = idasql::run_sql_script(db, query);
         print_script_result_tables(query_result);
         if (!query_result.success) {
             result = 1;
         }
     } else if (!sql_file.empty()) {
-        // File execution mode
         if (!execute_file(db, sql_file.c_str())) {
             result = 1;
         }
     } else if (interactive) {
-        // Interactive REPL
         run_repl(db);
     }
 
-    // Save database if -w/--write was specified.
     save_if_requested();
 
-    // Every result is printed by now: flush it before closing, so a crash
-    // inside the engine's close cannot take buffered output with it.
     std::cout.flush();
     std::cerr.flush();
     db.close();

@@ -24,12 +24,6 @@ bool cfg_scan_interrupted() {
   return true;
 }
 
-// The label of edge j out of two-way block i, from addresses, never successor
-// order: the successor that starts where the block ends is the fall-through
-// ("false"), the other the branch target ("true") -- the convention bnsql
-// (TrueBranch/FalseBranch) and ghidrasql (CONDITIONAL_JUMP/FALL_THROUGH) follow.
-// Block-end rather than "the instruction after the jump" also holds for
-// delay-slot ISAs. A two-target switch is not a condition.
 const char *two_way_edge_type(const idasql_flow_chart &fc, int i, int j) {
   const auto &b = fc.blocks[i];
   const ea_t last = prev_head(b.end_ea, b.start_ea);
@@ -38,16 +32,15 @@ const char *two_way_edge_type(const idasql_flow_chart &fc, int i, int j) {
     return "normal";
   const int s0 = fc.succ(i, 0);
   const int s1 = fc.succ(i, 1);
-  if (s0 == s1)  // a conditional jump to the next instruction
+  if (s0 == s1)
     return j == 0 ? "false" : "true";
   const bool f0 = fc.blocks[s0].start_ea == b.end_ea;
   const bool f1 = fc.blocks[s1].start_ea == b.end_ea;
-  if (f0 == f1)  // neither or both fall through: no polarity to report
+  if (f0 == f1)
     return "normal";
   return ((j == 0) ? f0 : f1) ? "false" : "true";
 }
 
-// The edges of one function, in block order. False when the query was interrupted.
 bool collect_cfg_edges(ea_t func_ea, std::vector<CfgEdgeInfo> &out) {
   out.clear();
   if (cfg_scan_interrupted())
@@ -70,7 +63,6 @@ bool collect_cfg_edges(ea_t func_ea, std::vector<CfgEdgeInfo> &out) {
       edge.func_ea = func_ea;
       edge.from_addr = fc.blocks[i].start_ea;
       edge.to_addr = fc.blocks[succ_idx].start_ea;
-      // One successor is plain flow; three or more is a switch.
       edge.edge_type = nsucc == 2 ? two_way_edge_type(fc, i, j) : "normal";
       out.push_back(std::move(edge));
     }
@@ -82,7 +74,7 @@ bool collect_cfg_edges(ea_t func_ea, std::vector<CfgEdgeInfo> &out) {
   return true;
 }
 
-}  // namespace
+}
 
 class CfgEdgesInFuncIterator : public xsql::RowIterator {
   std::vector<CfgEdgeInfo> edges_;
@@ -173,12 +165,10 @@ class CfgEdgesGenerator : public xsql::Generator<CfgEdgeInfo> {
 
 public:
   bool next() override {
-    // Try next edge in current function
     if (!current_edges_.empty() && edge_idx_ + 1 < current_edges_.size()) {
       ++edge_idx_;
       return true;
     }
-    // Load next function
     if (load_next_func()) {
       return true;
     }
@@ -224,10 +214,6 @@ GeneratorTableDef<CfgEdgeInfo> define_cfg_edges() {
       .build();
 }
 
-// ============================================================================
-// Views
-// ============================================================================
-
 bool register_disasm_views(xsql::Database &db) {
   const char *v_leaf_funcs = R"(
         CREATE VIEW IF NOT EXISTS disasm_v_leaf_funcs AS
@@ -239,10 +225,6 @@ bool register_disasm_views(xsql::Database &db) {
     )";
   db.exec(v_leaf_funcs);
 
-  // disasm_v_call_chains: thin wrapper over call_graph table.
-  // For targeted traversal, use call_graph directly:
-  //   SELECT * FROM call_graph WHERE start=X AND direction='down' AND
-  //   max_depth=10
   const char *v_call_chains = R"(
         CREATE VIEW IF NOT EXISTS disasm_v_call_chains AS
         WITH RECURSIVE call_chain(root_func, current_func, depth) AS (
@@ -300,9 +282,5 @@ bool register_disasm_views(xsql::Database &db) {
   return true;
 }
 
-// ============================================================================
-// Registry
-// ============================================================================
-
-} // namespace code
-} // namespace idasql
+}
+}

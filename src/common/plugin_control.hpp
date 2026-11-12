@@ -4,15 +4,10 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * plugin_control.hpp - Plugin control codes used by IDASQL
- */
-
 #pragma once
-// IDASQL Plugin Control Codes
 
 namespace idasql {
 
-constexpr size_t PLUGIN_ARG_TOGGLE_CLI = 23;  // Toggle CLI
+constexpr size_t PLUGIN_ARG_TOGGLE_CLI = 23;
 
-} // namespace idasql
+}

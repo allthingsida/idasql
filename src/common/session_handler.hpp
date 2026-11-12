@@ -6,18 +6,6 @@
 
 #pragma once
 
-/**
- * session_handler.hpp - Interactive session orchestration core
- *
- * SessionHandler - Core query processing logic for IDASQL
- *
- * This class handles:
- * - SQL query execution
- * - Meta commands (.tables, .schema, .help)
- *
- * NO IDA DEPENDENCIES - can be tested standalone.
- */
-
 #include <algorithm>
 #include <cctype>
 #include <functional>
@@ -31,7 +19,6 @@ class SessionHandler {
 public:
     using SqlExecutor = std::function<std::string(const std::string&)>;
 
-    // Simple allowlist for table identifiers (alnum + underscore)
     static bool is_safe_table_name(const std::string& name) {
         if (name.empty() || name.size() > 128) {
             return false;
@@ -62,10 +49,6 @@ public:
         end_session();
     }
 
-    // Non-copyable AND non-movable: callbacks_ holds lambdas that capture `this`,
-    // so a move would leave them pointing at the moved-from object (dangling this).
-    // It is never moved today; deleting the move members makes that a compile error
-    // instead of a latent footgun.
     SessionHandler(const SessionHandler&) = delete;
     SessionHandler& operator=(const SessionHandler&) = delete;
     SessionHandler(SessionHandler&&) = delete;
@@ -99,7 +82,6 @@ public:
     }
 
     void end_session() {
-        // No stateful session resources to clean up in slim mode.
     }
 
     bool is_quit_requested() const { return quit_requested_; }
@@ -113,4 +95,4 @@ private:
     bool quit_requested_ = false;
 };
 
-} // namespace idasql
+}

@@ -4,12 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_search.hpp - Grep-style entity search table
- *
- * Tables: grep
- */
-
 #pragma once
 
 #include <idasql/platform.hpp>
@@ -70,7 +64,7 @@ class EntityGenerator {
     EntitySource current_source_ = EntitySource::Functions;
     size_t current_index_ = 0;
     EntityRow current_row_;
-    uint32 type_ordinal_ = 1;  // valid local-type ordinals are 1..get_ordinal_limit()-1
+    uint32 type_ordinal_ = 1;
     size_t member_index_ = 0;
     tinfo_t current_type_;
 
@@ -110,5 +104,5 @@ public:
 VTableDef define_grep();
 bool register_grep_entities(xsql::Database& db);
 
-} // namespace search
-} // namespace idasql
+}
+}

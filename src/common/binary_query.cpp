@@ -17,4 +17,4 @@ std::string format_query_curl_example(const std::string& base_url) {
            std::string(default_binary_query()) + "\"";
 }
 
-} // namespace idasql
+}

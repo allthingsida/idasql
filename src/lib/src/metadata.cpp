@@ -11,10 +11,10 @@
 
 #include "metadata.hpp"
 
-#include <idasql/runtime_settings.hpp>  // idasql::runtime_settings() singleton
+#include <idasql/runtime_settings.hpp>
 
 #include "ida_headers.hpp"
-#include "true_believers.h"  // true_believers table; decoder vendored in-tree
+#include "true_believers.h"
 
 namespace idasql {
 namespace metadata {
@@ -118,8 +118,6 @@ static CachedTableDef<MetadataItem> define_ida_info() {
         .build();
 }
 
-// The "true_believers" table — early adopters, decoded at query time from a
-// packed blob.
 static CachedTableDef<TrueBelieverRow> define_true_believers() {
     return cached_table<TrueBelieverRow>("true_believers")
         .no_shared_cache()
@@ -138,9 +136,6 @@ static CachedTableDef<TrueBelieverRow> define_true_believers() {
         .build();
 }
 
-// auto_checkpoint takes exactly 'off' or 'statement', and 'statement' needs the
-// undo labels IDA 9.0 SP1 brought (9.0 GA cannot report them): accepting it
-// there would turn on a safety net that never creates a checkpoint.
 static bool auto_checkpoint_value_ok(const std::string& value) {
     if (!idasql::is_auto_checkpoint_value(value)) {
         xsql::set_vtab_error(idasql::kAutoCheckpointValueError);
@@ -161,7 +156,6 @@ static CachedTableDef<xsql::runtime::RuntimeSettingEntry>
 define_runtime_settings() {
     auto def = xsql::runtime::define_runtime_settings_table(
         idasql::runtime_settings(), "idasql");
-    // The shared table checks a string setting only for being non-empty.
     for (auto& column : def.columns) {
         if (column.name != "value" || !column.set)
             continue;
@@ -177,7 +171,7 @@ define_runtime_settings() {
     return def;
 }
 
-} // namespace
+}
 
 MetadataRegistry::MetadataRegistry()
     : db_info(define_db_info())
@@ -211,5 +205,5 @@ void MetadataRegistry::register_all(xsql::Database& db) {
     db.create_table("ida_config", "ida_config");
 }
 
-} // namespace metadata
-} // namespace idasql
+}
+}

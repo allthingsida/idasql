@@ -45,7 +45,7 @@ void UiMessageCapture::release_runtime() {
     maybe_unhook_locked();
 }
 
-bool UiMessageCapture::begin_capture(std::string* error, size_t max_bytes) {
+bool UiMessageCapture::begin_capture(std::string* error, size_t max_bytes, bool pass_through) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ensure_hook_locked(error)) {
         return false;
@@ -61,6 +61,7 @@ bool UiMessageCapture::begin_capture(std::string* error, size_t max_bytes) {
     cap_bytes_ = max_bytes;
     written_ = 0;
     truncated_ = false;
+    pass_through_ = pass_through;
     capturing_ = true;
     return true;
 }
@@ -92,10 +93,6 @@ ssize_t idaapi UiMessageCapture::on_event(ssize_t code, va_list va) {
         return 0;
     }
 
-    // va_list is an array type on x86-64 System V ABI (__va_list_tag[1]),
-    // so it decays to a pointer when passed through variadic args.
-    // On MSVC and ARM64 Apple (where va_list is char*), it is a scalar
-    // type passed by value — no decay, no extra indirection.
     va_list copy;
 #if defined(__x86_64__) && !defined(_MSC_VER)
     va_list* format_args = va_arg(va, va_list*);
@@ -113,15 +110,12 @@ ssize_t idaapi UiMessageCapture::on_event(ssize_t code, va_list va) {
         return 0;
     }
 
-    // Unbounded when cap_bytes_ == 0. Otherwise append up to the cap, then emit a
-    // single truncation marker and drop the rest so a runaway snippet cannot
-    // exhaust memory or the response channel.
     if (cap_bytes_ == 0) {
         buffer_ << formatted.c_str();
-        return 1;
+        return pass_through_ ? 0 : 1;
     }
     if (truncated_) {
-        return 1;  // already capped; swallow further output
+        return pass_through_ ? 0 : 1;
     }
     const size_t len = formatted.length();
     if (written_ + len <= cap_bytes_) {
@@ -136,7 +130,7 @@ ssize_t idaapi UiMessageCapture::on_event(ssize_t code, va_list va) {
         buffer_ << "\n...[idapython output truncated at " << cap_bytes_ << " bytes]...\n";
         truncated_ = true;
     }
-    return 1;
+    return pass_through_ ? 0 : 1;
 }
 
 bool UiMessageCapture::ensure_hook_locked(std::string* error) {
@@ -168,12 +162,8 @@ void runtime_release() {
     UiMessageCapture::instance().release_runtime();
 }
 
-// In the body, not the member-init list: begin_capture() writes into error_,
-// which is declared after active_ and so would not be constructed yet there.
-// (A nested capture, e.g. a helper run while a snippet is capturing, writes the
-// "already active" error into it.)
-ScopedCapture::ScopedCapture(size_t max_bytes) {
-    active_ = UiMessageCapture::instance().begin_capture(&error_, max_bytes);
+ScopedCapture::ScopedCapture(size_t max_bytes, bool pass_through) {
+    active_ = UiMessageCapture::instance().begin_capture(&error_, max_bytes, pass_through);
 }
 
 ScopedCapture::~ScopedCapture() {
@@ -196,11 +186,6 @@ extlang_t* get_python_extlang() {
     static extlang_t* cached = nullptr;
 
     std::lock_guard<std::mutex> lock(mutex);
-    // Retry the lookup while unresolved rather than latching a one-time failure:
-    // if IDAPython is not loaded yet on the first call, a `tried`-once cache would
-    // report "Python interpreter not available" for the whole process lifetime even
-    // after it loads. find_extlang_by_name is a cheap registered-name lookup; once
-    // it resolves we keep the pointer.
     if (cached == nullptr) {
         extlang_object_t obj = find_extlang_by_name("Python");
         cached = obj;
@@ -245,7 +230,7 @@ std::string build_namespaced_file_snippet(const std::string& path, const std::st
     return wrapped.str();
 }
 
-ExecutionResult execute_snippet(const std::string& code, const std::string& sandbox) {
+ExecutionResult execute_snippet(const std::string& code, const std::string& sandbox, bool show) {
     ExecutionResult result;
     extlang_t* py = get_python_extlang();
     if (py == nullptr || py->eval_snippet == nullptr) {
@@ -253,7 +238,7 @@ ExecutionResult execute_snippet(const std::string& code, const std::string& sand
         return result;
     }
 
-    ScopedCapture capture(runtime_settings().idapython_output_max());
+    ScopedCapture capture(runtime_settings().idapython_output_max(), show || runtime_settings().idapython_echo());
     if (!capture.ok()) {
         result.error = capture.error();
         return result;
@@ -272,7 +257,7 @@ ExecutionResult execute_snippet(const std::string& code, const std::string& sand
     return result;
 }
 
-ExecutionResult execute_file(const std::string& path, const std::string& sandbox) {
+ExecutionResult execute_file(const std::string& path, const std::string& sandbox, bool show) {
     ExecutionResult result;
     extlang_t* py = get_python_extlang();
     if (py == nullptr) {
@@ -290,7 +275,7 @@ ExecutionResult execute_file(const std::string& path, const std::string& sandbox
         return result;
     }
 
-    ScopedCapture capture(runtime_settings().idapython_output_max());
+    ScopedCapture capture(runtime_settings().idapython_output_max(), show || runtime_settings().idapython_echo());
     if (!capture.ok()) {
         result.error = capture.error();
         return result;
@@ -312,5 +297,5 @@ ExecutionResult execute_file(const std::string& path, const std::string& sandbox
     return result;
 }
 
-} // namespace idapython
-} // namespace idasql
+}
+}

@@ -4,15 +4,11 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * fwd.hpp - Forward declarations for IDASQL registry types
- *
- * Allows database.hpp to hold unique_ptr<T> without including full definitions.
- */
-
 #pragma once
 
 #include <idasql/vtable.hpp>
+
+#include <string>
 
 namespace idasql {
 
@@ -41,6 +37,15 @@ namespace decompiler {
     struct DecompilerRegistry;
 }
 
+namespace instances {
+    struct TableRegistry;
+}
+namespace ui_actions {
+    struct Registry;
+}
+namespace idapython_runs {
+    struct Registry;
+}
 namespace checkpoints {
     struct CheckpointsRegistry;
 }
@@ -54,10 +59,9 @@ namespace search {
 }
 
 namespace deep_links {
-    // IDA 9.4+ deep links; a no-op on older SDKs.
     bool register_deep_links(xsql::Database& db);
-    // The GUI plugin opens links in-process, so navigation defaults ON there.
     void enable_navigation_default_for_gui();
+    bool open_link(const std::string& uri, std::string& error);
 }
 
-} // namespace idasql
+}

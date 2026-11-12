@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * string_utils.hpp - Shared string utility functions
- */
-
 #pragma once
 
 #include <cctype>
@@ -24,8 +20,6 @@ inline std::string format_ea_hex(uint64_t ea) {
     return std::string(buf);
 }
 
-// Lowercase hex-encode a byte buffer (e.g. MD5/SHA-256 digests). Reads exactly
-// `len` bytes and builds the result via std::string, so it cannot overflow.
 inline std::string to_hex(const uint8_t* data, size_t len) {
     static const char digits[] = "0123456789abcdef";
     std::string out;
@@ -49,4 +43,4 @@ inline std::string trim_copy(const std::string& s) {
     return s.substr(begin, end - begin);
 }
 
-} // namespace idasql
+}

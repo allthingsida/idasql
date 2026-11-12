@@ -11,10 +11,6 @@ using namespace idasql::core;
 namespace idasql {
 namespace memory {
 
-// ============================================================================
-// HEADS Table - All defined items in the database
-// ============================================================================
-
 const char *get_item_type_str(ea_t ea) {
   flags64_t f = get_flags(ea);
   if (is_code(f))
@@ -36,9 +32,6 @@ namespace {
 
 enum class HeadOrder { Asc, Desc };
 
-// Yields the heads of an addr window in SQL order (HeadSpanWalker): an address
-// >= 2^63 is a negative INTEGER, so with ORDER BY addr the high half comes
-// first. The unconstrained scan walks every address the same way.
 class HeadsGenerator : public xsql::Generator<HeadRow> {
   HeadSpanWalker walker_;
   mutable HeadRow row_{BADADDR};
@@ -57,9 +50,6 @@ public:
   int64_t rowid() const override { return static_cast<int64_t>(row_.ea); }
 };
 
-// The addr constraints are omit=1, so they are compared the way SQLite
-// compares the INTEGER addr column (xsql::Int64KeyRange): `addr = 4096.5` and
-// `addr = NULL` match nothing, `addr >= 4095.5` starts at 4096.
 std::unique_ptr<xsql::Generator<HeadRow>>
 make_heads_generator(HeadOrder order,
                      const std::vector<xsql::GeneratorConstraintArg> &args) {
@@ -77,7 +67,7 @@ make_heads_generator(HeadOrder order,
   return std::make_unique<HeadsGenerator>(order, range);
 }
 
-} // namespace
+}
 
 GeneratorTableDef<HeadRow> define_heads() {
   return generator_table<HeadRow>("heads")
@@ -138,5 +128,5 @@ GeneratorTableDef<HeadRow> define_heads() {
       .build();
 }
 
-} // namespace memory
-} // namespace idasql
+}
+}

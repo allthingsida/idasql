@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_comments.hpp - `comments` table (regular + repeatable comments).
- */
-
 #pragma once
 
 #include "core_common.hpp"
@@ -25,5 +21,5 @@ void collect_comment_rows(std::vector<CommentRow> &rows);
 
 CachedTableDef<CommentRow> define_comments();
 
-} // namespace symbols
-} // namespace idasql
+}
+}

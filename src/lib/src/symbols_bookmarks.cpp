@@ -12,10 +12,6 @@ using namespace idasql::core;
 namespace idasql {
 namespace symbols {
 
-// ============================================================================
-// BOOKMARKS Table (with UPDATE/DELETE support)
-// ============================================================================
-
 void collect_bookmark_rows(std::vector<BookmarkRow> &rows) {
   rows.clear();
 
@@ -135,12 +131,6 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
       })
       .deletable([](BookmarkRow &row) -> bool {
         idasql_auto_wait();
-        // bookmarks_t::erase compacts the bookmark list, so the frozen
-        // scan-time row.index drifts after an earlier row in a multi-row DELETE
-        // is erased. Re-resolve the CURRENT index (and ea) by the stable inode
-        // -- the same get_by_inode call collect_bookmark_rows uses -- so each
-        // erase targets the bookmark identified at scan time regardless of
-        // prior compaction.
         uint32_t index = row.index;
         ea_t ea = row.ea;
         if (row.inode != 0) {
@@ -206,5 +196,5 @@ CachedTableDef<BookmarkRow> define_bookmarks() {
       .build();
 }
 
-} // namespace symbols
-} // namespace idasql
+}
+}

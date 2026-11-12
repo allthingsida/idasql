@@ -3,11 +3,6 @@
 //
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
-//
-// dominators / post_dominators / loops — canonical cross-tool CFG-graph tables.
-// Each maps a function's flow-chart basic blocks onto opaque node
-// ids and runs the generic RE-agnostic xsql::graph module; the address mapping stays
-// entirely here.
 
 #include "code_graph_tables.hpp"
 #include "function_rowid.hpp"
@@ -24,8 +19,6 @@ namespace code {
 
 namespace {
 
-// `func_ea` when it is a function's entry address, else BADADDR: func_addr is
-// the owner's ENTRY address, and an interior or tail address matches nothing.
 ea_t func_start_at(ea_t func_ea) {
   return idasql_is_func_start(func_ea) ? func_ea : BADADDR;
 }
@@ -37,11 +30,8 @@ bool graph_scan_interrupted() {
   return true;
 }
 
-}  // namespace
+}
 
-// Build the block-level CFG of one function: a DirectedGraph over block ids plus the
-// id->address and id->end maps and the entry block id. `func_ea` is the
-// function's entry address. Returns false for BADADDR or an empty flow chart.
 bool build_func_graph(ea_t func_ea, xsql::graph::DirectedGraph &g_out,
                       std::vector<ea_t> &addr, std::vector<ea_t> &end_ea,
                       size_t &entry) {
@@ -89,9 +79,6 @@ bool build_func_graph(ea_t func_ea, xsql::graph::DirectedGraph &g_out,
 
 namespace {
 
-// Depth of every node in a (post)dominator tree given as parent links (kNoNode at
-// a root): each chain is walked once and memoised, so a long chain costs O(n),
-// not O(n * depth). -1 for a node with no path to a root. False on interrupt.
 bool tree_depths(const std::vector<size_t> &parent, std::vector<int64_t> &depth) {
   const size_t n = parent.size();
   depth.assign(n, -1);
@@ -109,7 +96,7 @@ bool tree_depths(const std::vector<size_t> &parent, std::vector<int64_t> &depth)
         break;
       }
       cur = parent[cur];
-      if (chain.size() > n)  // a cycle: not a tree
+      if (chain.size() > n)
         return false;
     }
     for (int64_t d = depth[cur]; !chain.empty(); chain.pop_back())
@@ -127,7 +114,6 @@ void collect_dominators(ea_t func_ea, std::vector<DominatorRow> &out) {
   auto idom = xsql::graph::immediate_dominators(g, entry);
   if (graph_scan_interrupted())
     return;
-  // The entry is the tree's root (immediate_dominators may name it its own idom).
   std::vector<size_t> parent(idom.begin(), idom.end());
   if (entry < parent.size())
     parent[entry] = xsql::graph::kNoNode;
@@ -140,7 +126,7 @@ void collect_dominators(ea_t func_ea, std::vector<DominatorRow> &out) {
       return;
     }
     if (idom[i] == xsql::graph::kNoNode)
-      continue;  // unreachable from entry
+      continue;
     DominatorRow r;
     r.func_ea = func_ea;
     r.node_addr = addr[i];
@@ -179,7 +165,7 @@ void collect_post_dominators(ea_t func_ea, std::vector<PostDominatorRow> &out) {
     PostDominatorRow r;
     r.func_ea = func_ea;
     r.node_addr = addr[i];
-    r.is_exit = g.successors(i).empty();  // a function sink
+    r.is_exit = g.successors(i).empty();
     if (ipdom[i] == xsql::graph::kNoNode) {
       r.has_ipdom = false;
       r.depth = 0;
@@ -224,8 +210,6 @@ void collect_loops(ea_t func_ea, std::vector<LoopRow> &out) {
     }
     r.start_addr = mn;
     r.end_addr = mx;
-    // Nesting depth: 1 + number of loops whose body strictly contains this one's
-    // (bodies are sorted, so std::includes works directly).
     int64_t depth = 1;
     for (size_t lj = 0; lj < loops.size(); ++lj) {
       if ((lj & 1023u) == 0 && graph_scan_interrupted()) {
@@ -245,8 +229,6 @@ void collect_loops(ea_t func_ea, std::vector<LoopRow> &out) {
   if (graph_scan_interrupted())
     out.clear();
 }
-
-// ---- per-table column emission (shared by the generator and filter_eq cursor) ----
 
 void emit_column(xsql::FunctionContext &ctx, int col, const DominatorRow &r) {
   switch (col) {
@@ -289,8 +271,6 @@ void emit_column(xsql::FunctionContext &ctx, int col, const LoopRow &r) {
   default: ctx.result_null(); break;
   }
 }
-
-// ---- generic vector-backed cursor helpers (one collect() per table) ----
 
 template <typename Row>
 class VecIterator : public xsql::RowIterator {
@@ -371,7 +351,7 @@ public:
   }
 };
 
-}  // namespace
+}
 
 GeneratorTableDef<DominatorRow> define_dominators() {
   return xsql::generator_table<DominatorRow>("dominators")
@@ -469,5 +449,5 @@ GeneratorTableDef<LoopRow> define_loops() {
       .build();
 }
 
-} // namespace code
-} // namespace idasql
+}
+}

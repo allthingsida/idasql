@@ -11,10 +11,6 @@
 namespace idasql {
 namespace core {
 
-// ============================================================================
-// CoreRegistry: every core table (code/symbols/memory/xrefs) in one place
-// ============================================================================
-
 CoreRegistry::CoreRegistry()
     : funcs(code::define_funcs()), blocks(code::define_blocks()),
       function_chunks(code::define_function_chunks()),
@@ -43,7 +39,6 @@ CoreRegistry::CoreRegistry()
       dirtree_folders(dirtrees::define_dirtree_folders()) {}
 
 void CoreRegistry::register_all(xsql::Database &db) {
-  // code domain
   register_cached_table(db, "funcs", &funcs);
   register_cached_table(db, "blocks", &blocks);
   register_cached_table(db, "function_chunks", &function_chunks);
@@ -63,41 +58,32 @@ void CoreRegistry::register_all(xsql::Database &db) {
   register_generator_table(db, "post_dominators", &post_dominators);
   register_generator_table(db, "loops", &loops);
 
-  // symbols domain
   register_cached_table(db, "names", &names);
   register_index_table(db, "entries", &exports);
   register_cached_table(db, "comments", &comments);
   register_cached_table(db, "bookmarks", &bookmarks);
   register_cached_table(db, "imports", &imports);
 
-  // memory domain
   register_index_table(db, "segments", &segments);
   register_generator_table(db, "heads", &heads);
   register_generator_table(db, "bytes", &bytes);
   register_cached_table(db, "strings", &strings);
   register_cached_table(db, "netnode_kv", &netnode_kv);
 
-  // xrefs domain
   register_cached_table(db, "xrefs", &xrefs);
   register_cached_table(db, "data_refs", &data_refs);
 
-  // dirtree folder tables
   register_generator_table(db, "dirtree_entries", &dirtree_entries);
   register_generator_table(db, "dirtree_folders", &dirtree_folders);
 
-  // Disassembly convenience views (calls_in_loops, funcs_with_loops, ...)
   code::register_disasm_views(db);
 
-  // Grep-style entity search table
   search::register_grep_entities(db);
 
-  // Create convenience views for common queries
   create_helper_views(db);
 }
 
 void CoreRegistry::create_helper_views(xsql::Database &db) {
-  // callers view - who calls a function
-  // Uses pre-computed from_func to avoid expensive range joins.
   db.exec(R"(
         CREATE VIEW IF NOT EXISTS callers AS
         SELECT
@@ -112,8 +98,6 @@ void CoreRegistry::create_helper_views(xsql::Database &db) {
           AND x.to_addr IN (SELECT addr FROM funcs)
     )");
 
-  // callees view - what does a function call
-  // Uses from_func for grouping and table joins for name resolution.
   db.exec(R"(
         CREATE VIEW IF NOT EXISTS callees AS
         SELECT
@@ -130,7 +114,6 @@ void CoreRegistry::create_helper_views(xsql::Database &db) {
           AND x.to_addr IN (SELECT addr FROM funcs)
     )");
 
-  // string_refs view - which functions reference which strings
   db.exec(R"(
         CREATE VIEW IF NOT EXISTS string_refs AS
         SELECT
@@ -147,13 +130,6 @@ void CoreRegistry::create_helper_views(xsql::Database &db) {
         WHERE x.from_func != 0
     )");
 
-  // func_summary view - one triage row per function, from decompiler-free tables.
-  // Every count is a correlated lookup on a func_addr / from_func / to_addr
-  // pushdown, so a WHERE func_addr = X row costs one function's worth of work.
-  // Calls in and callers count call xrefs only (kind = 'call'), not jumps.
-  // No string count: string_refs costs a strings lookup per data xref (about a
-  // third of the whole view on a large database); per function, use the
-  // string_refs view.
   db.exec(R"(
         CREATE VIEW IF NOT EXISTS func_summary AS
         SELECT func_addr, name, size, chunk_count, block_count, edge_count,
@@ -193,10 +169,9 @@ void CoreRegistry::create_helper_views(xsql::Database &db) {
 
 void CoreRegistry::register_index_table(xsql::Database &db, const char *name,
                                         const VTableDef *def) {
-  // Native canonical registration: module name == table name (no ida_ prefix).
   db.register_table(name, def);
   db.create_table(name, name);
 }
 
-} // namespace core
-} // namespace idasql
+}
+}

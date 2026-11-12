@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * search_bytes.hpp - Binary pattern search table for IDASQL
- */
-
 #pragma once
 
 #include <idasql/platform.hpp>
@@ -33,5 +29,5 @@ xsql::GeneratorTableDef<ByteSearchResult> define_byte_search();
 
 bool register_byte_search(xsql::Database& db);
 
-} // namespace search
-} // namespace idasql
+}
+}

@@ -24,9 +24,9 @@ struct StandardTreeInfo {
 };
 
 struct DirtreePathInfo {
-  std::string full_path;    // printable: what the path columns show
+  std::string full_path;
   std::string folder_path;
-  std::string tree_path;    // the tree's own spelling, for dirtree_t calls
+  std::string tree_path;
 };
 
 struct DirtreeEntryRow {
@@ -90,5 +90,5 @@ bool remove_empty_folder(const StandardTreeInfo &info, std::string_view folder,
 GeneratorTableDef<DirtreeEntryRow> define_dirtree_entries();
 GeneratorTableDef<DirtreeFolderRow> define_dirtree_folders();
 
-} // namespace dirtrees
-} // namespace idasql
+}
+}

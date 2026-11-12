@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_segments.hpp - `segments` table (start/end, name, class, perms).
- */
-
 #pragma once
 
 #include "core_common.hpp"
@@ -17,5 +13,5 @@ namespace memory {
 
 VTableDef define_segments();
 
-} // namespace memory
-} // namespace idasql
+}
+}

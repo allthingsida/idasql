@@ -3,11 +3,6 @@
 //
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
-//
-// `function_frames` — per-function stack-frame layout from IDA's function
-// frame fields (decompiler-free). Canonical cross-tool columns, matching
-// ghidrasql: func_addr, frame_size, arg_size, local_size, saved_reg_size,
-// stack_base_reg, has_frame_pointer; then func_name and uses_chkstk.
 
 #include "code_function_frames.hpp"
 #include "code_stack_probe.hpp"
@@ -21,12 +16,6 @@ namespace code {
 
 namespace {
 
-/**
- * Bytes of the stack-argument area of the function containing `ea`: the frame
- * type's size past the start of its arguments section (locals + saved registers
- * + return address). Counts every stack argument, unlike func_t::argsize (bytes
- * purged on return: 0 for __cdecl). 0 when there is no function or frame.
- */
 asize_t idasql_func_stack_args_size(ea_t ea)
 {
     tinfo_t frame;
@@ -47,9 +36,6 @@ asize_t idasql_func_stack_args_size(ea_t ea)
     return static_cast<asize_t>(size - static_cast<size_t>(args));
 }
 
-// The function record exposes the component sizes directly; the frame size
-// also includes the architecture-specific return-address size in the aggregate
-// footprint. False when `func_ea` is in no function.
 bool frame_for_func(ea_t func_ea, FrameInfo *out) {
   idasql_func_info_t fi;
   if (!idasql_func_info(func_ea, &fi))
@@ -68,7 +54,7 @@ bool frame_for_func(ea_t func_ea, FrameInfo *out) {
   return true;
 }
 
-}  // namespace
+}
 
 bool FrameInfo::uses_chkstk() const {
   if (!uses_chkstk_)
@@ -76,7 +62,6 @@ bool FrameInfo::uses_chkstk() const {
   return *uses_chkstk_;
 }
 
-// WHERE func_addr = X pushdown: O(1) single-function read.
 class FrameInFuncIterator : public xsql::RowIterator {
   std::vector<FrameInfo> rows_;
   size_t idx_ = 0;
@@ -124,7 +109,6 @@ public:
   }
 };
 
-// Full-scan: one row per function.
 class FramesGenerator : public xsql::Generator<FrameInfo> {
   size_t func_idx_ = 0;
   FrameInfo cur_;
@@ -161,7 +145,6 @@ GeneratorTableDef<FrameInfo> define_function_frames() {
                     [](const FrameInfo &r) -> int64_t { return r.local_size; })
       .column_int64("saved_reg_size",
                     [](const FrameInfo &r) -> int64_t { return r.saved_reg_size; })
-      // The program's stack-pointer register; NULL when the module has no "sp".
       .column("stack_base_reg", xsql::ColumnType::Text,
               [](xsql::FunctionContext &ctx, const FrameInfo &r) {
                 if (r.stack_base_reg.empty())
@@ -173,15 +156,12 @@ GeneratorTableDef<FrameInfo> define_function_frames() {
                     [](const FrameInfo &r) -> int64_t {
                       return r.has_frame_pointer ? 1 : 0;
                     })
-      // Column order above is shared with FrameInFuncIterator::column().
       .column_text("func_name",
                    [](const FrameInfo &r) -> std::string { return r.func_name; })
       .column_int64("uses_chkstk",
                     [](const FrameInfo &r) -> int64_t {
                       return r.uses_chkstk() ? 1 : 0;
                     })
-      // Bytes the function pops off the stack on return (__stdcall's argument
-      // bytes; 0 for __cdecl): IDA's func_t::argsize, which arg_size is not.
       .column_int64("purged_size",
                     [](const FrameInfo &r) -> int64_t { return r.purged_size; })
       .filter_eq(
@@ -194,5 +174,5 @@ GeneratorTableDef<FrameInfo> define_function_frames() {
       .build();
 }
 
-} // namespace code
-} // namespace idasql
+}
+}

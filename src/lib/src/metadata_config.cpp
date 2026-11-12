@@ -3,29 +3,6 @@
 //
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
-//
-// ida_config — IDA's configuration keys.
-//
-// IDA offers no API that lists its configuration keys, so the rows come from
-// the option files IDA itself reads: ida.cfg (its startup pass and its pass
-// for the current processor), hexrays.cfg and idagui.cfg, from IDADIR/cfg then
-// IDAUSR/cfg, later files winning, as IDA reads them.
-//
-// Reading a value (observed on IDA 9.0-9.4):
-//   - get_config_value (config.hpp) answers the plain kernel keys: "runtime";
-//   - the keys IDA keeps in the database's inf are read through ida.hpp's
-//     getinf / getinf_str: "inf" (each mapping below was measured by applying
-//     a directive and watching which inf field changed);
-//   - every other key cannot be read back: a value this table applied in
-//     this session is shown as "session", else the files' value as "file".
-//
-// Writing a value: process_config_directive("KEY=VALUE") (idacfg.hpp). It
-// reports problems only as a warning box, so the table captures the box (and
-// keeps it off the screen): "too high" / "too low" means IDA clamped the
-// value, which the row's message column then shows; any other warning is a
-// refusal, which fails the UPDATE with IDA's text. Only the inf keys are saved
-// with the database; the rest last until it is closed. Nothing here writes
-// .cfg files (IDA has no API for that).
 
 #include <idasql/platform.hpp>
 
@@ -40,8 +17,6 @@
 #include "metadata_config.hpp"
 
 #include "ida_headers.hpp"
-// SDK headers outside ida_headers.hpp, with the same warnings off: through 9.3,
-// parsejson.hpp's int accessor narrows jvalue_t::num()'s int64 (C4244).
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma warning(push)
 #pragma warning(disable: 4244)
@@ -60,9 +35,6 @@
 namespace idasql {
 namespace metadata {
 namespace {
-
-// ---------------------------------------------------------------------------
-// Keys kept in the database's inf, measured on IDA 9.0-9.4.
 
 enum class InfKind { Whole, Bit, BitInverted, Pack, String };
 
@@ -131,9 +103,6 @@ int find_inf_key(const std::string& key) {
     return -1;
 }
 
-// ---------------------------------------------------------------------------
-// Values in directive syntax
-
 std::string quote(const std::string& s) {
     std::string out = "\"";
     for (char c : s) {
@@ -174,7 +143,6 @@ bool is_bool_text(const std::string& v) {
     return v == "YES" || v == "NO" || v == "ON" || v == "OFF";
 }
 
-// One quoted string literal (a list value has several, or a trailing name).
 bool is_single_string(const std::string& v) {
     if (v.size() < 2 || v.front() != '"') return false;
     for (size_t i = 1; i < v.size(); ++i) {
@@ -230,10 +198,6 @@ std::optional<std::string> read_runtime(const std::string& key, bool hex, jtype_
     }
 }
 
-// ---------------------------------------------------------------------------
-// Session state: what this table applied to keys IDA cannot read back, and
-// the last warning IDA gave for each key.
-
 std::map<std::string, std::string>& session_values() {
     static std::map<std::string, std::string> values;
     return values;
@@ -244,7 +208,6 @@ std::map<std::string, std::string>& session_messages() {
     return messages;
 }
 
-// Fill value / value_source / persisted / message from the live state.
 void refresh(ConfigRow& row) {
     row.persisted = 0;
     row.message.reset();
@@ -265,9 +228,6 @@ void refresh(ConfigRow& row) {
     if (auto it = session_messages().find(row.key); it != session_messages().end())
         row.message = it->second;
 }
-
-// ---------------------------------------------------------------------------
-// The rows
 
 std::vector<std::string> cfg_dirs() {
     std::vector<std::string> dirs;
@@ -318,9 +278,9 @@ void collect_config_rows(std::vector<ConfigRow>& rows) {
     rows.clear();
 
     const std::set<std::string> base = host_defines();
-    std::set<std::string> startup = base;  // ida.cfg's first pass
+    std::set<std::string> startup = base;
     startup.insert("____");
-    std::set<std::string> processor = base;  // its pass for the current processor
+    std::set<std::string> processor = base;
     {
         char idp[QMAXFILE] = {0};
         get_idp_name(idp, sizeof(idp));
@@ -337,7 +297,6 @@ void collect_config_rows(std::vector<ConfigRow>& rows) {
         entries.insert(entries.end(), parsed.begin(), parsed.end());
     }
 
-    // The keys the files set (the last active assignment wins), in order.
     std::vector<std::string> order;
     std::map<std::string, const cfgparse::Entry*> set_by;
     for (const auto& e : entries) {
@@ -345,8 +304,6 @@ void collect_config_rows(std::vector<ConfigRow>& rows) {
         if (set_by.find(e.key) == set_by.end()) order.push_back(e.key);
         set_by[e.key] = &e;
     }
-    // A key the files mention only in a comment or in another processor's
-    // section is listed when IDA reads it back.
     std::map<std::string, const cfgparse::Entry*> mentioned;
     for (const auto& e : entries) {
         if (set_by.count(e.key) != 0 || mentioned.count(e.key) != 0) continue;
@@ -387,7 +344,7 @@ void collect_config_rows(std::vector<ConfigRow>& rows) {
         row.is_list = e.terminated && !row.is_bool && !row.is_string && !is_number_text(sample);
 
         if (row.file == "idagui.cfg")
-            row.writable = gui ? 1 : 0;   // idalib does not take the GUI's keys
+            row.writable = gui ? 1 : 0;
         else if (row.file == "hexrays.cfg")
             row.writable = hexrays ? 1 : 0;
         else
@@ -398,16 +355,12 @@ void collect_config_rows(std::vector<ConfigRow>& rows) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Writing
-
-// IDA's warning boxes, captured and kept off the screen while a directive runs.
 struct WarningCapture : public event_listener_t {
     std::vector<std::string> boxes;
 
     ssize_t idaapi on_event(ssize_t code, va_list va) override {
         if (code != ui_mbox) return 0;
-        (void)va_arg(va, int);  // mbox_kind_t
+        (void)va_arg(va, int);
         const char* format = va_arg(va, const char*);
         if (format == nullptr) return 0;
         va_list copy;
@@ -426,7 +379,6 @@ struct WarningCapture : public event_listener_t {
     }
 };
 
-// The warning text without its display prefix and the echoed directive.
 std::string warning_text(const std::vector<std::string>& boxes, const std::string& directive) {
     std::string out;
     for (const auto& box : boxes) {
@@ -445,9 +397,6 @@ std::string warning_text(const std::vector<std::string>& boxes, const std::strin
     return out;
 }
 
-// The value IDA applied when it clamped a number: its warning names the bound,
-// "number 99999 is too high (must be at most 1023)" / "... too low (must be at
-// least 32)". Empty when the warning names none.
 std::string clamp_bound(const std::string& warning) {
     for (const char* marker : {"must be at most ", "must be at least "}) {
         const size_t at = warning.find(marker);
@@ -459,7 +408,7 @@ std::string clamp_bound(const std::string& warning) {
             ++j;
         while (j < warning.size() && std::isxdigit(static_cast<unsigned char>(warning[j])) != 0)
             ++j;
-        if (j < warning.size() && (warning[j] == 'x' || warning[j] == 'X')) {  // 0x...
+        if (j < warning.size() && (warning[j] == 'x' || warning[j] == 'X')) {
             ++j;
             while (j < warning.size() && std::isxdigit(static_cast<unsigned char>(warning[j])) != 0)
                 ++j;
@@ -469,16 +418,13 @@ std::string clamp_bound(const std::string& warning) {
     return {};
 }
 
-// What a value holds outside its string literals. IDA's directive parser stops
-// (and, per idacfg.hpp, may exit) on lexical errors, so idasql sends only one
-// well-formed directive and leaves type and range judgement to IDA.
 struct ValueScan {
-    bool open_string = false;  // a '"' without its closing '"' (or a trailing '\')
-    int depth = 0;             // {[( minus )]} outside strings
-    bool bad_depth = false;    // a closer before its opener
+    bool open_string = false;
+    int depth = 0;
+    bool bad_depth = false;
     bool equals = false;
     bool semicolon = false;
-    bool comment = false;      // /* or //
+    bool comment = false;
 };
 
 ValueScan scan_value(const std::string& s) {
@@ -488,7 +434,7 @@ ValueScan scan_value(const std::string& s) {
         const char c = s[i];
         if (in_str) {
             if (c == '\\') {
-                if (++i >= s.size()) break;  // a trailing backslash escapes nothing
+                if (++i >= s.size()) break;
             } else if (c == '"') {
                 in_str = false;
             }
@@ -507,7 +453,6 @@ ValueScan scan_value(const std::string& s) {
     return r;
 }
 
-// The directive value for `requested`, or an error.
 bool directive_value(const ConfigRow& row, const std::string& requested,
                      std::string* out, std::string* error) {
     std::string v = trim(requested);
@@ -587,7 +532,7 @@ bool apply_value(ConfigRow& row, xsql::FunctionArg value) {
     process_config_directive(directive.c_str());
     unhook_event_listener(HT_UI, &capture);
     if (row.file == "hexrays.cfg" && decompiler::hexrays_available())
-        clear_cached_cfuncs();  // later pseudocode follows the new option
+        clear_cached_cfuncs();
 
     const std::string warning = warning_text(capture.boxes, directive);
     const bool clamped = warning.find("too high") != std::string::npos ||
@@ -595,8 +540,6 @@ bool apply_value(ConfigRow& row, xsql::FunctionArg value) {
     if (warning.empty()) session_messages().erase(row.key);
     else session_messages()[row.key] = warning;
     if (warning.empty() || clamped) {
-        // A value IDA cannot read back is remembered as applied: as written, or
-        // for a clamp, the bound IDA's warning names (the message keeps the warning).
         if (row.inf_index < 0 && !read_runtime(row.key, row.hex, nullptr)) {
             const std::string bound = clamped ? clamp_bound(warning) : std::string();
             session_values()[row.key] = !bound.empty() ? bound
@@ -614,7 +557,7 @@ bool apply_value(ConfigRow& row, xsql::FunctionArg value) {
     return false;
 }
 
-} // namespace
+}
 
 CachedTableDef<ConfigRow> define_ida_config() {
     return cached_table<ConfigRow>("ida_config")
@@ -635,5 +578,5 @@ CachedTableDef<ConfigRow> define_ida_config() {
         .build();
 }
 
-} // namespace metadata
-} // namespace idasql
+}
+}

@@ -4,9 +4,6 @@
 #
 # This file is licensed under the Human-Origin Source License v1.0.
 # See LICENSE.
-#
-
-# libidasql - SQL interface to IDA databases
 
 add_library(idasql STATIC
     src/database.cpp
@@ -58,6 +55,10 @@ add_library(idasql STATIC
     src/decompiler_splits.cpp
     src/search_bytes.cpp
     src/deep_link.cpp
+    src/os.cpp
+    src/control_channel.cpp
+    src/rescue.cpp
+    src/rescue_guard.cpp
     src/deep_links_tables.cpp
     src/idapython_exec.cpp
     src/metadata.cpp
@@ -69,6 +70,13 @@ add_library(idasql STATIC
     src/ui_context_provider.cpp
     src/ida_compat.cpp
     src/checkpoints.cpp
+    src/idapython_runs.cpp
+    src/instances.cpp
+    src/instances_table.cpp
+    src/ui_actions.cpp
+    src/close.cpp
+    src/remote_control.cpp
+    src/remote_setting.cpp
     src/python_bridge.cpp
 )
 
@@ -95,37 +103,24 @@ if(WIN32)
     )
 endif()
 
-# Avoid name collision with idasql_plugin's import lib (idasql.lib)
 set_target_properties(idasql PROPERTIES OUTPUT_NAME "libidasql")
 
 target_precompile_headers(idasql PRIVATE src/ida_headers.hpp)
 
-# The vendored true_believers decoder is engine-agnostic — keep the IDA SDK PCH
-# out of it so it compiles standalone.
 set_source_files_properties(src/true_believers.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
-# The deep-link module (link model, IPC client, OS handler registration) uses no
-# IDA API: the `idasql link` verbs run before idalib is initialised.
 set_source_files_properties(src/deep_link.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+set_source_files_properties(src/os.cpp src/control_channel.cpp src/rescue.cpp src/instances.cpp src/close.cpp src/remote_control.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
-# SDK compilation requirements only — no library linkage.
-# Consumers bring their own SDK target (idasdk::plugin or idasdk::idalib).
 target_link_libraries(idasql PUBLIC xsql::xsql)
 target_link_libraries(idasql PRIVATE ida_platform_settings ida_compiler_settings)
 target_include_directories(idasql PUBLIC "${idasdk_INCLUDE_DIRS}")
 target_compile_definitions(idasql PRIVATE IDALIB_IMPL)
 
-# The SDK's own pro.h uses std::is_pod, deprecated in C++20 (every SDK version):
-# MSVC's STL has a switch for exactly that one; GCC/Clang ignore deprecations
-# inside the SDK headers (ida_headers.hpp), never in idasql code.
 if(MSVC)
     target_compile_definitions(idasql PRIVATE _SILENCE_CXX20_IS_POD_DEPRECATION_WARNING)
 endif()
 
-# SDK 9.4 deprecates every API that hands out a func_t*, segment_t* or
-# hidden_range_t* (and qflow_chart_t / mba_ranges_t). The library reaches them
-# only through the ea-based wrappers in src/ida_compat.hpp/.cpp, so on 9.4+ any
-# deprecated call is a build error rather than one more warning.
 file(STRINGS "${idasdk_INCLUDE_DIRS}/pro.h" _idasql_sdk_version_line
     REGEX "^#define[ \t]+IDA_SDK_VERSION[ \t]+[0-9]+")
 string(REGEX REPLACE "^#define[ \t]+IDA_SDK_VERSION[ \t]+([0-9]+).*" "\\1"
@@ -133,8 +128,6 @@ string(REGEX REPLACE "^#define[ \t]+IDA_SDK_VERSION[ \t]+([0-9]+).*" "\\1"
 if(NOT _idasql_sdk_version MATCHES "^[0-9]+$")
     message(FATAL_ERROR "idasql: cannot read IDA_SDK_VERSION from ${idasdk_INCLUDE_DIRS}/pro.h")
 endif()
-# 9.0 SP1 added get_undo_action_label()/get_redo_action_label() to undo.hpp
-# without changing IDA_SDK_VERSION (900 for GA and SP1): key on the declaration.
 file(STRINGS "${idasdk_INCLUDE_DIRS}/undo.hpp" _idasql_undo_labels REGEX "get_undo_action_label")
 if(_idasql_undo_labels)
     target_compile_definitions(idasql PUBLIC IDASQL_SDK_HAS_UNDO_LABELS=1)
@@ -149,7 +142,3 @@ if(_idasql_sdk_version GREATER_EQUAL 940)
         target_compile_options(idasql PRIVATE -Werror=deprecated-declarations)
     endif()
 endif()
-
-# Export the library target
-# install(TARGETS idasql EXPORT idasqlTargets)
-# install(DIRECTORY include/idasql DESTINATION include)

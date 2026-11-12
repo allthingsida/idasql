@@ -54,13 +54,6 @@ int IDAHTTPServer::start(int port, HTTPQueryCallback query_cb,
 
     bind_addr_ = bind_addr.empty() ? "127.0.0.1" : bind_addr;
 
-    // Security notice: the REPL/plugin `.http` server exposes a read/write SQL
-    // endpoint (queries can save_database(), edit types, etc.). A token makes it
-    // require `Authorization: Bearer <token>`; WITHOUT one it is unauthenticated
-    // (fine on loopback). Binding a non-loopback interface with no token makes it
-    // reachable by other hosts with no auth — warn so an operator who pins 0.0.0.0
-    // without a token sees the exposure. (Set a token via `.http start --token` or
-    // `.pin http --token`; the standalone `idasql --http --token` path is separate.)
     if (auth_token.empty()
         && bind_addr_ != "127.0.0.1" && bind_addr_ != "localhost" && bind_addr_ != "::1") {
         std::fprintf(stderr,
@@ -99,8 +92,6 @@ int IDAHTTPServer::start(int port, HTTPQueryCallback query_cb,
     impl_ = std::make_unique<xsql::thinclient::http_query_server>(config);
     const int started = impl_->start();
     if (started <= 0) {
-        // Failed bind: drop the impl so a later retry starts from clean state
-        // (no stale not-running server, no stale port in status()).
         impl_.reset();
         return -1;
     }
@@ -119,9 +110,6 @@ void IDAHTTPServer::stop() {
 }
 
 void IDAHTTPServer::abandon() {
-    // httplib::Server::stop() only shuts the listening socket (it does not join),
-    // which also ends keep-alive loops. The server object is then released, not
-    // destroyed: destroying it would join the worker that is still running.
     if (impl_) {
         if (auto* svr = impl_->http_server()) svr->stop();
     }
@@ -165,4 +153,4 @@ std::string format_http_status(int port, bool running, const std::string& bind_a
     return xsql::thinclient::format_http_status(port, running, bind_addr);
 }
 
-} // namespace idasql
+}

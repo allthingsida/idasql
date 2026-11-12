@@ -63,13 +63,6 @@ private:
     ByteSearchResult current_{};
 };
 
-// Scans the addr window for a byte pattern in SQL order. The window's unsigned
-// spans (xsql::Int64KeyRange::unsigned_spans) are searched in turn -- the part
-// at or above 2^63 first, since those addresses are negative INTEGERs -- each
-// within the unsigned [start_addr, end_addr) scan bounds. A match belongs to the
-// span its START falls in; bin_search needs the whole match below its end
-// bound, so a span's scan end is widened by the pattern length (saturating at
-// the top of the address space).
 class ByteSearchGenerator final : public xsql::Generator<ByteSearchResult> {
 public:
     ByteSearchGenerator(const std::string& pattern, ea_t start_ea, ea_t end_ea,
@@ -129,9 +122,9 @@ public:
 
 private:
     struct Window {
-        ea_t next = BADADDR;        // where the scan resumes
-        ea_t end = BADADDR;         // bin_search's exclusive end bound
-        ea_t last_start = BADADDR;  // the last address a match may start at
+        ea_t next = BADADDR;
+        ea_t end = BADADDR;
+        ea_t last_start = BADADDR;
     };
 
     compiled_binpat_vec_t binpat_;
@@ -147,11 +140,6 @@ private:
 std::unique_ptr<xsql::Generator<ByteSearchResult>> make_byte_search_generator(
     const std::vector<xsql::GeneratorConstraintArg>& args)
 {
-    // Every constraint here is omit=1. The inputs (pattern, start_addr,
-    // end_addr, max_results) take a value only when a native column of their
-    // type would equal it -- NULL, 4096.5 or a blob pattern requests nothing
-    // -- and the addr bounds are compared the way SQLite compares the INTEGER
-    // addr column (xsql::Int64KeyRange).
     std::string pattern;
     ea_t start_ea = inf_get_min_ea();
     ea_t end_ea = inf_get_max_ea();
@@ -199,7 +187,7 @@ std::unique_ptr<xsql::Generator<ByteSearchResult>> make_byte_search_generator(
                                                  max_results);
 }
 
-} // namespace
+}
 
 xsql::GeneratorTableDef<ByteSearchResult> define_byte_search() {
     return xsql::generator_table<ByteSearchResult>("byte_search")
@@ -246,5 +234,5 @@ bool register_byte_search(xsql::Database& db) {
            db.create_table("byte_search", "byte_search");
 }
 
-} // namespace search
-} // namespace idasql
+}
+}

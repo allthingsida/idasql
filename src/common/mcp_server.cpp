@@ -23,11 +23,6 @@
 
 namespace idasql {
 
-// What an MCP client (Claude Code, Claude Desktop, Codex...) shows its model when it
-// connects. Kept short: clients load it into every session. The link rule matters
-// because a raw link in tool output is never clickable; only a markdown link the
-// model writes into its reply is. The deep_links table exists only on IDA 9.4+
-// builds, so the link guidance is given only when it does.
 std::string mcp_server_instructions(bool deep_links) {
     std::string s = "idasql answers SQL about the IDA database open in this server.";
     if (deep_links) {
@@ -121,7 +116,6 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
                     continue;
                 }
 
-                // Timed out before command admission: mark canceled and remove from pending queue.
                 if (!cmd->completed && !cmd->started) {
                     cmd->canceled = true;
                 }
@@ -145,7 +139,6 @@ MCPQueueResult IDAMCPServer::queue_and_wait(MCPPendingCommand::Type type, const 
         return {false, "Error: MCP request timed out in queue (raise queue_admission_timeout_ms via UPDATE runtime_settings SET value=... WHERE key='queue_admission_timeout_ms')"};
     }
 
-    // Convention: query callbacks return textual error markers on failure.
     bool ok = !is_error_result_text(cmd->result);
     return {ok, cmd->result};
 }
@@ -160,12 +153,10 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
     bind_addr_ = bind_addr;
     use_queue_.store(use_queue);
 
-    if (port == 0) {
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(9000, 9999);
-        port = dis(gen);
-    }
+    const bool random_port = port == 0;
+    std::mt19937 gen{std::random_device{}()};
+    std::uniform_int_distribution<> dis(9000, 9999);
+    if (random_port) port = dis(gen);
 
     impl_ = std::make_unique<Impl>();
 
@@ -180,16 +171,11 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
         {"required", Json::array({"query"})}
     };
 
-    // No outputSchema — the tool returns text content, not structuredContent.
-    // Declaring an outputSchema without returning structuredContent violates
-    // the MCP spec and causes the official Python SDK to reject responses.
     fastmcpp::tools::Tool sql_query_tool{
         "idasql_query",
         query_input_schema,
         Json(),
         [this](const Json& args) -> Json {
-            // An abandoned server (plugin teardown) keeps its threads; once
-            // stopped it answers without touching the callback.
             if (!running_.load()) {
                 return Json{
                     {"content", Json::array({
@@ -198,7 +184,6 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
                     {"isError", true}
                 };
             }
-            // value() would throw for a present but non-string "query".
             std::string query;
             if (const auto it = args.find("query"); it != args.end() && it->is_string()) {
                 query = it->get<std::string>();
@@ -229,7 +214,6 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
                     };
                 }
                 result = query_cb_(query);
-                // Convention: query callbacks return textual error markers on failure.
                 if (is_error_result_text(result)) {
                     success = false;
                 }
@@ -260,22 +244,25 @@ int IDAMCPServer::start(int port, QueryCallback query_cb,
         mcp_server_instructions(deep_links_)
     );
 
-    impl_->server = std::make_unique<fastmcpp::server::SseServerWrapper>(
-        handler,
-        bind_addr_,
-        port,
-        "/sse",
-        "/messages"
-    );
-
-    // Mark the IDASQL-side server state before exposing the SSE endpoint. The
-    // transport can accept a client immediately after start(), before this
-    // method returns to the CLI loop that drains queued commands.
     running_.store(true);
-    if (!impl_->server->start()) {
+    constexpr int kRandomAttempts = 20;
+    bool started = false;
+    for (int attempt = 0; attempt < (random_port ? kRandomAttempts : 1) && !started; ++attempt) {
+        if (attempt > 0) port = dis(gen);
+        impl_->server = std::make_unique<fastmcpp::server::SseServerWrapper>(
+            handler,
+            bind_addr_,
+            port,
+            "/sse",
+            "/messages"
+        );
+        started = impl_->server->start();
+        if (!started) impl_->server.reset();
+    }
+    if (!started) {
         running_.store(false);
         impl_.reset();
-        port_ = 0;  // no stale endpoint after a failed bind
+        port_ = 0;
         return -1;
     }
 
@@ -360,14 +347,13 @@ void IDAMCPServer::stop() {
     }
 
     impl_.reset();
-    port_ = 0;  // no stale endpoint after stop; next start() assigns a fresh one
+    port_ = 0;
 }
 
 void IDAMCPServer::abandon() {
     running_.store(false);
     queue_cv_.notify_all();
     complete_pending_commands("Error: MCP server stopped");
-    // Deliberately released, not destroyed: destroying it would join.
     (void)impl_.release();
     port_ = 0;
 }
@@ -425,4 +411,4 @@ std::string format_mcp_status(int port, bool running, const std::string& bind_ad
     return ss.str();
 }
 
-} // namespace idasql
+}

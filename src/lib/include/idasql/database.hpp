@@ -4,29 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * database.hpp - IDASQL API
- *
- * Two-tier API design reflecting IDA's singleton nature:
- *
- * TIER 1: QueryEngine (recommended for most use)
- *   - Use when IDA is already initialized (plugins, scripts, idalib)
- *   - Just creates SQLite + virtual tables
- *   - No IDA lifecycle management
- *
- * TIER 2: Session (for pre-initialized standalone tools)
- *   - Database lifecycle only: open_database + close
- *   - Caller must initialize the IDA runtime before Session::open()
- *   - Use for tools like idasql.exe after one-time init_library()
- *
- * TIER 3: Free functions (quick one-liners)
- *   - idasql::query(), idasql::exec(), idasql::execute()
- *   - Use global engine, lazily initialized
- *
- * IMPORTANT: IDA SDK is a singleton. Only ONE database can be open.
- * The Session class doesn't create "a database" - it manages THE database.
- */
-
 #pragma once
 
 #include <idasql/platform.hpp>
@@ -45,25 +22,9 @@
 
 namespace idasql {
 
-// ============================================================================
-// Result Types
-// ============================================================================
-
-/**
- * Single row from a query result
- */
 struct Row {
     std::vector<std::string> values;
-    // Per-cell SQL-NULL flags, parallel to `values` (nonzero => the cell was SQL
-    // NULL; its `values` entry is then an empty string). Mirrors xsql::Row::nulls.
-    // May be left empty by producers that don't track nullness; consumers treat an
-    // empty `nulls` vector as "unknown" and fall back to prior behavior. This lets
-    // a real SQL NULL be distinguished from an empty/"NULL" text value on every
-    // output surface (HTTP json/csv/tsv, MCP, -q).
     std::vector<char> nulls;
-    // Per-cell SQLite storage class (SQLITE_INTEGER .. SQLITE_NULL), parallel to
-    // `values`, captured before text conversion. Mirrors xsql::Row::types; empty
-    // when the producer does not track it (type() then reports 0).
     std::vector<char> types;
 
     const std::string& operator[](size_t i) const { return values[i]; }
@@ -72,9 +33,6 @@ struct Row {
     int type(size_t i) const { return i < types.size() ? types[i] : 0; }
 };
 
-/**
- * Query result set
- */
 struct QueryResult {
     std::vector<std::string> columns;
     std::vector<Row> rows;
@@ -85,41 +43,34 @@ struct QueryResult {
     bool partial = false;
     int elapsed_ms = 0;
 
-    // Convenience accessors
     size_t row_count() const { return rows.size(); }
     size_t column_count() const { return columns.size(); }
     bool empty() const { return rows.empty(); }
 
-    // Get first cell as scalar (for single-value queries)
     std::string scalar() const {
         return (!empty() && rows[0].size() > 0) ? rows[0][0] : "";
     }
 
-    // Iterator support
     auto begin() { return rows.begin(); }
     auto end() { return rows.end(); }
     auto begin() const { return rows.begin(); }
     auto end() const { return rows.end(); }
 
-    // Format as string for display
     std::string to_string() const {
         if (!success) return error;
         if (empty()) return "(0 rows)";
 
         std::string result;
-        // Header
         for (size_t i = 0; i < columns.size(); ++i) {
             if (i > 0) result += " | ";
             result += columns[i];
         }
         result += "\n";
-        // Separator
         for (size_t i = 0; i < columns.size(); ++i) {
             if (i > 0) result += "-+-";
             result += std::string(columns[i].size(), '-');
         }
         result += "\n";
-        // Rows
         for (const auto& row : rows) {
             for (size_t i = 0; i < row.size(); ++i) {
                 if (i > 0) result += " | ";
@@ -141,43 +92,17 @@ struct QueryResult {
     }
 };
 
-// ============================================================================
-// TIER 1: QueryEngine - SQL interface (no IDA lifecycle)
-// ============================================================================
-
-/**
- * QueryEngine - SQLite query interface to the current IDA database
- *
- * Use this when IDA is already initialized. Does NOT manage IDA lifecycle.
- * You can have multiple QueryEngine instances - they all query the same
- * IDA database (because IDA is singleton).
- *
- * Example:
- *   idasql::QueryEngine qe;
- *   auto result = qe.query("SELECT name, size FROM funcs LIMIT 10");
- *   for (const auto& row : result) {
- *       msg("%s: %s\n", row[0].c_str(), row[1].c_str());
- *   }
- */
 class QueryEngine {
 public:
     QueryEngine();
     ~QueryEngine();
 
-    // Moveable but not copyable
     QueryEngine(QueryEngine&&) noexcept;
     QueryEngine& operator=(QueryEngine&&) noexcept;
 
     QueryEngine(const QueryEngine&) = delete;
     QueryEngine& operator=(const QueryEngine&) = delete;
 
-    /**
-     * Execute SQL and return results.
-     *
-     * The overload without QueryOptions inherits the current
-     * runtime_settings.query_timeout_ms value. The QueryOptions overload is
-     * exact: timeout_ms == 0 explicitly disables the deadline.
-     */
     QueryResult query(const std::string& sql) { return query(sql.c_str()); }
     QueryResult query(const std::string& sql, const xsql::QueryOptions& options) {
         return query(sql.c_str(), options);
@@ -185,60 +110,29 @@ public:
     QueryResult query(const char* sql);
     QueryResult query(const char* sql, const xsql::QueryOptions& options);
 
-    /**
-     * Execute ONE statement with its `?` placeholders bound to `params` by
-     * SQLite (text binds by length, so an embedded NUL is kept). The overload
-     * without options inherits runtime_settings.query_timeout_ms, as query()
-     * does. A runtime PRAGMA cannot take parameters.
-     */
     QueryResult query(const char* sql, const std::vector<xsql::QueryParam>& params);
     QueryResult query(const char* sql, const std::vector<xsql::QueryParam>& params,
                       const xsql::QueryOptions& options);
 
-    /**
-     * Execute SQL, ignoring rows
-     */
     xsql::Status exec(const char* sql);
 
-    /**
-     * Execute SQL, ignore results (for INSERT/UPDATE/DELETE)
-     */
     bool execute(const char* sql);
 
-    /**
-     * Execute multi-statement SQL script and collect statement results.
-     */
     bool execute_script(const std::string& script,
                         std::vector<xsql::StatementResult>& results,
                         std::string& error);
 
-    /**
-     * Export tables to a SQL file.
-     */
     bool export_tables(const std::vector<std::string>& tables,
                        const std::string& output_path,
                        std::string& error);
 
-    /**
-     * Get single value (first column of first row)
-     */
     std::string scalar(const std::string& sql) { return scalar(sql.c_str()); }
     std::string scalar(const char* sql);
 
-    /**
-     * Get last error message
-     */
     const std::string& error() const { return error_; }
 
-    /**
-     * Check if initialized
-     */
     bool is_valid() const { return db_.is_open(); }
 
-    /**
-     * Advanced access to the underlying xsql database wrapper.
-     * Use this for module registration workflows (custom virtual tables).
-     */
     xsql::Database& database() { return db_; }
     const xsql::Database& database() const { return db_; }
 
@@ -253,7 +147,6 @@ private:
     xsql::Database db_;
     std::string error_;
 
-    // Table registries (prevent dangling virtual table pointers)
     std::unique_ptr<core::CoreRegistry> core_;
     std::unique_ptr<metadata::MetadataRegistry> metadata_;
     std::unique_ptr<extended::ExtendedRegistry> extended_;
@@ -261,13 +154,12 @@ private:
     std::unique_ptr<debugger::DebuggerRegistry> debugger_;
     std::unique_ptr<decompiler::DecompilerRegistry> decompiler_;
     std::unique_ptr<checkpoints::CheckpointsRegistry> checkpoints_;
+    std::unique_ptr<idapython_runs::Registry> idapython_runs_;
+    std::unique_ptr<instances::TableRegistry> instances_;
+    std::unique_ptr<ui_actions::Registry> ui_actions_;
 
     void init();
 };
-
-// ============================================================================
-// TIER 2: Session - Database lifecycle management
-// ============================================================================
 
 enum class OpenOutcome {
     Ok,
@@ -275,86 +167,36 @@ enum class OpenOutcome {
     UpgradedReopenRequired
 };
 
-/**
- * Session - Manages THE IDA database session after runtime initialization
- *
- * Use this for standalone tools that need to open/close IDA databases
- * after calling init_library() once for the process.
- * Remember: IDA is singleton, so there's only ever ONE session.
- *
- * Example (CLI tool):
- *   if (init_library() != 0) {
- *       std::cerr << "init failed" << std::endl;
- *       return 1;
- *   }
- *   idasql::Session session;
- *   if (!session.open("binary.i64")) {
- *       std::cerr << session.error() << std::endl;
- *       return 1;
- *   }
- *   auto result = session.query("SELECT * FROM funcs");
- *   session.close();
- */
+namespace rescue { class Guard; }
+
 class Session {
 public:
-    Session() = default;
+    Session();
     ~Session();
 
-    // Non-copyable, non-moveable (singleton semantics)
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
     Session(Session&&) = delete;
     Session& operator=(Session&&) = delete;
 
-    /**
-     * Open an IDA database
-     * @param idb_path Path to .idb/.i64 OR raw binary (.exe/.dll/firmware/etc.).
-     *                 Raw binaries (anything not ending in .idb/.i64) trigger
-     *                 fresh idalib auto-analysis and string-list rebuild.
-     * @return true on success
-     */
     bool open(const char* idb_path);
 
-    /**
-     * Result of the most recent open attempt.
-     */
     OpenOutcome open_outcome() const { return open_outcome_; }
 
-    /**
-     * Path to the generated .i64 when open_outcome() is UpgradedReopenRequired.
-     */
     const std::string& upgraded_i64_path() const { return upgraded_i64_path_; }
 
-    /**
-     * Path to the idalib upgrade log when open_outcome() is UpgradedReopenRequired.
-     */
     const std::string& upgrade_log_path() const { return upgrade_log_path_; }
 
-    /**
-     * One-line notice for non-fatal open redirects, such as .idb -> existing .i64.
-     */
     const std::string& open_notice() const { return open_notice_; }
 
-    /**
-     * Close the session
-     */
     void close();
 
-    /**
-     * Check if session is open
-     */
     bool is_open() const { return engine_ && engine_->is_valid() && ida_opened_; }
 
-    /**
-     * Get last error
-     */
     const std::string& error() const {
         return engine_ ? engine_->error() : error_;
     }
 
-    // Delegate queries to the engine. As with QueryEngine, omitting options
-    // inherits runtime_settings.query_timeout_ms; explicit timeout_ms == 0 is
-    // unlimited.
     QueryResult query(const std::string& sql) { return query(sql.c_str()); }
     QueryResult query(const std::string& sql, const xsql::QueryOptions& options) {
         return query(sql.c_str(), options);
@@ -378,19 +220,14 @@ public:
     std::string scalar(const std::string& sql) { return scalar(sql.c_str()); }
     std::string scalar(const char* sql);
 
-    /**
-     * Get query engine (for advanced use)
-     */
     QueryEngine* engine() { return engine_.get(); }
 
-    /**
-     * Get database info
-     */
     std::string info() const;
 
 private:
     std::unique_ptr<QueryEngine> engine_;
     bool ida_opened_ = false;
+    std::unique_ptr<rescue::Guard> rescue_guard_;
     std::string error_;
     OpenOutcome open_outcome_ = OpenOutcome::Failed;
     std::string upgraded_i64_path_;
@@ -398,39 +235,18 @@ private:
     std::string open_notice_;
 };
 
-// ============================================================================
-// TIER 3: Free Functions - Quick one-liners
-// ============================================================================
-
 namespace detail {
     QueryEngine& global_engine();
 }
 
-/**
- * Quick query - uses global engine
- */
 QueryResult query(const char* sql);
 
-/**
- * Quick exec (no result rows)
- */
 xsql::Status exec(const char* sql);
 
-/**
- * Quick execute (no results)
- */
 bool execute(const char* sql);
 
-/**
- * Quick scalar query
- */
 std::string scalar(const char* sql);
 
-// ============================================================================
-// Backwards Compatibility Alias
-// ============================================================================
-
-// For existing code using idasql::Database
 using Database = Session;
 
-} // namespace idasql
+}

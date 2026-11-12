@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * idapython_exec.hpp - IDAPython bridge
- */
-
 #pragma once
 
 #include <idasql/platform.hpp>
@@ -37,10 +33,7 @@ public:
 
     bool acquire_runtime(std::string* error = nullptr);
     void release_runtime();
-    // max_bytes caps the captured output (0 == unbounded). Past the cap, output is
-    // dropped and a single truncation marker is appended so a runaway snippet cannot
-    // exhaust memory / the response channel.
-    bool begin_capture(std::string* error = nullptr, size_t max_bytes = 0);
+    bool begin_capture(std::string* error = nullptr, size_t max_bytes = 0, bool pass_through = false);
     std::string end_capture();
 
     virtual ssize_t idaapi on_event(ssize_t code, va_list va) override;
@@ -56,9 +49,10 @@ private:
     bool capturing_ = false;
     size_t runtime_refcount_ = 0;
     std::ostringstream buffer_;
-    size_t cap_bytes_ = 0;      // 0 == unbounded
-    size_t written_ = 0;        // bytes appended so far this capture
-    bool truncated_ = false;    // truncation marker already appended
+    size_t cap_bytes_ = 0;
+    size_t written_ = 0;
+    bool truncated_ = false;
+    bool pass_through_ = false;
 };
 
 bool runtime_acquire(std::string* error = nullptr);
@@ -66,8 +60,7 @@ void runtime_release();
 
 class ScopedCapture {
 public:
-    // max_bytes caps captured output (0 == unbounded; see begin_capture).
-    explicit ScopedCapture(size_t max_bytes = 0);
+    explicit ScopedCapture(size_t max_bytes = 0, bool pass_through = false);
     ~ScopedCapture();
     bool ok() const { return active_; }
     const std::string& error() const { return error_; }
@@ -84,8 +77,8 @@ extlang_t* get_python_extlang();
 std::string build_namespace_preamble(const std::string& sandbox);
 std::string build_namespaced_snippet(const std::string& code, const std::string& sandbox);
 std::string build_namespaced_file_snippet(const std::string& path, const std::string& sandbox);
-ExecutionResult execute_snippet(const std::string& code, const std::string& sandbox);
-ExecutionResult execute_file(const std::string& path, const std::string& sandbox);
+ExecutionResult execute_snippet(const std::string& code, const std::string& sandbox, bool show = false);
+ExecutionResult execute_file(const std::string& path, const std::string& sandbox, bool show = false);
 
-} // namespace idapython
-} // namespace idasql
+}
+}

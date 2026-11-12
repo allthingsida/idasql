@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_bookmarks.hpp - `bookmarks` table (marked locations + descriptions).
- */
-
 #pragma once
 
 #include "core_common.hpp"
@@ -28,5 +24,5 @@ void collect_bookmark_rows(std::vector<BookmarkRow> &rows);
 
 CachedTableDef<BookmarkRow> define_bookmarks();
 
-} // namespace symbols
-} // namespace idasql
+}
+}

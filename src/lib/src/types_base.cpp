@@ -11,21 +11,9 @@ namespace types {
 
 namespace {
 
-// ---------------------------------------------------------------------------
-// Shared single-type rendering (the expensive path)
-// ---------------------------------------------------------------------------
-//
-// Filling a TypeEntry from an ordinal is cheap for identity (ordinal/name) but
-// expensive for `definition` (tinfo_t::print renders the full C type). This is
-// the one place that does the expensive render, reused by the full-scan builder
-// (collect_types) and by the pushdown iterators so they render only the rows
-// that survive a filter. Folder/full_path are NOT set here (the caller supplies
-// them -- bulk via a prebuilt map, single-row via find_inode_path).
-//
-// Returns false for an ordinal gap (no named type at `ord`).
 bool render_type_core(til_t* ti, uint32_t ord, TypeEntry& entry) {
     const char* name = get_numbered_type_name(ti, ord);
-    if (!name) return false;  // gap in ordinal space
+    if (!name) return false;
 
     entry.ordinal = ord;
     entry.name = name;
@@ -54,7 +42,6 @@ bool render_type_core(til_t* ti, uint32_t ord, TypeEntry& entry) {
         entry.is_fixed = tif.is_fixed_struct();
         entry.is_bitmask = tif.is_bitmask_enum();
 
-        // The expensive part: render the full definition.
         qstring def_str;
         tif.print(&def_str);
         entry.definition = def_str.c_str();
@@ -82,10 +69,6 @@ bool render_type_core(til_t* ti, uint32_t ord, TypeEntry& entry) {
     return true;
 }
 
-// Single source of truth for emitting a TypeEntry's columns by index. MUST stay
-// in lockstep with the column order declared in define_types(). The pushdown
-// iterators below use this; a drift guard test compares pushed-down rows against
-// the full-scan render to catch any divergence.
 void emit_type_column(xsql::FunctionContext& ctx, const TypeEntry& e, int col) {
     switch (col) {
         case 0:  ctx.result_int(static_cast<int>(e.ordinal)); break;
@@ -123,10 +106,6 @@ inline char ascii_lower(char c) {
     return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
 }
 
-// Extract the literal prefix of a LIKE pattern: the run of characters before the
-// first wildcard (`%`/`_`) or escape (`\`). Stopping early always yields a valid
-// SUPERSET prefix (correctness is guaranteed by SQLite re-applying the real LIKE,
-// since the constraint is not omitted). An empty result means "match all".
 std::string extract_like_prefix(const std::string& pattern) {
     std::string out;
     for (char c : pattern) {
@@ -136,9 +115,6 @@ std::string extract_like_prefix(const std::string& pattern) {
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// Exact ordinal / name pushdown -- render exactly one type
-// ---------------------------------------------------------------------------
 class TypeByKeyIterator : public xsql::RowIterator {
 public:
     explicit TypeByKeyIterator(uint32_t ordinal) {
@@ -148,7 +124,7 @@ public:
     explicit TypeByKeyIterator(const std::string& name) {
         til_t* ti = get_idati();
         if (!ti || name.empty()) return;
-        uint32 ord = get_type_ordinal(ti, name.c_str());  // O(1) hash lookup
+        uint32 ord = get_type_ordinal(ti, name.c_str());
         if (ord != 0) resolve(ti, ord);
     }
 
@@ -181,9 +157,6 @@ private:
     bool positioned_ = false;
 };
 
-// ---------------------------------------------------------------------------
-// Prefix (LIKE 'prefix%') pushdown -- walk cheap names, render hits only
-// ---------------------------------------------------------------------------
 class TypePrefixIterator : public xsql::RowIterator {
 public:
     explicit TypePrefixIterator(const std::string& pattern)
@@ -205,10 +178,9 @@ public:
                 return false;
             }
             const char* name = get_numbered_type_name(ti_, ord);
-            if (!name) continue;            // gap
+            if (!name) continue;
             if (!prefix_matches(name)) continue;
 
-            // Render only on a prefix hit -- this is the whole optimization.
             TypeEntry e{};
             if (!render_type_core(ti_, ord, e)) continue;
             fill_folder_path(ord, e);
@@ -228,9 +200,6 @@ public:
     int64_t rowid() const override { return entry_.ordinal; }
 
 private:
-    // Case-insensitive prefix compare -- a superset of LIKE's default
-    // case-insensitivity (SQLite re-applies the exact pattern). Empty prefix
-    // (leading-wildcard pattern) matches everything.
     bool prefix_matches(const char* name) const {
         for (size_t i = 0; i < prefix_.size(); ++i) {
             char c = name[i];
@@ -243,12 +212,12 @@ private:
     std::string prefix_;
     til_t* ti_ = nullptr;
     uint32_t max_ord_ = 0;
-    uint32_t cur_ord_ = 1;   // ordinals start at 1
+    uint32_t cur_ord_ = 1;
     TypeEntry entry_{};
     bool positioned_ = false;
 };
 
-}  // namespace
+}
 
 void collect_types(std::vector<TypeEntry>& rows) {
     rows.clear();
@@ -263,17 +232,13 @@ void collect_types(std::vector<TypeEntry>& rows) {
 
     uint32_t scanned = 0;
     for (uint32_t ord = 1; ord < max_ord; ++ord) {
-        // Cooperative cancellation -- a full type render can take tens of
-        // seconds on a large IDB; the SQLite progress handler cannot interrupt
-        // this C++ loop, so poll the query deadline and bail cleanly. The caller
-        // clears the partially-built cache when a vtab error is set.
         if (((++scanned) & 1023u) == 0 && xsql::vtab_interrupted()) {
             xsql::set_vtab_error("query interrupted: timeout while building types");
             return;
         }
 
         TypeEntry entry;
-        if (!render_type_core(ti, ord, entry)) continue;  // gap
+        if (!render_type_core(ti, ord, entry)) continue;
 
         auto path_it = folder_paths.find(static_cast<uint64_t>(ord));
         if (path_it != folder_paths.end()) {
@@ -284,10 +249,6 @@ void collect_types(std::vector<TypeEntry>& rows) {
         rows.push_back(std::move(entry));
     }
 }
-
-// ============================================================================
-// TYPES Table - All local types (enhanced)
-// ============================================================================
 
 CachedTableDef<TypeEntry> define_types() {
     return cached_table<TypeEntry>("types")
@@ -336,7 +297,6 @@ CachedTableDef<TypeEntry> define_types() {
         .column_text("kind", [](const TypeEntry& row) -> std::string {
             return row.kind;
         })
-        // Writable size pins a FIXED struct's total size (set_struct_size).
         .column_int64_rw("size",
             [](const TypeEntry& row) -> int64_t {
                 return row.size;
@@ -353,9 +313,6 @@ CachedTableDef<TypeEntry> define_types() {
                     xsql::set_vtab_error("types: ordinal " + std::to_string(row.ordinal) + " not found");
                     return false;
                 }
-                // For an enum, `size` sets its storage width (set_nbytes).
-                // Rebuild via enum_type_data_t -- preserves members and the bitmask
-                // flag (carried in `bte`).
                 if (tif.is_enum()) {
                     enum_type_data_t ei;
                     if (!tif.get_enum_details(&ei)) {
@@ -447,9 +404,6 @@ CachedTableDef<TypeEntry> define_types() {
         .column_text("full_path", [](const TypeEntry& row) -> std::string {
             return row.full_path;
         })
-        // Writable fixed-layout flag. ON freezes member offsets
-        // (set_fixed_struct) so deletes leave gaps and explicit offsets stick; OFF
-        // returns the struct to auto-layout (IDA repacks/recomputes -- may shrink).
         .column_int_rw("is_fixed",
             [](const TypeEntry& row) -> int {
                 return row.is_fixed ? 1 : 0;
@@ -474,9 +428,6 @@ CachedTableDef<TypeEntry> define_types() {
                 row.is_fixed = (on != 0);
                 return true;
             })
-        // Writable bitmask-enum flag. ON marks the enum as a bitmask (its
-        // members are bit flags; combined operand values render as OR'd flags);
-        // OFF reverts to an ordinary ordinal enum. Set the width via `size`.
         .column_int_rw("is_bitmask",
             [](const TypeEntry& row) -> int {
                 return row.is_bitmask ? 1 : 0;
@@ -502,22 +453,17 @@ CachedTableDef<TypeEntry> define_types() {
                 row.is_bitmask = (on != 0);
                 return true;
             })
-        // Pushdown so exact and prefix lookups don't render every type.
-        // Exact ordinal/name resolve+render one row; prefix walks cheap names and
-        // renders only matches (the SDK has no sorted/prefix index -- the win is
-        // skipping tinfo_t::print() for non-matches, which is the real cost).
-        // Registered AFTER the columns so filter_eq can resolve the column index.
         .filter_eq("ordinal",
             [](int64_t ord) -> std::unique_ptr<xsql::RowIterator> {
-                // Type ordinals are uint32; reject anything out of range rather
-                // than truncating (e.g. 4294967297 -> 1 would return ordinal-1).
-                // Ordinal 0 is always a gap, so the iterator resolves no row.
                 if (ord <= 0 || ord > static_cast<int64_t>(UINT32_MAX))
                     return std::make_unique<TypeByKeyIterator>(0u);
                 return std::make_unique<TypeByKeyIterator>(static_cast<uint32_t>(ord));
             }, 1.0, 1.0)
         .filter_eq_text("name",
-            [](const char* name) -> std::unique_ptr<xsql::RowIterator> {
+            [](const auto& value) -> std::unique_ptr<xsql::RowIterator> {
+                const std::string full_name(value);
+                if (full_name.find('\0') != std::string::npos) return nullptr;
+                const char* name = full_name.c_str();
                 return std::make_unique<TypeByKeyIterator>(name ? std::string(name)
                                                                 : std::string());
             }, 1.0, 1.0)
@@ -525,16 +471,10 @@ CachedTableDef<TypeEntry> define_types() {
             [](const std::string& pattern) -> std::unique_ptr<xsql::RowIterator> {
                 return std::make_unique<TypePrefixIterator>(pattern);
             }, 50.0, 20.0)
-        // The table's stable rowid is the type ordinal. The pushdown iterators
-        // report it; rowid() makes the full-scan/index cursors agree; row_lookup()
-        // reconstructs a row from it so UPDATE/DELETE resolve the exact type
-        // regardless of whether the plan used a filter or a full scan.
         .rowid([](const TypeEntry& row) -> int64_t {
             return static_cast<int64_t>(row.ordinal);
         })
         .row_lookup([](TypeEntry& row, int64_t rowid) -> bool {
-            // Type ordinals are uint32; reject anything that would truncate when
-            // narrowed (a rowid > UINT32_MAX would silently alias a real ordinal).
             if (rowid <= 0 || rowid > static_cast<int64_t>(UINT32_MAX)) return false;
             til_t* ti = get_idati();
             if (!ti) return false;
@@ -560,7 +500,6 @@ CachedTableDef<TypeEntry> define_types() {
                 return false;
             }
 
-            // kind (col 2): defaults to "struct"
             std::string kind = "struct";
             if (argc > 2 && !argv[2].is_null()) {
                 const char* k = argv[2].as_c_str();
@@ -573,16 +512,12 @@ CachedTableDef<TypeEntry> define_types() {
                 return false;
             }
 
-            // Check if type with this name already exists
             if (get_type_ordinal(ti, name) != 0) {
                 xsql::set_vtab_error("types: a type named '" + std::string(name) +
                                      "' already exists");
                 return false;
             }
 
-            // Build the tinfo BEFORE allocating an ordinal so an invalid kind (or
-            // any other pre-alloc failure) does not permanently leak an empty
-            // ordinal as a forever gap in the ordinal space.
             tinfo_t tif;
             if (kind == "struct") {
                 udt_type_data_t udt;
@@ -618,9 +553,5 @@ CachedTableDef<TypeEntry> define_types() {
         .build();
 }
 
-// ============================================================================
-// APPLIED_TYPES Table - Type bindings at addresses
-// ============================================================================
-
-} // namespace types
-} // namespace idasql
+}
+}

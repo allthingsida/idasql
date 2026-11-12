@@ -26,10 +26,6 @@ bool is_mapped_address(ea_t ea) {
     return ea != BADADDR && is_mapped(ea);
 }
 
-// Yields the typed heads of an addr window in SQL order (core::HeadSpanWalker):
-// an address >= 2^63 is a negative INTEGER, so with ORDER BY addr the high half
-// comes first. `addr = X` also yields an untyped mapped X (the row an INSERT or
-// UPDATE targets).
 class AppliedTypesGenerator : public xsql::Generator<AppliedTypeEntry> {
     core::HeadSpanWalker walker_;
     std::optional<ea_t> point_;
@@ -67,11 +63,6 @@ public:
     int64_t rowid() const override { return static_cast<int64_t>(row_.ea); }
 };
 
-// Narrow `range` by one addr constraint. The plan is omit=1, so a number (or
-// NULL, or a blob) compares the way SQLite compares the INTEGER addr column:
-// `addr >= 4096.5` keeps 4097 and up, `addr = NULL` keeps nothing. Text is
-// the documented address spelling -- a numeric or '0x...' string, or a symbol
-// name -- resolved to its address first; an unresolvable name is an error.
 bool constrain_applied_type_addr(
         xsql::Int64KeyRange& range,
         const xsql::GeneratorConstraintArg& arg,
@@ -109,7 +100,7 @@ make_applied_types_generator(
             return nullptr;
         }
     }
-    if (range.empty()) return nullptr;  // no address satisfies the constraints
+    if (range.empty()) return nullptr;
     return std::make_unique<AppliedTypesGenerator>(order, range, include_untyped_point);
 }
 
@@ -158,7 +149,7 @@ bool applied_type_name(ea_t ea, qstring& out) {
     return tif.get_type_name(&out) && !out.empty();
 }
 
-} // namespace
+}
 
 GeneratorTableDef<AppliedTypeEntry> define_applied_types() {
     return generator_table<AppliedTypeEntry>("applied_types")
@@ -260,5 +251,5 @@ GeneratorTableDef<AppliedTypeEntry> define_applied_types() {
         .build();
 }
 
-} // namespace types
-} // namespace idasql
+}
+}

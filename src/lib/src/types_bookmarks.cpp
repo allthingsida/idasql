@@ -10,7 +10,6 @@
 #include <limits>
 #include <optional>
 
-// "9.2.250908 ..." -> 9, 2.
 static bool parse_major_minor(const char* text, long& major, long& minor) {
     char* end = nullptr;
     major = std::strtol(text, &end, 10);
@@ -23,13 +22,6 @@ static bool parse_major_minor(const char* text, long& major, long& minor) {
 namespace idasql {
 namespace types {
 
-// Build a lochist_entry_t anchored at a local-type ordinal WITHOUT constructing
-// tiplace_t directly: its place_t virtuals (get_kind, calc_udm_offset, ...) are
-// GUI-side and not exported to idalib, so a direct `tiplace_t x;` fails to link.
-// Instead clone the kernel-registered place-class template (valid vtable) and
-// set the ordinal via plain member access (no vtable use).
-// Sentinel for "this store bookmark has no DIRTREE_LTYPES_BOOKMARKS leaf yet"
-// (a real dirtree inode can legitimately be 0, so 0 cannot mean "none").
 static constexpr uint64_t kNoLeafInode = ~uint64_t(0);
 
 static lochist_entry_t& owned_ltype_place_template() {
@@ -42,22 +34,16 @@ void reset_local_type_bookmark_place_cache() {
 }
 
 static lochist_entry_t make_ltype_loc(uint32_t ordinal) {
-    // Keep a long-lived OWNED clone of the place-class template -- never cache the raw
-    // template pointer. get_place_class_template(TCCPT_TIPLACE) can free the registry
-    // template after a decompile + cache invalidation, so a cached raw pointer would
-    // dangle; lochist_entry_t deep-clones and owns its place, surviving such reshuffles.
-    // Safe as a function-local static: queries run serialized on the main thread.
     lochist_entry_t& owned = owned_ltype_place_template();
     if (owned.place() == nullptr) {
         const place_t* tmpl = get_place_class_template(TCCPT_TIPLACE);
         if (tmpl != nullptr) {
             renderer_info_t rinfo;
-            owned = lochist_entry_t(tmpl, rinfo);  // deep clone, owned
+            owned = lochist_entry_t(tmpl, rinfo);
         }
     }
 
     renderer_info_t rinfo;
-    // Clone from the owned template (stable) or stay empty if never captured.
     lochist_entry_t loc(owned.place(), rinfo);
     if (loc.place() != nullptr) {
         tiplace_t* tp = static_cast<tiplace_t*>(loc.place());
@@ -71,18 +57,11 @@ void collect_local_type_bookmark_rows(std::vector<LocalTypeBookmarkRow>& rows) {
     rows.clear();
     til_t* ti = get_idati();
 
-    // The bookmarks_t store is the source of truth: bookmarks_t::mark() does not
-    // auto-link a DIRTREE_LTYPES_BOOKMARKS leaf for a tiplace the way it does for
-    // an EA-capable idaplace bookmark, so a dirtree-only scan misses store
-    // bookmarks that have no leaf. Enumerate the store (slot 0..size) for the
-    // ordinal/description, and overlay folder_path from the dirtree for the
-    // bookmarks that do have a leaf (organized into folders).
     lochist_entry_t probe = make_ltype_loc(0);
     if (probe.place() == nullptr)
-        return;  // tiplace place class unavailable in this runtime
+        return;
     const uint32_t n = bookmarks_t::size(probe, nullptr);
 
-    // dirtree leaf -> bookmark slot, so we can attach folder_path/inode.
     auto inode_paths = dirtrees::collect_inode_paths(DIRTREE_LTYPES_BOOKMARKS);
     std::unordered_map<uint32_t, std::pair<uint64_t, dirtrees::DirtreePathInfo>>
         slot_folder;
@@ -114,20 +93,17 @@ void collect_local_type_bookmark_rows(std::vector<LocalTypeBookmarkRow>& rows) {
 
         auto it = slot_folder.find(slot);
         if (it != slot_folder.end()) {
-            row.inode = it->second.first;  // real dirtree inode (may legitimately be 0)
+            row.inode = it->second.first;
             row.folder_path = it->second.second.folder_path;
             row.full_path = it->second.second.full_path;
         } else {
-            row.inode = kNoLeafInode;  // not linked into the dirtree yet
+            row.inode = kNoLeafInode;
         }
         rows.push_back(std::move(row));
     }
 }
 
 CachedTableDef<LocalTypeBookmarkRow> define_local_type_bookmarks() {
-    // Prime the tiplace place-class template cache at registration time (the
-    // first QueryEngine init, before any Hex-Rays/pseudocode work can reshuffle
-    // the place-class registry and make get_place_class_template return null).
     (void)make_ltype_loc(0);
     return cached_table<LocalTypeBookmarkRow>("local_type_bookmarks")
         .no_shared_cache()
@@ -190,9 +166,6 @@ CachedTableDef<LocalTypeBookmarkRow> define_local_type_bookmarks() {
                 return row.folder_path;
             },
             [](LocalTypeBookmarkRow& row, xsql::FunctionArg value) -> bool {
-                // SQLite calls every writable setter on any UPDATE, so treat a
-                // no-change folder as a no-op (lets `UPDATE ... SET description`
-                // succeed without touching the folder).
                 const std::string want =
                     value.is_null()
                         ? std::string()
@@ -201,12 +174,6 @@ CachedTableDef<LocalTypeBookmarkRow> define_local_type_bookmarks() {
                 if (want == row.folder_path)
                     return true;
                 if (row.inode == kNoLeafInode) {
-                    // Not yet linked into DIRTREE_LTYPES_BOOKMARKS. mark() does
-                    // not auto-link a tiplace leaf (unlike EA-capable idaplace);
-                    // the leaf CAN be linked headless via dirtree_t::link, but
-                    // reliably mapping a store slot back to its inode is an open
-                    // item, so folder moves currently
-                    // require an already-linked bookmark.
                     if (want.empty())
                         return true;
                     xsql::set_vtab_error(
@@ -243,12 +210,10 @@ CachedTableDef<LocalTypeBookmarkRow> define_local_type_bookmarks() {
             return ok;
         })
         .insertable([](int argc, xsql::FunctionArg* argv) -> bool {
-            // columns: slot(0), ordinal(1), type_name(2), description(3), ...
             if (argc < 2 || argv[1].is_null()) {
                 xsql::set_vtab_error("local_type_bookmarks: ordinal is required");
                 return false;
             }
-            // Exact, never truncated: 4294967297 is not ordinal 1.
             const std::optional<int64_t> ord = xsql::exact_int64(argv[1]);
             if (!ord || *ord < 1 || *ord > static_cast<int64_t>((std::numeric_limits<uint32_t>::max)())) {
                 xsql::set_vtab_error(
@@ -273,11 +238,6 @@ CachedTableDef<LocalTypeBookmarkRow> define_local_type_bookmarks() {
                     desc = "";
             }
 
-            // IDA 9.2's idalib crashes inside bookmarks_t::mark() for a
-            // local-type place (reproduced with plain IDAPython on any
-            // database; 9.1 and 9.4 create it). Refuse instead of crashing.
-            // Checked against the running kernel, not the SDK: a plugin built
-            // with another 9.x SDK still loads into a 9.2 idalib.
             if (!is_idaq()) {
                 char ver[32] = {};
                 get_kernel_version(ver, sizeof(ver));
@@ -316,9 +276,5 @@ CachedTableDef<LocalTypeBookmarkRow> define_local_type_bookmarks() {
         .build();
 }
 
-// ============================================================================
-// TYPES_MEMBERS Table - Struct/union field details
-// ============================================================================
-
-} // namespace types
-} // namespace idasql
+}
+}

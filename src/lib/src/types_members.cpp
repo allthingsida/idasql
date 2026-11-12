@@ -6,7 +6,7 @@
 
 #include "types_members.hpp"
 
-#include "types_gaps.hpp" // range_overlaps_member (fixed-layout insert guard)
+#include "types_gaps.hpp"
 #include "address_resolution.hpp"
 
 #include <climits>
@@ -30,11 +30,6 @@ std::string trim_copy(std::string value) {
     }
     return std::string(first, last);
 }
-
-// make_type_declarator() / parse_type_declarator() are array-aware type-string
-// parsers shared with the lvar-type setter (decompiler_ctree.cpp). They are defined
-// just below in the named idasql::types namespace so other TUs can link them;
-// see types_members.hpp.  trim_copy() above remains file-local (same TU).
 
 uint64_t type_size_bits(const tinfo_t& tif) {
     const size_t size = tif.get_size();
@@ -75,12 +70,6 @@ bool parse_nonnegative_int64(xsql::FunctionArg arg, const char* column, int64_t&
     return true;
 }
 
-// Relocate a single member to `new_bits`, leaving its old slot as a gap and
-// absorbing free space at the destination — the same gap model the fixed-layout
-// INSERT path uses. It does NOT shift neighboring members or resize the struct
-// (the old expand_udt approach inserted/removed bytes and moved every following
-// member). The destination must be free space; a move onto another real member
-// is rejected up front.
 bool move_member_offset(TypeMemberRef& ref, const MemberEntry& row, int idx, uint64_t new_bits) {
     if (new_bits == static_cast<uint64_t>(row.offset_bits)) {
         return true;
@@ -100,25 +89,15 @@ bool move_member_offset(TypeMemberRef& ref, const MemberEntry& row, int idx, uin
         return false;
     }
 
-    // Capture the member's full descriptor before any mutation so it can be
-    // re-created verbatim (name/type/comment/flags) at the new offset.
     if (idx < 0 || static_cast<size_t>(idx) >= ref.udt.size()) {
         xsql::set_vtab_error("types_members: member index out of range (" + member_context(row) + ")");
         return false;
     }
     const udm_t moved = ref.udt[idx];
-    // Anchor the exclusion window on the LIVE descriptor offset, not row.offset_bits:
-    // with the query-scoped mutation snapshot `row` is the pre-mutation copy, so its
-    // offset can lag the member's current offset after an earlier row in the same
-    // multi-row statement shifted the layout. moved.offset is always the live slot.
     const uint64_t old_bits = static_cast<uint64_t>(moved.offset);
     const uint64_t size_bits = moved.size;
     const uint64_t end_bits = new_bits + size_bits;
 
-    // The destination must land in free space (a gap or trailing space), never on
-    // another real member. Exclude the member's OWN current range from the check
-    // (its slot becomes a gap once it moves), so a small move into adjacent free
-    // space is allowed while a move onto an occupied offset is rejected.
     auto overlaps_other = [&](uint64_t lo, uint64_t hi) -> bool {
         if (hi <= old_bits || lo >= old_bits + size_bits) {
             return range_overlaps_member(ref.ordinal, lo, hi);
@@ -139,8 +118,6 @@ bool move_member_offset(TypeMemberRef& ref, const MemberEntry& row, int idx, uin
         return false;
     }
 
-    // Freeze sibling offsets so del_udm leaves a gap at the old slot rather than
-    // repacking, and add_udm can absorb the destination gap.
     const tinfo_code_t fixed_code = ref.tif.set_fixed_struct(true);
     if (fixed_code != TERR_OK) {
         xsql::set_vtab_error("types_members: failed to make struct layout fixed (" +
@@ -161,10 +138,6 @@ bool move_member_offset(TypeMemberRef& ref, const MemberEntry& row, int idx, uin
     placed.offset = new_bits;
     const tinfo_code_t add_code = idasql_udt_add_udm(ref.tif, placed, ETF_MAY_DESTROY, 1, -1);
     if (add_code != TERR_OK) {
-        // Roll back: re-create the member at its original offset so the struct is
-        // never left missing the field. Verify the rollback actually succeeded --
-        // if it did not, the member is genuinely lost and we must say so rather
-        // than report a plain "move failed".
         udm_t restore = moved;
         restore.offset = old_bits;
         const tinfo_code_t restore_code = idasql_udt_add_udm(ref.tif, restore, ETF_MAY_DESTROY, 1, -1);
@@ -176,7 +149,6 @@ bool move_member_offset(TypeMemberRef& ref, const MemberEntry& row, int idx, uin
                 ", rollback code=" + type_error_text(restore_code) + ")");
             return false;
         }
-        // Best-effort size pin (see note on the success path below).
         if (old_size != BADSIZE && ref.tif.get_size() != old_size) {
             ref.tif.set_struct_size(old_size);
         }
@@ -185,25 +157,14 @@ bool move_member_offset(TypeMemberRef& ref, const MemberEntry& row, int idx, uin
         return false;
     }
 
-    // Best-effort: pin the fixed struct's total size back to old_size after the
-    // move. set_struct_size only re-pins it when the move changed the natural
-    // size, and it legitimately returns non-OK when the new natural size must
-    // stand (e.g. the member relocated into trailing space) -- so its failure is
-    // expected here and not an error. The member-survival guarantee is enforced by
-    // the rollback check above, not by this size pin.
     if (old_size != BADSIZE && ref.tif.get_size() != old_size) {
         ref.tif.set_struct_size(old_size);
     }
     return true;
 }
 
-} // namespace
+}
 
-// Build a parseable C declaration from a (possibly array-bearing) type string by
-// extracting any trailing `[N]...` declarator suffix and re-attaching it AFTER a
-// synthesized variable name -- e.g. "WCHAR[6]" -> "WCHAR __idasql_var[6];".  A
-// naive "<type> __x;" format is invalid C for array types ("WCHAR[6] __x;"),
-// which is exactly the bug this avoids.  Returns "" when no base type remains.
 std::string make_type_declarator(const std::string& type_text, const char* var_name) {
     std::string base = trim_copy(type_text);
     std::string array_suffixes;
@@ -242,11 +203,6 @@ std::string make_type_declarator(const std::string& type_text, const char* var_n
     return base + " " + var_name + array_suffixes + ";";
 }
 
-// Parse a bare type / declarator string (scalars, pointers, arrays, named types)
-// into a tinfo_t.  Two-tier: first try the synthesized declaration via parse_decl
-// (handles arrays and complex declarators), then fall back to tinfo_t::parse in
-// type-only mode (handles bare/named types).  Shared by the types_members
-// member_type setter and the ctree_lvars type setter.
 bool parse_type_declarator(const std::string& type_text, tinfo_t& out_type, std::string& error,
                            const char* what) {
     const std::string label = (what && what[0]) ? what : "type";
@@ -261,10 +217,6 @@ bool parse_type_declarator(const std::string& type_text, tinfo_t& out_type, std:
     const std::string decl = make_type_declarator(trimmed);
     if (decl.empty()
         || !parse_decl(&parsed_type, &parsed_name, nullptr, decl.c_str(), PT_SIL | PT_VAR)) {
-        // Terminate the type with ';': IDA 9.0 and 9.1 reject every PT_TYP string
-        // without it (even "int"), while 9.0 through 9.4 all accept it with it --
-        // which is what makes abstract declarators such as "int (*)(int)" and
-        // "int (*)[4]" (no name to synthesize) parse on every version.
         const std::string type_only = trimmed.back() == ';' ? trimmed : trimmed + ";";
         tinfo_t fallback_type;
         if (!fallback_type.parse(type_only.c_str(), nullptr, PT_SIL | PT_TYP)) {
@@ -289,8 +241,6 @@ bool parse_type_declarator(const std::string& type_text, tinfo_t& out_type, std:
     return true;
 }
 
-// Resolve the live UDT index for a cached member row; returns -1 (with `error`
-// set) when the cached member can no longer be matched by name.
 int resolve_member_index(const TypeMemberRef& ref, const MemberEntry& row, std::string& error) {
     if (!ref.valid) {
         error = "types_members: type not found (" + member_context(row) + ")";
@@ -318,10 +268,6 @@ int resolve_member_index(const TypeMemberRef& ref, const MemberEntry& row, std::
         return found;
     }
 
-    // No member matches the cached name. Do NOT fall back to the cached index:
-    // after a layout change that slot may hold a *different* member, and a
-    // rename/retype/offset edit or DELETE would then silently mutate the wrong
-    // field. Fail loudly instead so the caller can re-read the row.
     error = "types_members: member '" + row.member_name + "' no longer exists at its "
             "cached position (layout changed?); re-query types_members (" +
             member_context(row) + ")";
@@ -344,7 +290,6 @@ void classify_member_type(const tinfo_t& mtype, til_t* ti,
     is_array = mtype.is_array();
     type_ordinal = -1;
 
-    // Get the base type (dereference pointers/arrays to find underlying type)
     tinfo_t base_type = mtype;
     if (mtype.is_ptr()) {
         base_type = mtype.get_pointed_object();
@@ -352,12 +297,10 @@ void classify_member_type(const tinfo_t& mtype, til_t* ti,
         base_type = mtype.get_array_element();
     }
 
-    // Classify the base type
     is_struct = base_type.is_struct();
     is_union = base_type.is_union();
     is_enum = base_type.is_enum();
 
-    // Try to get ordinal of the base type
     qstring type_name;
     if (base_type.get_type_name(&type_name) && !type_name.empty()) {
         type_ordinal = get_type_ordinal_by_name(ti, type_name.c_str());
@@ -375,7 +318,7 @@ void collect_members(std::vector<MemberEntry>& rows) {
 
     for (uint32_t ord = 1; ord < max_ord; ++ord) {
         const char* name = get_numbered_type_name(ti, ord);
-        if (!name) continue;  // Skip gaps in ordinal space
+        if (!name) continue;
 
         tinfo_t tif;
         if (tif.get_numbered_type(ti, ord)) {
@@ -402,7 +345,6 @@ void collect_members(std::vector<MemberEntry>& rows) {
                         m.type.print(&type_str);
                         entry.member_type = type_str.c_str();
 
-                        // Classify member type
                         classify_member_type(m.type, ti,
                             entry.mt_is_struct, entry.mt_is_union, entry.mt_is_enum,
                             entry.mt_is_ptr, entry.mt_is_array, entry.member_type_ordinal);
@@ -414,10 +356,6 @@ void collect_members(std::vector<MemberEntry>& rows) {
         }
     }
 }
-
-// ============================================================================
-// MembersInTypeIterator
-// ============================================================================
 
 MembersInTypeIterator::MembersInTypeIterator(uint32_t ordinal) : type_ordinal_(ordinal) {
     til_t* ti = get_idati();
@@ -470,9 +408,7 @@ void MembersInTypeIterator::column(xsql::FunctionContext& ctx, int col) {
         case 9: ctx.result_int(m.is_bitfield() ? 1 : 0); break;
         case 10: ctx.result_int(m.is_baseclass() ? 1 : 0); break;
         case 11: ctx.result_text(m.cmt.c_str()); break;
-        // Member type classification columns
         case 12: case 13: case 14: case 15: case 16: case 17: {
-            // Classify the member type on-the-fly for iterator
             bool mt_is_struct, mt_is_union, mt_is_enum, mt_is_ptr, mt_is_array;
             int mt_ordinal;
             classify_member_type(m.type, get_idati(),
@@ -497,10 +433,6 @@ int64_t MembersInTypeIterator::rowid() const {
     return pack_type_rowid(type_ordinal_, static_cast<int>(idx_));
 }
 
-// ============================================================================
-// TypeMemberRef
-// ============================================================================
-
 TypeMemberRef::TypeMemberRef(uint32_t ord) : valid(false), ordinal(ord) {
     til_t* ti = get_idati();
     if (!ti) return;
@@ -510,10 +442,6 @@ TypeMemberRef::TypeMemberRef(uint32_t ord) : valid(false), ordinal(ord) {
         }
     }
 }
-
-// ============================================================================
-// build_member_entry
-// ============================================================================
 
 bool build_member_entry(uint32_t ordinal, int member_index, MemberEntry& entry) {
     til_t* ti = get_idati();
@@ -554,10 +482,6 @@ bool build_member_entry(uint32_t ordinal, int member_index, MemberEntry& entry) 
     return true;
 }
 
-// ============================================================================
-// TYPES_MEMBERS Table Definition
-// ============================================================================
-
 CachedTableDef<MemberEntry> define_types_members() {
     return cached_table<MemberEntry>("types_members")
         .no_shared_cache()
@@ -572,11 +496,6 @@ CachedTableDef<MemberEntry> define_types_members() {
             if (argc > 2 && !argv[2].is_null()) row.type_ordinal = static_cast<uint32_t>(argv[2].as_int());
             if (argc > 4 && !argv[4].is_null()) row.member_index = argv[4].as_int();
         })
-        // Stable rowid = pack_type_rowid(type_ordinal, member_index), matching the
-        // iterator (MembersInTypeIterator::rowid) and row_lookup below. The
-        // full-scan/index cursors and the filtered iterators MUST agree or an
-        // unfiltered UPDATE/DELETE reconstructs the wrong member. See the packing
-        // note in types_common.hpp.
         .rowid([](const MemberEntry& row) -> int64_t {
             return pack_type_rowid(row.type_ordinal, row.member_index);
         })
@@ -586,13 +505,6 @@ CachedTableDef<MemberEntry> define_types_members() {
             if (!unpack_type_rowid(rowid, ordinal, member_index)) return false;
             return build_member_entry(ordinal, member_index, row);
         })
-        // The packed (ordinal, member_index) rowid encodes a SHIFTING identity:
-        // add_udm keeps udms offset-sorted, so once a multi-row UPDATE/DELETE moves
-        // or erases one member the remaining scan rowids no longer map to their
-        // members via LIVE row_lookup. Opt into the pre-mutation snapshot so each
-        // rowid resolves to its scan-time row; the setters/DELETE then re-resolve
-        // the live member by name (resolve_member_index), failing loudly if it was
-        // renamed within the same statement.
         .snapshot_mutations()
         .column_int("type_ordinal", [](const MemberEntry& row) -> int {
             return static_cast<int>(row.type_ordinal);
@@ -664,9 +576,6 @@ CachedTableDef<MemberEntry> define_types_members() {
                     row.offset = new_offset;
                     row.offset_bits = new_bits;
                 }
-                // On failure move_member_offset has already set a specific,
-                // actionable error (union/alignment/overflow/IDA code); do not
-                // clobber it with a generic "failed to save" message.
                 return ok;
             })
         .column_int64_rw("offset_bits",
@@ -695,9 +604,6 @@ CachedTableDef<MemberEntry> define_types_members() {
                     row.offset_bits = new_bits;
                     row.offset = new_bits / 8;
                 }
-                // On failure move_member_offset has already set a specific,
-                // actionable error (union/alignment/overflow/IDA code); do not
-                // clobber it with a generic "failed to save" message.
                 return ok;
             })
         .column_int64("size", [](const MemberEntry& row) -> int64_t {
@@ -800,8 +706,6 @@ CachedTableDef<MemberEntry> define_types_members() {
         .column_int("member_type_ordinal", [](const MemberEntry& row) -> int {
             return row.member_type_ordinal;
         })
-        // Flags an IDA gap member (TAFLD_GAP) -- placeholder space in a
-        // fixed-layout struct that a real field can be inserted into.
         .column_int("is_gap", [](const MemberEntry& row) -> int {
             return row.is_gap ? 1 : 0;
         })
@@ -813,10 +717,6 @@ CachedTableDef<MemberEntry> define_types_members() {
                 xsql::set_vtab_error(error);
                 return false;
             }
-            // Mode-driven delete: on a FIXED struct del_udm leaves the slot as a
-            // gap (offsets frozen); on an auto struct it collapses and the struct
-            // repacks/shrinks (IDA-native). Capture size to hold a fixed struct's
-            // total even if IDA trims the trailing unpadded size.
             const bool fixed = !ref.tif.is_union() && ref.tif.is_fixed_struct();
             const size_t old_size = ref.tif.get_size();
 
@@ -826,9 +726,6 @@ CachedTableDef<MemberEntry> define_types_members() {
                                       member_context(row) + ", code=" + type_error_text(code) + ")");
                 return false;
             }
-            // Best-effort: pin a fixed struct's total size after the delete.
-            // set_struct_size legitimately returns non-OK when the natural size
-            // must stand, so its failure is not an error here.
             if (fixed && old_size != BADSIZE && ref.tif.get_size() != old_size) {
                 ref.tif.set_struct_size(old_size);
             }
@@ -855,7 +752,6 @@ CachedTableDef<MemberEntry> define_types_members() {
                                       std::to_string(ordinal));
                 return false;
             }
-
 
             std::string type_str = "int";
             if (argc > 8 && !argv[8].is_null()) {
@@ -897,15 +793,6 @@ CachedTableDef<MemberEntry> define_types_members() {
                 }
             }
 
-            // NOTE: unlike the move/UPDATE path, INSERT deliberately accepts a
-            // mid-byte offset_bits: the fixed-layout overlap guard below is
-            // bit-accurate (range_overlaps_member in bits), so a mid-byte insert
-            // that collides with a real member is rejected with an "overlaps" error,
-            // while one that lands wholly in a gap is placed. Do NOT add a byte-
-            // alignment guard here — it would defeat that bit-level detection.
-            // IDA 9.1 added the convenient udm_t(name, type, offset)
-            // constructor. Populate the stable fields directly so this write
-            // path remains source-compatible with the supported 9.0 SDK.
             udm_t new_member;
             new_member.offset = offset_bits;
             new_member.size = type_size_bits(member_type);
@@ -928,23 +815,12 @@ CachedTableDef<MemberEntry> define_types_members() {
                 insert_index = static_cast<ssize_t>(idx);
             }
 
-            // Gap absorption: on a fixed-layout struct, an explicit offset can
-            // land inside an existing gap (or trailing free space). ETF_MAY_DESTROY
-            // lets add_udm consume that free space instead of failing, while the
-            // fixed layout keeps every other member's offset frozen. But we must NOT
-            // let it destroy a *real* member: a typo'd/occupied offset would silently
-            // delete or replace an existing field. So only enable the destructive
-            // flag after confirming the requested range overlaps no real member;
-            // a range wholly inside a gap (or trailing space) is fine, an overlap
-            // with an existing member is rejected up front. The check is in *bits*:
-            // INSERT accepts offset_bits, and a byte-rounded check could miss an
-            // overlap when the new member starts mid-byte.
             const bool fixed = !ref.tif.is_union() && ref.tif.is_fixed_struct();
             uint etf_flags = 0;
             if (fixed && explicit_offset) {
                 const size_t member_bytes = member_type.get_size();
                 const uint64_t size_bits = (member_bytes == 0 || member_bytes == BADSIZE)
-                    ? 8u // unknown size: treat as one byte so the guard never under-reports
+                    ? 8u
                     : static_cast<uint64_t>(member_bytes) * 8;
                 if (range_overlaps_member(ordinal, offset_bits, offset_bits + size_bits)) {
                     xsql::set_vtab_error(
@@ -964,19 +840,12 @@ CachedTableDef<MemberEntry> define_types_members() {
                                       ", code=" + type_error_text(code) + ")");
                 return false;
             }
-            // Best-effort: pin the fixed struct's total size when the new field fit
-            // within existing space (gap absorption). If it genuinely extended the
-            // struct, set_struct_size(old_size) returns non-OK and the larger size
-            // correctly stands -- so its failure is expected, not an error.
             if (fixed && old_size != BADSIZE && ref.tif.get_size() != old_size) {
                 ref.tif.set_struct_size(old_size);
             }
             return true;
         })
         .filter_eq("type_ordinal", [](int64_t ordinal) -> std::unique_ptr<xsql::RowIterator> {
-            // Type ordinals are uint32; reject anything out of range rather than
-            // truncating (e.g. 4294967297 -> 1 would return ordinal-1's members).
-            // Ordinal 0 is always a gap, so the iterator yields no rows.
             if (ordinal <= 0 || ordinal > static_cast<int64_t>(UINT32_MAX))
                 return std::make_unique<MembersInTypeIterator>(0u);
             return std::make_unique<MembersInTypeIterator>(static_cast<uint32_t>(ordinal));
@@ -984,9 +853,5 @@ CachedTableDef<MemberEntry> define_types_members() {
         .build();
 }
 
-// ============================================================================
-// TYPES_ENUM_VALUES Table - Enum constants
-// ============================================================================
-
-} // namespace types
-} // namespace idasql
+}
+}

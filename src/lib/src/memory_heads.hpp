@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_heads.hpp - `heads` generator table (defined items) + helpers.
- */
-
 #pragma once
 
 #include "core_common.hpp"
@@ -23,5 +19,5 @@ const char *get_item_type_str(ea_t ea);
 
 GeneratorTableDef<HeadRow> define_heads();
 
-} // namespace memory
-} // namespace idasql
+}
+}

@@ -4,16 +4,12 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * idasql_version.hpp - Version constants for IDASQL
- */
-
 #pragma once
 
 #define IDASQL_VERSION_MAJOR 0
 #define IDASQL_VERSION_MINOR 0
-#define IDASQL_VERSION_PATCH 19
+#define IDASQL_VERSION_PATCH 20
 #define IDASQL_VERSION_REVISION 0
-#define IDASQL_VERSION_STRING "0.0.19"
+#define IDASQL_VERSION_STRING "0.0.20"
 
 #define IDASQL_COPYRIGHT_STRING "Copyright (c) 2024-2026 Elias Bachaalany"

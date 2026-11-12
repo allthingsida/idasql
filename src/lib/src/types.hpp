@@ -4,17 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * types.hpp - Umbrella header for the idasql::types SQL tables.
- *
- * Each table (types, applied_types, local_type_bookmarks, types_members,
- * types_enum_values, types_func_args) is declared in its own `types_<table>.hpp`
- * and implemented in the matching `types_<table>.cpp`. This header aggregates
- * them and declares the `TypesRegistry` that owns and registers every table.
- *
- * Views: types_v_structs / _unions / _enums / _typedefs / _funcs / _inheritance.
- */
-
 #pragma once
 
 #include "types_common.hpp"
@@ -30,10 +19,6 @@
 
 namespace idasql {
 namespace types {
-
-// ============================================================================
-// Types Registry
-// ============================================================================
 
 struct TypesRegistry {
   CachedTableDef<TypeEntry> types;
@@ -52,5 +37,5 @@ private:
   void create_views(xsql::Database &db);
 };
 
-} // namespace types
-} // namespace idasql
+}
+}

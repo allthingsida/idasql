@@ -48,7 +48,7 @@ int clamp_shortest_path_depth(int max_depth) {
   return max_depth;
 }
 
-} // namespace
+}
 
 void get_function_callees(ea_t func_addr, std::vector<ea_t> &callees) {
   idasql_func_item_iterator fii;
@@ -71,9 +71,6 @@ void get_function_callees(ea_t func_addr, std::vector<ea_t> &callees) {
     }
 
     xrefblk_t xb;
-    // XREF_FAR: keep call/jump code xrefs but skip ordinary fall-through flow
-    // xrefs, which would otherwise create phantom call edges. IDA 9.1 renamed
-    // this flag to XREF_NOFLOW but retains XREF_FAR as a compatibility alias.
     for (bool ok = xb.first_from(ea, XREF_FAR); ok; ok = xb.next_from()) {
       if (!xb.iscode)
         continue;
@@ -93,21 +90,12 @@ void get_function_callees(ea_t func_addr, std::vector<ea_t> &callees) {
 
 void get_function_callers(ea_t func_addr, std::vector<ea_t> &callers) {
   xrefblk_t xb;
-  // XREF_FAR is the IDA 9.0 spelling of the no-flow enumeration flag and is
-  // retained as an alias by newer SDKs.
   for (bool ok = xb.first_to(func_addr, XREF_FAR); ok; ok = xb.next_to()) {
     if (!xb.iscode)
       continue;
-    // A call in a tail shared by several functions is made by each of them, as
-    // xrefs (and the callers view) report it and as the downward walk follows
-    // tails.
     idasql_for_each_owner_of(xb.from, [&](ea_t owner) { callers.push_back(owner); });
   }
 }
-
-// ============================================================================
-// CallGraphGenerator - BFS traversal of the call graph
-// ============================================================================
 
 class CallGraphGenerator : public xsql::Generator<CallGraphRow> {
   std::vector<CallGraphRow> results_;
@@ -115,7 +103,6 @@ class CallGraphGenerator : public xsql::Generator<CallGraphRow> {
 
 public:
   CallGraphGenerator(ea_t start, const std::string &direction, int max_depth) {
-    // Validate start is a function
     const ea_t start_ea = idasql_func_start(start);
     if (start_ea == BADADDR)
       return;
@@ -124,7 +111,6 @@ public:
     bool go_up = (direction == "up" || direction == "both");
 
     std::unordered_set<ea_t> visited;
-    // queue: (func_addr, depth, parent_addr)
     std::queue<std::tuple<ea_t, int, ea_t>> queue;
 
     queue.push({start_ea, 0, BADADDR});
@@ -132,7 +118,6 @@ public:
 
     uint64_t scanned = 0;
     while (!queue.empty()) {
-      // Cooperative cancellation -- honor the query deadline on huge graphs.
       if (((++scanned) & 4095u) == 0 && xsql::vtab_interrupted()) {
         xsql::set_vtab_error(
             "query interrupted: timeout while building call_graph");
@@ -184,10 +169,6 @@ make_call_graph_generator(ea_t start, const char *direction, int max_depth) {
       start, direction ? direction : "down", clamp_call_graph_depth(max_depth));
 }
 
-// The call_graph parameters are hidden columns bound with omit=1, so each
-// takes a value only when a native column of its type would equal it: a start
-// or max_depth that no integer equals (NULL, 4096.5, 'a') and a NULL or blob
-// direction yield no rows instead of a truncated or defaulted walk.
 static std::unique_ptr<xsql::Generator<CallGraphRow>>
 call_graph_from_args(const xsql::FunctionArg &start,
                      const xsql::FunctionArg *direction,
@@ -263,10 +244,6 @@ GeneratorTableDef<CallGraphRow> define_call_graph() {
       .build();
 }
 
-// ============================================================================
-// ShortestPathGenerator - Bidirectional BFS for shortest call path
-// ============================================================================
-
 class ShortestPathGenerator : public xsql::Generator<ShortestPathRow> {
   std::vector<ShortestPathRow> results_;
   size_t pos_ = 0;
@@ -278,7 +255,6 @@ public:
     if (from_ea == BADADDR || to_ea == BADADDR)
       return;
 
-    // Same function
     if (from_ea == to_ea) {
       ShortestPathRow row;
       row.step = 0;
@@ -288,11 +264,8 @@ public:
       return;
     }
 
-    // Bidirectional BFS
-    // Forward: from_ea -> callees
-    // Backward: to_ea -> callers
-    std::unordered_map<ea_t, ea_t> forward_parent;  // node -> parent
-    std::unordered_map<ea_t, ea_t> backward_parent; // node -> parent
+    std::unordered_map<ea_t, ea_t> forward_parent;
+    std::unordered_map<ea_t, ea_t> backward_parent;
     std::queue<ea_t> forward_queue, backward_queue;
 
     forward_parent[from_ea] = BADADDR;
@@ -303,14 +276,12 @@ public:
     ea_t meeting_point = BADADDR;
 
     for (int d = 0; d < max_depth && meeting_point == BADADDR; d++) {
-      // Cooperative cancellation -- honor the query deadline on huge graphs.
       if (xsql::vtab_interrupted()) {
         xsql::set_vtab_error(
             "query interrupted: timeout while building shortest_path");
         results_.clear();
         return;
       }
-      // Expand forward frontier
       if (!forward_queue.empty()) {
         size_t fsize = forward_queue.size();
         for (size_t i = 0; i < fsize && meeting_point == BADADDR; i++) {
@@ -335,7 +306,6 @@ public:
       if (meeting_point != BADADDR)
         break;
 
-      // Expand backward frontier
       if (!backward_queue.empty()) {
         size_t bsize = backward_queue.size();
         for (size_t i = 0; i < bsize && meeting_point == BADADDR; i++) {
@@ -359,10 +329,8 @@ public:
     }
 
     if (meeting_point == BADADDR)
-      return; // No path found
+      return;
 
-    // Reconstruct path: from_ea -> ... -> meeting_point -> ... -> to_ea
-    // Forward half: trace back from meeting_point to from_ea
     std::vector<ea_t> forward_half;
     for (ea_t node = meeting_point; node != BADADDR;
          node = forward_parent[node]) {
@@ -370,14 +338,12 @@ public:
     }
     std::reverse(forward_half.begin(), forward_half.end());
 
-    // Backward half: trace from meeting_point's backward child to to_ea
     std::vector<ea_t> backward_half;
     for (ea_t node = backward_parent[meeting_point]; node != BADADDR;
          node = backward_parent[node]) {
       backward_half.push_back(node);
     }
 
-    // Build result
     int step = 0;
     for (ea_t ea : forward_half) {
       ShortestPathRow row;
@@ -413,8 +379,6 @@ make_shortest_path_generator(ea_t from_addr, ea_t to_addr, int max_depth) {
       from_addr, to_addr, clamp_shortest_path_depth(max_depth));
 }
 
-// Same contract as call_graph_from_args: from_addr, to_addr and max_depth
-// are omit=1 hidden inputs, so a value no integer equals yields no rows.
 static std::unique_ptr<xsql::Generator<ShortestPathRow>>
 shortest_path_from_args(const xsql::FunctionArg &from,
                         const xsql::FunctionArg &to,
@@ -466,9 +430,5 @@ GeneratorTableDef<ShortestPathRow> define_shortest_path() {
       .build();
 }
 
-// ============================================================================
-// CfgEdgesGenerator - Control flow graph edges per function
-// ============================================================================
-
-} // namespace code
-} // namespace idasql
+}
+}

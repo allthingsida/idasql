@@ -4,20 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * vtable_policy.hpp - Policy and configuration system for IDASQL
- *
- * This allows passing options to virtual tables via:
- *   1. Module arguments: CREATE VIRTUAL TABLE funcs USING funcs(cache=off)
- *   2. Global configuration via SQL function: SELECT idasql_config('cache', 'off')
- *   3. Per-session settings stored in a config table
- *
- * Supported policies:
- *   - cache: 'on'|'off' - Enable/disable result caching
- *   - undo: 'on'|'off' - Create undo points for modifications
- *   - batch: 'on'|'off' - Batch multiple operations into one undo point
- */
-
 #pragma once
 
 #include <xsql/database.hpp>
@@ -29,31 +15,23 @@
 namespace idasql {
 namespace policy {
 
-// ============================================================================
-// Policy Values
-// ============================================================================
-
 enum class CachePolicy {
-    Off,        // No caching, always fetch live data
-    Session,    // Cache for the duration of SQL statement
-    Persistent  // Cache until invalidated
+    Off,
+    Session,
+    Persistent
 };
 
 enum class UndoPolicy {
-    Off,        // No undo points
-    PerRow,     // Undo point per row modification
-    PerStatement // One undo point per SQL statement (recommended)
+    Off,
+    PerRow,
+    PerStatement
 };
 
-// ============================================================================
-// Global Configuration
-// ============================================================================
-
 struct IdasqlConfig {
-    CachePolicy cache = CachePolicy::Off;          // Default: live data
-    UndoPolicy undo = UndoPolicy::PerStatement;    // Default: one undo per statement
-    bool batch_operations = true;                   // Batch ops under one undo
-    bool verbose = false;                           // Debug output
+    CachePolicy cache = CachePolicy::Off;
+    UndoPolicy undo = UndoPolicy::PerStatement;
+    bool batch_operations = true;
+    bool verbose = false;
 
     static IdasqlConfig& instance() {
         static IdasqlConfig config;
@@ -64,20 +42,13 @@ private:
     IdasqlConfig() = default;
 };
 
-// ============================================================================
-// Configuration Parsing from Module Arguments
-// ============================================================================
-
 struct ModuleOptions {
     CachePolicy cache = CachePolicy::Off;
     UndoPolicy undo = UndoPolicy::PerStatement;
 
-    // Parse from CREATE VIRTUAL TABLE ... USING module(key=value, ...)
     static ModuleOptions parse(int argc, const char* const* argv) {
         ModuleOptions opts;
 
-        // argv[0] = module name, argv[1] = database name, argv[2] = table name
-        // argv[3..] = additional arguments
         for (int i = 3; i < argc; ++i) {
             std::string arg = argv[i];
             size_t eq = arg.find('=');
@@ -86,7 +57,6 @@ struct ModuleOptions {
             std::string key = arg.substr(0, eq);
             std::string val = arg.substr(eq + 1);
 
-            // Trim quotes if present
             if (val.size() >= 2 && val.front() == '\'' && val.back() == '\'') {
                 val = val.substr(1, val.size() - 2);
             }
@@ -114,12 +84,6 @@ struct ModuleOptions {
     }
 };
 
-// ============================================================================
-// SQL Configuration Function
-// ============================================================================
-
-// Register: SELECT idasql_config('key', 'value') to set
-// Register: SELECT idasql_config('key') to get
 inline void idasql_config_func(xsql::FunctionContext& ctx, int argc, xsql::FunctionArg* argv) {
     if (argc < 1) {
         ctx.result_error("idasql_config requires at least 1 argument");
@@ -134,7 +98,6 @@ inline void idasql_config_func(xsql::FunctionContext& ctx, int argc, xsql::Funct
 
     auto& config = IdasqlConfig::instance();
 
-    // Setter mode
     if (argc >= 2) {
         const char* val = argv[1].as_c_str();
         if (!val) val = "";
@@ -166,7 +129,6 @@ inline void idasql_config_func(xsql::FunctionContext& ctx, int argc, xsql::Funct
         return;
     }
 
-    // Getter mode
     if (strcmp(key, "cache") == 0) {
         const char* val = "off";
         if (config.cache == CachePolicy::Session) val = "session";
@@ -184,14 +146,9 @@ inline void idasql_config_func(xsql::FunctionContext& ctx, int argc, xsql::Funct
     }
 }
 
-// Register the config function with SQLite
 inline bool register_config_function(xsql::Database& db) {
     return xsql::is_ok(db.register_function("idasql_config", -1, xsql::ScalarFn(idasql_config_func)));
 }
-
-// ============================================================================
-// Configuration Table (Alternative approach)
-// ============================================================================
 
 inline bool create_config_table(xsql::Database& db) {
     const char* sql = R"(
@@ -210,7 +167,6 @@ inline bool create_config_table(xsql::Database& db) {
     return xsql::is_ok(db.exec(sql));
 }
 
-// Sync config from table to memory
 inline bool load_config_from_table(xsql::Database& db) {
     auto& config = IdasqlConfig::instance();
 
@@ -237,10 +193,6 @@ inline bool load_config_from_table(xsql::Database& db) {
     return true;
 }
 
-// ============================================================================
-// Initialization Helper
-// ============================================================================
-
 inline bool init_policy_system(xsql::Database& db) {
     bool ok = true;
     ok = ok && register_config_function(db);
@@ -249,5 +201,5 @@ inline bool init_policy_system(xsql::Database& db) {
     return ok;
 }
 
-} // namespace policy
-} // namespace idasql
+}
+}

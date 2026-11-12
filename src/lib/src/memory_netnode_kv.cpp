@@ -11,10 +11,6 @@ using namespace idasql::core;
 namespace idasql {
 namespace memory {
 
-// ============================================================================
-// USERDATA Table - netnode-backed key-value store
-// ============================================================================
-
 static constexpr const char *NETNODE_KV_MASTER_NAME = "$ idasql netnode_kv";
 
 static netnode get_netnode_kv_master(bool create) {
@@ -22,8 +18,6 @@ static netnode get_netnode_kv_master(bool create) {
   return master;
 }
 
-// Iterator for single-key lookup via filter_eq_text("key").
-// Uses entry_id as rowid for O(1) DELETE/UPDATE via row_lookup.
 class NetnodeKvKeyIterator : public xsql::RowIterator {
   std::string key_;
   std::string value_;
@@ -122,7 +116,6 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
         }
       })
       .row_populator([](NetnodeKvRow &row, int argc, xsql::FunctionArg *argv) {
-        // argv[2]=key, argv[3]=value
         if (argc > 2 && !argv[2].is_null()) {
           const char *k = argv[2].as_c_str();
           row.key = k ? k : "";
@@ -160,12 +153,6 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
               xsql::set_vtab_error("netnode_kv: failed to update key '" + row.key + "'");
             return ok;
           })
-      // Stable rowid = the entry netnode index. This is the SAME id the keyed
-      // filter iterator (NetnodeKvKeyIterator::rowid) and row_lookup use, so the
-      // full-scan rowid round-trips through the entry_id-keyed row_lookup below.
-      // A full-scan multi-row DELETE (e.g. WHERE key LIKE 'tag:%') therefore
-      // resolves each row by its own entry_id instead of a cache position that
-      // shifts as earlier rows are removed.
       .rowid([](const NetnodeKvRow &row) -> int64_t {
         return static_cast<int64_t>(row.entry_id);
       })
@@ -197,11 +184,10 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
         netnode entry(entry_id);
         entry.kill();
         master.hashdel(row.key.c_str());
-        master.supdel(entry_id); // clean reverse index
+        master.supdel(entry_id);
         return true;
       })
       .insertable([](int argc, xsql::FunctionArg *argv) -> bool {
-        // argv[0]=key, argv[1]=value
         if (argc < 1 || argv[0].is_null())
           return false;
 
@@ -209,9 +195,6 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
         if (!key || !key[0])
           return false;
 
-        // The key is stored both as a hash index and (verbatim) as a supval
-        // value in the reverse index; supval objects are capped at MAXSPECSIZE.
-        // An oversized key would make the store silently fail, so reject it.
         if (strlen(key) >= static_cast<size_t>(MAXSPECSIZE)) {
           xsql::set_vtab_error(
               "netnode_kv: key too long (max " + std::to_string(MAXSPECSIZE - 1) +
@@ -231,7 +214,6 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
         if (master == BADNODE)
           return false;
 
-        // Upsert: if key already exists, update its value
         nodeidx_t existing = master.hashval_long(key);
         if (existing != 0) {
           netnode entry(existing);
@@ -244,14 +226,11 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
           return true;
         }
 
-        // Create new entry netnode
         netnode entry;
         if (!entry.create())
           return false;
 
         nodeidx_t entry_id = static_cast<nodeidx_t>(entry);
-        // Roll back the freshly-created entry netnode on any storage-write
-        // failure so we never leak a dangling entry or a half-wired index.
         if (!entry.setblob(val, len, 0, stag) || !master.hashset(key, entry_id) ||
             !master.supset(entry_id, key)) {
           entry.kill();
@@ -266,12 +245,15 @@ CachedTableDef<NetnodeKvRow> define_netnode_kv() {
       })
       .filter_eq_text(
           "key",
-          [](const char *key) -> std::unique_ptr<xsql::RowIterator> {
+          [](const auto& value) -> std::unique_ptr<xsql::RowIterator> {
+              const std::string full_key(value);
+              if (full_key.find('\0') != std::string::npos) return nullptr;
+              const char* key = full_key.c_str();
             return std::make_unique<NetnodeKvKeyIterator>(key);
           },
           1.0, 1.0)
       .build();
 }
 
-} // namespace memory
-} // namespace idasql
+}
+}

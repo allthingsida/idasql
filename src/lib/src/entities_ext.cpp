@@ -18,10 +18,6 @@
 namespace idasql {
 namespace extended {
 
-// ============================================================================
-// Collection helpers
-// ============================================================================
-
 void collect_fixups(std::vector<FixupEntry>& rows) {
     rows.clear();
 
@@ -73,8 +69,6 @@ std::string path_utf8(const std::filesystem::path& p) {
     return std::string(u.begin(), u.end());
 }
 
-// A signature's library name, "" when IDA cannot find the file. The same lookup
-// IDA uses when it applies the signature, but silent: no "could not find" box.
 std::string signature_title(const std::string& name) {
     qstring title;
     if (get_idasgn_title(&title, name.c_str()) < 0)
@@ -86,7 +80,6 @@ bool has_directory(const std::string& name) {
     return name.find_first_of("/\\") != std::string::npos;
 }
 
-// The file name without its directory and a ".sig" extension, lowercased.
 std::string signature_stem(const std::string& name) {
     const size_t slash = name.find_last_of("/\\");
     std::string base = lower_copy(slash == std::string::npos ? name : name.substr(slash + 1));
@@ -95,9 +88,6 @@ std::string signature_stem(const std::string& name) {
     return base;
 }
 
-// The list entry that is `name`, or -1. IDA stores what it was given, so the same
-// signature can be listed as "vc64rtf", "vc64rtf.sig" or a path: two names are the
-// same signature when equal, or when either is a bare short name with the same stem.
 int find_signature(const std::string& name) {
     const std::string want = lower_copy(name);
     const std::string stem = signature_stem(name);
@@ -114,9 +104,6 @@ int find_signature(const std::string& name) {
     return -1;
 }
 
-// The processor id a signature file is for, from its header (the leading
-// "IDASGN" magic, a version byte, then the processor id: idasgn_header_t).
-// nullopt when the file cannot be read or is not a FLIRT signature file.
 std::optional<int> signature_file_processor(const std::string& path) {
     FILE* fp = fopenRB(path.c_str());
     if (fp == nullptr)
@@ -143,8 +130,6 @@ bool refuse(const std::string& why) {
     return false;
 }
 
-// INSERT INTO signatures(name): plan the signature and let auto-analysis apply it.
-// argv follows the column order: 0 idx, 1 name, 2 title, 3 state, 4 matches, 5 optlibs.
 bool insert_signature(int argc, xsql::FunctionArg* argv) {
     if (argc < 2 || argv[1].is_null() || argv[1].type() != SQLITE_TEXT)
         return refuse("INSERT needs a name: a short name (vc64rtf) or a .sig path");
@@ -154,8 +139,6 @@ bool insert_signature(int argc, xsql::FunctionArg* argv) {
     if (name.empty())
         return refuse("INSERT needs a name: a short name (vc64rtf) or a .sig path");
 
-    // A short name is only looked up in this processor's sig folders; a path can
-    // name any file, so check what it is first.
     if (has_directory(name)) {
         if (!qfileexist(name.c_str()))
             return refuse("no signature file '" + name + "'");
@@ -176,8 +159,6 @@ bool insert_signature(int argc, xsql::FunctionArg* argv) {
                       listed.c_str() + ", " + state_text(calc_idasgn_state(n)) + ")");
     }
 
-    // A signature applies only with FLIRT on; turn it on for this one and put the
-    // database's setting back afterwards.
     const bool flirt_was_on = inf_use_flirt();
     inf_set_use_flirt(true);
     const int qty = plan_to_apply_idasgn(name.c_str());
@@ -187,16 +168,12 @@ bool insert_signature(int argc, xsql::FunctionArg* argv) {
     if (qty <= 0)
         return refuse("IDA refused '" + name + "'");
 
-    // Matched functions were renamed: cached decompilations of their callers are stale.
     if (decompiler::hexrays_available())
         clear_cached_cfuncs();
     return true;
 }
 
-// DELETE: a planned signature leaves the list. An applied one cannot be undone by
-// IDA, which keeps no record of what it changed.
 bool delete_signature(SignatureEntry& row) {
-    // Indexes shift when an entry is removed: find the row again by its name.
     const int n = find_signature(row.name);
     if (n < 0)
         return refuse("'" + row.name + "' is no longer in the list");
@@ -210,7 +187,7 @@ bool delete_signature(SignatureEntry& row) {
     return true;
 }
 
-}  // namespace
+}
 
 void collect_signatures(std::vector<SignatureEntry>& rows) {
     rows.clear();
@@ -233,8 +210,6 @@ void collect_signatures(std::vector<SignatureEntry>& rows) {
 void collect_available_signatures(std::vector<AvailableSignature>& rows) {
     rows.clear();
 
-    // IDA's own search order: each IDAUSR directory, $IDASGN, then IDA's directory,
-    // each with sig/<processor>. The first file of a name is the one IDA uses.
     qstrvec_t dirs;
     get_ida_subdirs(&dirs, "sig", IDA_SUBDIR_IDP);
     const std::string idadir_lower =
@@ -300,8 +275,6 @@ void collect_local_types(std::vector<LocalTypeEntry>& rows) {
     til_t* ti = get_idati();
     if (!ti) return;
 
-    // Valid local-type ordinals are 1..get_ordinal_limit(ti)-1; skip gaps (deleted types)
-    // rather than stopping at the first one.
     uint32 limit = get_ordinal_limit(ti);
     for (uint32 ord = 1; ord < limit; ++ord) {
         const char* name = get_numbered_type_name(ti, ord);
@@ -328,10 +301,6 @@ void collect_local_types(std::vector<LocalTypeEntry>& rows) {
         rows.push_back(entry);
     }
 }
-
-// ============================================================================
-// Table definitions
-// ============================================================================
 
 CachedTableDef<FixupEntry> define_fixups() {
     return cached_table<FixupEntry>("fixups")
@@ -417,7 +386,6 @@ CachedTableDef<ProblemEntry> define_problems() {
         .build();
 }
 
-// Chunk number `i` (0..get_fchunk_qty()-1); false for a bad `i`.
 static bool fchunk_by_num(size_t i, idasql_fchunk_info_t* out) {
     const ea_t ea = idasql_fchunk_ea_by_num(static_cast<int>(i));
     return ea != BADADDR && idasql_fchunk_info(ea, out);
@@ -446,7 +414,6 @@ VTableDef define_fchunks() {
             const ea_t owner = idasql_func_start(chunk.start_ea);
             return owner != BADADDR ? owner : 0;
         })
-        // The FUNC_* flags are 64-bit; an int column would truncate them.
         .column_int64("flags", [](size_t i) -> int64_t {
             idasql_fchunk_info_t chunk;
             return fchunk_by_num(i, &chunk) ? static_cast<int64_t>(chunk.flags) : 0;
@@ -459,15 +426,12 @@ VTableDef define_fchunks() {
 }
 
 CachedTableDef<SignatureEntry> define_signatures() {
-    // Rebuilt for every query: the list is a few netnode reads, and IDA raises no
-    // event when it changes (a GUI delete, a plan from a script).
     return cached_table<SignatureEntry>("signatures")
         .no_shared_cache()
         .estimate_rows([]() -> size_t { return static_cast<size_t>(std::max(get_idasgn_qty(), 1)); })
         .cache_builder([](std::vector<SignatureEntry>& rows) {
             collect_signatures(rows);
         })
-        // "idx", not "index" (an SQL keyword): the position in IDA's list.
         .column_int("idx", [](const SignatureEntry& row) -> int {
             return row.index;
         })
@@ -475,7 +439,7 @@ CachedTableDef<SignatureEntry> define_signatures() {
             return row.name;
         })
         .column_text_nullable("title", [](const SignatureEntry& row) -> std::optional<std::string> {
-            if (row.title.empty()) return std::nullopt;  // the file is gone
+            if (row.title.empty()) return std::nullopt;
             return row.title;
         })
         .column_text("state", [](const SignatureEntry& row) -> std::string {
@@ -506,7 +470,6 @@ CachedTableDef<AvailableSignature> define_available_signatures() {
         })
         .column_text("path", [](const AvailableSignature& row) -> std::string { return row.path; })
         .column_text("source", [](const AvailableSignature& row) -> std::string { return row.source; })
-        // NULL where this SDK has no header reader (9.0 GA).
         .column_int_nullable("is_startup", [](const AvailableSignature& row) -> std::optional<int> {
             if (row.is_startup < 0) return std::nullopt;
             return row.is_startup;
@@ -579,10 +542,6 @@ VTableDef define_mappings() {
         .build();
 }
 
-// ============================================================================
-// Registry
-// ============================================================================
-
 ExtendedRegistry::ExtendedRegistry()
     : fixups(define_fixups())
     , hidden_ranges(define_hidden_ranges())
@@ -620,5 +579,5 @@ void ExtendedRegistry::register_all(xsql::Database& db) {
     db.create_table("mappings", "mappings");
 }
 
-} // namespace extended
-} // namespace idasql
+}
+}

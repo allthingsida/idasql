@@ -4,16 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * pin_commands.hpp - Wire the ".pin" dot-command callbacks to the autostart
- * pin store. Shared by the CLI and the plugin so the command behaves
- * identically in both. IDA-free (the netnode work lives in autostart_pin.cpp).
- *
- * Note: the autostart *behavior* (auto-launching servers on database open)
- * lives only in the plugin; the CLI uses these callbacks purely to read/write
- * pins persisted in the IDB.
- */
-
 #pragma once
 
 #include <iomanip>
@@ -28,7 +18,6 @@ namespace idasql {
 
 namespace pin_detail {
 
-// Map a service token to the enum. Rejects "mcp" when MCP isn't compiled in.
 inline bool resolve_service(const std::string& s,
                             autostart::Service& svc,
                             std::string& err) {
@@ -77,9 +66,8 @@ inline std::string format_pin_list() {
     return out;
 }
 
-} // namespace pin_detail
+}
 
-// Install the .pin command callbacks on a CommandCallbacks set.
 inline void wire_pin_callbacks(CommandCallbacks& cb) {
     cb.pin_list = []() -> std::string { return pin_detail::format_pin_list(); };
 
@@ -138,4 +126,4 @@ inline void wire_pin_callbacks(CommandCallbacks& cb) {
     };
 }
 
-} // namespace idasql
+}

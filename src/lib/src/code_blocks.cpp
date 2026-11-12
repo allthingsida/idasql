@@ -13,18 +13,7 @@ using namespace idasql::core;
 namespace idasql {
 namespace code {
 
-// ============================================================================
-// BLOCKS Table (basic blocks)
-// ============================================================================
-//
-// A function's flow chart covers every chunk, so a block of a tail shared by
-// functions A and C is a row under A and a row under C. The rowid is
-// (function, block ordinal) for both the full scan and the func_addr pushdown:
-// an address-only rowid made SQLite drop C's copy from a MULTI-INDEX OR plan.
-
 BlocksInFuncIterator::BlocksInFuncIterator(ea_t func_ea) : func_ea_(func_ea) {
-  // func_addr is the owner's ENTRY address; an interior or tail address is a
-  // different key and matches nothing, as in the full scan.
   if (idasql_is_func_start(func_ea)) {
     fc_.create_func(func_ea, FC_NOEXT);
   }
@@ -74,13 +63,11 @@ CachedTableDef<BlockInfo> define_blocks() {
   return cached_table<BlockInfo>("blocks")
       .no_shared_cache()
       .estimate_rows([]() -> size_t {
-        // Heuristic: ~10 blocks per function
         return get_func_qty() * 10;
       })
       .cache_builder([](std::vector<BlockInfo> &cache) {
         size_t func_qty = get_func_qty();
         for (size_t i = 0; i < func_qty; i++) {
-          // Cooperative cancellation across the per-function build.
           if ((i & 1023u) == 0 && xsql::vtab_interrupted()) {
             xsql::set_vtab_error("query interrupted: timeout while building blocks");
             return;
@@ -133,29 +120,12 @@ CachedTableDef<BlockInfo> define_blocks() {
       .build();
 }
 
-// ============================================================================
-// FUNCTION_CHUNKS Table
-// ============================================================================
-//
-// One row per (function, chunk): the entry chunk and every tail, and a tail
-// shared by several functions appears once under each of them. Both the full
-// scan and the func_addr pushdown build rows with append_function_chunk_rows(),
-// and the rowid is (function, chunk index), so the two paths agree row for row.
-
-// block_count must count ONE chunk's basic blocks, not the whole owner
-// function's. A function chart ignores the [ea1, ea2) range (it charts the
-// entire function), so chart the range form over the chunk bounds to cover only
-// [chunk_start, chunk_end) -- otherwise every chunk of a function reports the
-// same function-wide block count.
 static int count_chunk_blocks(ea_t start, ea_t end) {
   idasql_flow_chart fc;
   fc.create_range(start, end, FC_NOEXT);
   return fc.size();
 }
 
-// Append the chunks of the function whose ENTRY is `owner`: the entry chunk
-// first, then the tails in address order. An address that is not a function
-// entry appends nothing.
 static void append_function_chunk_rows(ea_t owner,
                                        std::vector<FunctionChunkInfo> &rows) {
   if (!idasql_is_func_start(owner))
@@ -181,7 +151,6 @@ static int64_t function_chunk_rowid(const FunctionChunkInfo &row) {
   return idasql::detail::pack_function_rowid(row.func_ea, row.index);
 }
 
-// Column order MUST match define_function_chunks() below.
 static void function_chunk_column(xsql::FunctionContext &ctx,
                                   const FunctionChunkInfo &row, int col) {
   switch (col) {
@@ -231,7 +200,6 @@ CachedTableDef<FunctionChunkInfo> define_function_chunks() {
         cache.reserve(get_fchunk_qty());
         const size_t func_qty = get_func_qty();
         for (size_t i = 0; i < func_qty; i++) {
-          // Cooperative cancellation across the per-function build.
           if ((i & 1023u) == 0 && xsql::vtab_interrupted()) {
             xsql::set_vtab_error(
                 "query interrupted: timeout while building function_chunks");
@@ -282,5 +250,5 @@ CachedTableDef<FunctionChunkInfo> define_function_chunks() {
       .build();
 }
 
-} // namespace code
-} // namespace idasql
+}
+}

@@ -19,9 +19,6 @@ bool parse_numeric_ea_text(const std::string& text, ea_t& out_ea) {
     if (token.empty()) {
         return false;
     }
-    // strtoull silently WRAPS a leading '-' (e.g. "-1" -> 0xFFFF...FFFF) without
-    // setting ERANGE, which would masquerade as a valid high address. A negative
-    // address is never valid — reject it up front.
     if (token[0] == '-') {
         return false;
     }
@@ -110,7 +107,7 @@ bool resolve_address_key(
         return true;
     }
     if (arg.type() != SQLITE_TEXT) {
-        return true;  // NULL, a blob or a non-integral real equals no address
+        return true;
     }
     ea_t ea = BADADDR;
     if (!resolve_address_value(arg, arg_name, ea, error)) {
@@ -189,7 +186,6 @@ bool write_address(xsql::FunctionArg arg, const char* table, const char* column,
     const std::string name = std::string(table) + "." + column;
     std::string error;
     if (!resolve_address_value(arg, name.c_str(), out_ea, &error)) {
-        // resolve_address_value names the column in most messages, not all.
         xsql::set_vtab_error(error.rfind(name, 0) == 0 ? error : name + ": " + error);
         return false;
     }
@@ -209,4 +205,4 @@ std::optional<int64_t> write_int(
     return v;
 }
 
-} // namespace idasql
+}

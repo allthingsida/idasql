@@ -4,10 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * functions.hpp - Custom SQL functions for IDA operations
- */
-
 #pragma once
 
 #include <xsql/database.hpp>
@@ -17,5 +13,5 @@ namespace functions {
 
 void register_sql_functions(xsql::Database& db);
 
-} // namespace functions
-} // namespace idasql
+}
+}

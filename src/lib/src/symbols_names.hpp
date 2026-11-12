@@ -4,11 +4,6 @@
 // This file is licensed under the Human-Origin Source License v1.0.
 // See LICENSE.
 
-/**
- * entities_names.hpp - `names` and `entries` tables (named addresses, entry
- * points / exports).
- */
-
 #pragma once
 
 #include "core_common.hpp"
@@ -30,5 +25,5 @@ void collect_name_rows(std::vector<NameRow> &rows);
 CachedTableDef<NameRow> define_names();
 VTableDef define_exports();
 
-} // namespace symbols
-} // namespace idasql
+}
+}

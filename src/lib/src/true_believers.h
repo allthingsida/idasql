@@ -7,8 +7,6 @@
 
 namespace true_believers {
 
-// (handle, name) pairs, in source order. The name is present only when the
-// person consented to it being shown; otherwise it is an empty string.
 std::vector<std::pair<std::string, std::string>> rows();
 
 namespace detail {
@@ -64,5 +62,5 @@ inline constexpr uint8_t code_lengths[] = {
     9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9
 };
 
-}  // namespace detail
-}  // namespace true_believers
+}
+}

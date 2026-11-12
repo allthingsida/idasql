@@ -7,7 +7,7 @@
 #include "decompiler.hpp"
 #include "function_rowid.hpp"
 
-#include "types_members.hpp" // idasql::types::parse_type_declarator (array-aware)
+#include "types_members.hpp"
 #include "checkpoints.hpp"
 
 #include <idasql/string_utils.hpp>
@@ -167,7 +167,7 @@ void append_orphan_rows_from_maps(
 
         const citem_cmt_t& cmt = user_cmts_second(it);
         OrphanCommentInfo row;
-        row.ordinal = static_cast<uint32_t>(rows.size());  // user_cmts_t is ordered: stable
+        row.ordinal = static_cast<uint32_t>(rows.size());
         row.func_addr = func_addr;
         row.func_name = func_name;
         row.ea = loc.ea;
@@ -192,11 +192,7 @@ std::string build_orphan_comments_json(const std::vector<OrphanCommentInfo>& row
     return arr.dump();
 }
 
-}  // namespace
-
-// ============================================================================
-// Decompiler Initialization
-// ============================================================================
+}
 
 bool init_hexrays() {
     static bool initialized = false;
@@ -264,8 +260,6 @@ bool parse_callee_decl(const char* decl_text, tinfo_t& out_tif, qstring* out_nam
         }
     }
 
-    // Hand back the parsed function name (skip the placeholder the fallback inserts) so
-    // the caller can give the user-defined call a non-empty display name.
     if (out_name != nullptr && parsed_name != "__idasql_callee") {
         *out_name = parsed_name;
     }
@@ -285,16 +279,6 @@ bool apply_callee_tinfo_at(ea_t call_ea, const tinfo_t& tif, const char* name) {
 
         udcall_t& udc = udcalls[call_ea];
         udc.tif = tif;
-        // The udcall both STORES the applied callee type (the callee_type getter
-        // reads it back from here) AND supplies the name Hex-Rays renders for the
-        // call. For a genuinely INDIRECT call (`call rax`) there is no callee
-        // symbol, so the caller-supplied name (parsed from the callee_type decl,
-        // else "callee") is the right display name. But for a DIRECT call
-        // (immediate o_near/o_far target, e.g. `call sub_401000`) that same name
-        // would OVERRIDE the real callee symbol in the pseudocode -- so name the
-        // udcall after the real callee, preserving the symbol while still applying
-        // the type. (Removing the udcall for direct calls is NOT an option: it is
-        // the storage the callee_type read-back depends on.)
         qstring direct_name;
         insn_t insn;
         if (decode_insn(&insn, call_ea) > 0) {
@@ -378,10 +362,6 @@ bool get_call_arg_addrs(ea_t call_ea, eavec_t& out_addrs) {
     return get_arg_addrs(&out_addrs, call_ea);
 }
 
-// ============================================================================
-// ITP Helpers
-// ============================================================================
-
 const char* itp_to_name(item_preciser_t itp) {
     switch (itp) {
         case ITP_SEMI:   return "semi";
@@ -415,12 +395,8 @@ item_preciser_t name_to_itp(const char* name) {
     if (stricmp(name, "do") == 0)     return ITP_DO;
     if (stricmp(name, "asm") == 0)    return ITP_ASM;
     if (stricmp(name, "try") == 0)    return ITP_TRY;
-    return ITP_SEMI;  // default
+    return ITP_SEMI;
 }
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
 
 std::string get_full_ctype_name(ctype_t op) {
     const char* name = get_ctype_name(op);
@@ -436,8 +412,7 @@ ea_t extract_line_ea(cfunc_t* cfunc, const qstring& raw_line) {
     const char* p = raw_line.c_str();
     while (*p) {
         if (*p == COLOR_ON && *(p + 1) == COLOR_ADDR) {
-            p += 2;  // skip COLOR_ON + COLOR_ADDR
-            // Read 16 hex chars
+            p += 2;
             char hex[17] = {};
             for (int i = 0; i < 16; i++) {
                 if (!p[i]) return BADADDR;
@@ -445,7 +420,6 @@ ea_t extract_line_ea(cfunc_t* cfunc, const qstring& raw_line) {
             }
             uint64_t val = strtoull(hex, nullptr, 16);
             uint32_t anchor = static_cast<uint32_t>(val);
-            // ANCHOR_CITEM = type 0 (bits 31-30)
             uint32_t anchor_type = (anchor >> 30) & 0x3;
             if (anchor_type != 0) return BADADDR;
             uint32_t idx = anchor & 0x3FFFFFFF;
@@ -458,10 +432,6 @@ ea_t extract_line_ea(cfunc_t* cfunc, const qstring& raw_line) {
     return BADADDR;
 }
 
-// ============================================================================
-// Collect Functions
-// ============================================================================
-
 bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_addr) {
     lines.clear();
 
@@ -469,8 +439,6 @@ bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_addr) {
 
     const ea_t f_start = idasql_func_start(func_addr);
     if (f_start == BADADDR) return false;
-    // Rows and Hex-Rays user data (comments, lvar settings, unions, labels) are keyed by
-    // the entry address, whatever address inside the function was passed.
     func_addr = f_start;
 
     hexrays_failure_t hf;
@@ -484,7 +452,6 @@ bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_addr) {
         pl.func_addr = func_addr;
         pl.line_num = static_cast<int>(i);
 
-        // Extract ea from COLOR_ADDR anchor BEFORE stripping tags
         pl.ea = extract_line_ea(&*cfunc, sv[i].line);
 
         qstring clean;
@@ -494,10 +461,8 @@ bool collect_pseudocode(std::vector<PseudocodeLine>& lines, ea_t func_addr) {
         lines.push_back(pl);
     }
 
-    // Read stored comments and match to lines by ea (O(n+m) via index)
     user_cmts_t* cmts = restore_user_cmts(func_addr);
     if (cmts) {
-        // Build ea -> line indices for O(1) lookup
         std::unordered_map<ea_t, std::vector<size_t>> ea_to_lines;
         for (size_t idx = 0; idx < lines.size(); ++idx) {
             ea_to_lines[lines[idx].ea].push_back(idx);
@@ -530,9 +495,6 @@ void collect_all_pseudocode(std::vector<PseudocodeLine>& lines) {
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
-        // Cooperative cancellation -- decompiling every function is the
-        // single most expensive whole-program build; poll the query deadline so a
-        // timeout interrupts it cleanly (the progress handler cannot).
         if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
             xsql::set_vtab_error(
                 "query interrupted: timeout while decompiling all functions");
@@ -555,8 +517,6 @@ bool collect_orphan_comments(std::vector<OrphanCommentInfo>& rows, ea_t func_add
 
     const ea_t f_start = idasql_func_start(func_addr);
     if (f_start == BADADDR) return false;
-    // Rows and Hex-Rays user data (comments, lvar settings, unions, labels) are keyed by
-    // the entry address, whatever address inside the function was passed.
     func_addr = f_start;
 
     hexrays_failure_t hf;
@@ -571,8 +531,6 @@ bool collect_orphan_comments(std::vector<OrphanCommentInfo>& rows, ea_t func_add
     append_orphan_rows_from_maps(rows, func_addr, before, cfunc->user_cmts);
     user_cmts_free(before);
 
-    // del_orphan_cmts mutates the cached cfunc in-memory; discard it so later
-    // reads see a fresh decompilation backed by the on-disk database state.
     invalidate_decompiler_cache(func_addr);
     return true;
 }
@@ -582,14 +540,9 @@ void collect_all_orphan_comments(std::vector<OrphanCommentInfo>& rows) {
 
     if (!hexrays_available()) return;
 
-    // Intentionally live-function scoped: we report orphaned comments reachable
-    // from the current function list, not historical comment maps for deleted or
-    // moved function entries left behind in the IDB.
     rows.reserve(get_func_qty());
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
-        // Cooperative cancellation -- decompiling every function is expensive;
-        // poll the query deadline so a timeout interrupts it cleanly.
         if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
             xsql::set_vtab_error(
                 "query interrupted: timeout while decompiling all functions");
@@ -637,8 +590,6 @@ void collect_all_orphan_comment_groups(std::vector<OrphanCommentGroupInfo>& rows
     rows.reserve(get_func_qty() / 4 + 1);
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
-        // Cooperative cancellation -- decompiling every function is expensive;
-        // poll the query deadline so a timeout interrupts it cleanly.
         if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
             xsql::set_vtab_error(
                 "query interrupted: timeout while decompiling all functions");
@@ -665,8 +616,6 @@ bool collect_lvars(std::vector<LvarInfo>& vars, ea_t func_addr) {
 
     const ea_t f_start = idasql_func_start(func_addr);
     if (f_start == BADADDR) return false;
-    // Rows and Hex-Rays user data (comments, lvar settings, unions, labels) are keyed by
-    // the entry address, whatever address inside the function was passed.
     func_addr = f_start;
 
     hexrays_failure_t hf;
@@ -710,8 +659,6 @@ void collect_all_lvars(std::vector<LvarInfo>& vars) {
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
-        // Cooperative cancellation -- decompiling every function is expensive;
-        // poll the query deadline so a timeout interrupts it cleanly.
         if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
             xsql::set_vtab_error(
                 "query interrupted: timeout while decompiling all functions");
@@ -726,10 +673,6 @@ void collect_all_lvars(std::vector<LvarInfo>& vars) {
         }
     }
 }
-
-// ============================================================================
-// Ctree Collector
-// ============================================================================
 
 static citem_t* current_parent_item(ctree_parentee_t* visitor) {
     if (visitor == nullptr) return nullptr;
@@ -833,9 +776,6 @@ int idaapi ctree_collector_t::visit_expr(cexpr_t* expr) {
 }
 
 void ctree_collector_t::resolve_child_ids() {
-    // Build a reverse id -> citem_t* map once so each row's child ids resolve in
-    // O(1) instead of scanning the whole item_ids map per row (was O(n^2) per
-    // function). Ids are dense (0..next_id-1 assigned during the visit).
     std::vector<citem_t*> items_by_id(static_cast<size_t>(next_id), nullptr);
     for (const auto& kv : item_ids) {
         if (kv.second >= 0 && kv.second < next_id) {
@@ -935,10 +875,6 @@ void ctree_collector_t::resolve_child_ids() {
     }
 }
 
-// ============================================================================
-// Ctree / Call Args Collect
-// ============================================================================
-
 bool collect_ctree(std::vector<CtreeItem>& items, ea_t func_addr) {
     items.clear();
 
@@ -946,8 +882,6 @@ bool collect_ctree(std::vector<CtreeItem>& items, ea_t func_addr) {
 
     const ea_t f_start = idasql_func_start(func_addr);
     if (f_start == BADADDR) return false;
-    // Rows and Hex-Rays user data (comments, lvar settings, unions, labels) are keyed by
-    // the entry address, whatever address inside the function was passed.
     func_addr = f_start;
 
     hexrays_failure_t hf;
@@ -972,8 +906,6 @@ bool collect_ctree_labels(std::vector<CtreeLabelInfo>& rows, ea_t func_addr) {
 
     const ea_t f_start = idasql_func_start(func_addr);
     if (f_start == BADADDR) return false;
-    // Rows and Hex-Rays user data (comments, lvar settings, unions, labels) are keyed by
-    // the entry address, whatever address inside the function was passed.
     func_addr = f_start;
 
     hexrays_failure_t hf;
@@ -1051,8 +983,6 @@ void collect_all_ctree_labels(std::vector<CtreeLabelInfo>& rows) {
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; i++) {
-        // Cooperative cancellation -- decompiling every function is expensive;
-        // poll the query deadline so a timeout interrupts it cleanly.
         if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
             xsql::set_vtab_error(
                 "query interrupted: timeout while decompiling all functions");
@@ -1068,24 +998,15 @@ void collect_all_ctree_labels(std::vector<CtreeLabelInfo>& rows) {
     }
 }
 
-// ============================================================================
-// Call Args Collector
-// ============================================================================
-
 call_args_collector_t::call_args_collector_t(std::vector<CallArgInfo>& args_, cfunc_t* cfunc_, ea_t func_addr_)
     : ctree_parentee_t(false), args(args_), cfunc(cfunc_), func_addr(func_addr_), next_id(0) {}
 
 int idaapi call_args_collector_t::visit_insn(cinsn_t* insn) {
-    // Number every item at visit time, mirroring ctree_collector_t so the
-    // resulting ids match the ctree table's item_id.
     item_ids[insn] = next_id++;
     return 0;
 }
 
 int idaapi call_args_collector_t::visit_expr(cexpr_t* expr) {
-    // Assign this item's id at visit time ONLY -- never pre-assign an arg's id
-    // from inside its parent cot_call. Each arg's own cexpr_t is visited (and
-    // numbered) after the call, so its id is resolved later in finalize().
     item_ids[expr] = next_id++;
 
     if (expr->op == cot_call && expr->a) {
@@ -1117,8 +1038,6 @@ int idaapi call_args_collector_t::visit_expr(cexpr_t* expr) {
 
 void call_args_collector_t::finalize() {
     for (const PendingCall& pc : pending_calls) {
-        // Resolve the call expr's id from the completed map. If it is somehow
-        // absent (defensive), skip the whole call site.
         auto call_it = item_ids.find(pc.call);
         if (call_it == item_ids.end()) continue;
         const int call_id = call_it->second;
@@ -1126,8 +1045,6 @@ void call_args_collector_t::finalize() {
         for (size_t i = 0; i < pc.arg_ptrs.size(); i++) {
             const carg_t& arg = *pc.arg_ptrs[i];
 
-            // Resolve the arg expr's real id. If it is not in the map (defensive),
-            // skip this arg rather than inventing an id.
             auto arg_it = item_ids.find((citem_t*)&arg);
             if (arg_it == item_ids.end()) continue;
 
@@ -1184,8 +1101,6 @@ bool collect_call_args(std::vector<CallArgInfo>& args, ea_t func_addr) {
 
     const ea_t f_start = idasql_func_start(func_addr);
     if (f_start == BADADDR) return false;
-    // Rows and Hex-Rays user data (comments, lvar settings, unions, labels) are keyed by
-    // the entry address, whatever address inside the function was passed.
     func_addr = f_start;
 
     hexrays_failure_t hf;
@@ -1199,13 +1114,6 @@ bool collect_call_args(std::vector<CallArgInfo>& args, ea_t func_addr) {
     return true;
 }
 
-// ============================================================================
-// Iterators for constraint pushdown
-// ============================================================================
-
-// Rowids: (function, local index) packed by pack_function_rowid, computed the same
-// way by the full scan and every pushdown, so SQLite's MULTI-INDEX OR plans (which
-// de-duplicate by rowid) never merge rows of two functions.
 static int64_t pseudocode_rowid(const PseudocodeLine& r) {
     return idasql::detail::pack_function_rowid(r.func_addr, static_cast<size_t>(r.line_num));
 }
@@ -1222,10 +1130,7 @@ static int64_t ctree_rowid(const CtreeItem& r) {
     return idasql::detail::pack_function_rowid(r.func_addr, static_cast<size_t>(r.item_id));
 }
 
-// --- PseudocodeInFuncIterator ---
-
 PseudocodeInFuncIterator::PseudocodeInFuncIterator(ea_t func_addr) {
-    // func_addr is a function key: an address inside a function names no rows.
     if (!idasql_is_func_start(func_addr)) return;
     collect_pseudocode(lines_, func_addr);
 }
@@ -1271,10 +1176,7 @@ int64_t PseudocodeInFuncIterator::rowid() const {
     return idx_ < lines_.size() ? pseudocode_rowid(lines_[idx_]) : -1;
 }
 
-// --- PseudocodeAtEaIterator ---
-
 PseudocodeAtEaIterator::PseudocodeAtEaIterator(ea_t ea) {
-    // A shared tail belongs to every owner, as in the full scan.
     idasql_for_each_owner_of(ea, [&](ea_t f_start) {
         std::vector<PseudocodeLine> all;
         collect_pseudocode(all, f_start);
@@ -1324,15 +1226,11 @@ int64_t PseudocodeAtEaIterator::rowid() const {
     return idx_ < lines_.size() ? pseudocode_rowid(lines_[idx_]) : -1;
 }
 
-// --- PseudocodeLineNumIterator ---
-
 PseudocodeLineNumIterator::PseudocodeLineNumIterator(int line_num) {
     if (line_num < 0) return;
 
     size_t func_qty = get_func_qty();
     for (size_t i = 0; i < func_qty; ++i) {
-        // Cooperative cancellation -- this decompiles every function inside
-        // xFilter; poll the query deadline so a timeout interrupts it cleanly.
         if ((i & 63u) == 0 && xsql::vtab_interrupted()) {
             xsql::set_vtab_error(
                 "query interrupted: timeout while decompiling all functions");
@@ -1389,10 +1287,7 @@ int64_t PseudocodeLineNumIterator::rowid() const {
     return idx_ < lines_.size() ? pseudocode_rowid(lines_[idx_]) : -1;
 }
 
-// --- OrphanCommentsInFuncIterator ---
-
 OrphanCommentsInFuncIterator::OrphanCommentsInFuncIterator(ea_t func_addr) {
-    // func_addr is a function key: an address inside a function names no rows.
     if (!idasql_is_func_start(func_addr)) return;
     collect_orphan_comments(rows_, func_addr);
 }
@@ -1428,10 +1323,7 @@ int64_t OrphanCommentsInFuncIterator::rowid() const {
     return idx_ < rows_.size() ? orphan_rowid(rows_[idx_]) : -1;
 }
 
-// --- OrphanCommentsAtEaIterator ---
-
 OrphanCommentsAtEaIterator::OrphanCommentsAtEaIterator(ea_t ea) {
-    // A shared tail belongs to every owner, as in the full scan.
     idasql_for_each_owner_of(ea, [&](ea_t f_start) {
         std::vector<OrphanCommentInfo> func_rows;
         if (!collect_orphan_comments(func_rows, f_start)) {
@@ -1476,10 +1368,7 @@ int64_t OrphanCommentsAtEaIterator::rowid() const {
     return idx_ < rows_.size() ? orphan_rowid(rows_[idx_]) : -1;
 }
 
-// --- OrphanCommentGroupsInFuncIterator ---
-
 OrphanCommentGroupsInFuncIterator::OrphanCommentGroupsInFuncIterator(ea_t func_addr) {
-    // func_addr is a function key: an address inside a function names no rows.
     if (!idasql_is_func_start(func_addr)) return;
     OrphanCommentGroupInfo row;
     if (collect_orphan_comment_group(row, func_addr) && row.orphan_count > 0) {
@@ -1517,10 +1406,7 @@ int64_t OrphanCommentGroupsInFuncIterator::rowid() const {
     return idx_ < rows_.size() ? orphan_group_rowid(rows_[idx_]) : -1;
 }
 
-// --- LvarsInFuncIterator ---
-
 LvarsInFuncIterator::LvarsInFuncIterator(ea_t func_addr) {
-    // func_addr is a function key: an address inside a function names no rows.
     if (!idasql_is_func_start(func_addr)) return;
     collect_lvars(vars_, func_addr);
 }
@@ -1566,26 +1452,17 @@ int64_t LvarsInFuncIterator::rowid() const {
     return idx_ < vars_.size() ? lvar_rowid(vars_[idx_]) : -1;
 }
 
-// --- CtreeLabelsInFuncIterator ---
-
-// ctree_labels stable rowid: pack the function INDEX (get_func_num/getn_func --
-// cheap lookups, no decompilation) with the per-function label number (unique
-// within a function). Both are computable from a single function's data, so the
-// func_addr pushdown stays fast -- a global-index rowid would force decompiling
-// every function on a filtered query. The full-scan cursor, the func iterator,
-// and row_lookup all use these two helpers so their rowids agree.
 static constexpr int kCtreeLabelBits = 24;
 static constexpr int64_t kCtreeLabelMask = (int64_t(1) << kCtreeLabelBits) - 1;
 
 static int64_t pack_ctree_label_rowid(ea_t func_addr, int label_num) {
     const int fnum = get_func_num(func_addr);
-    if (fnum < 0) return -1;  // not inside a function -> unaddressable
+    if (fnum < 0) return -1;
     return (static_cast<int64_t>(fnum) << kCtreeLabelBits)
          | (static_cast<int64_t>(label_num) & kCtreeLabelMask);
 }
 
 CtreeLabelsInFuncIterator::CtreeLabelsInFuncIterator(ea_t func_addr) {
-    // func_addr is a function key: an address inside a function names no rows.
     if (!idasql_is_func_start(func_addr)) return;
     collect_ctree_labels(labels_, func_addr);
 }
@@ -1631,10 +1508,7 @@ int64_t CtreeLabelsInFuncIterator::rowid() const {
     return pack_ctree_label_rowid(labels_[idx_].func_addr, labels_[idx_].label_num);
 }
 
-// --- CtreeInFuncIterator ---
-
 CtreeInFuncIterator::CtreeInFuncIterator(ea_t func_addr) {
-    // func_addr is a function key: an address inside a function names no rows.
     if (!idasql_is_func_start(func_addr)) return;
     collect_ctree(items_, func_addr);
 }
@@ -1679,7 +1553,7 @@ void CtreeInFuncIterator::column(xsql::FunctionContext& ctx, int col) {
         case 19: item.op == cot_num ? ctx.result_int64(item.num_value) : ctx.result_null(); break;
         case 20: !item.str_value.empty() ? ctx.result_text(item.str_value.c_str()) : ctx.result_null(); break;
         case 21: !item.helper_name.empty() ? ctx.result_text(item.helper_name.c_str()) : ctx.result_null(); break;
-        case 22: (item.op == cot_memref || item.op == cot_memptr) ? ctx.result_int(item.member_offset) : ctx.result_null(); break;
+        case 22: (item.op == cot_memref || item.op == cot_memptr) ? ctx.result_int64(static_cast<int64_t>(item.member_offset)) : ctx.result_null(); break;
         case 23: !item.var_name.empty() ? ctx.result_text(item.var_name.c_str()) : ctx.result_null(); break;
         case 24: item.op == cot_var ? ctx.result_int(item.var_is_stk ? 1 : 0) : ctx.result_null(); break;
         case 25: item.op == cot_var ? ctx.result_int(item.var_is_reg ? 1 : 0) : ctx.result_null(); break;
@@ -1695,10 +1569,7 @@ int64_t CtreeInFuncIterator::rowid() const {
     return idx_ < items_.size() ? ctree_rowid(items_[idx_]) : -1;
 }
 
-// --- CallArgsInFuncIterator ---
-
 CallArgsInFuncIterator::CallArgsInFuncIterator(ea_t func_addr) {
-    // func_addr is a function key: an address inside a function names no rows.
     if (!idasql_is_func_start(func_addr)) return;
     collect_call_args(args_, func_addr);
 }
@@ -1741,16 +1612,8 @@ void CallArgsInFuncIterator::column(xsql::FunctionContext& ctx, int col) {
 }
 
 int64_t CallArgsInFuncIterator::rowid() const {
-    // The index into the function's call-argument list: the generator walks the
-    // same list, so both paths give a row the same rowid.
     return idx_ < args_.size() ? idasql::detail::pack_function_rowid(args_[idx_].func_addr, idx_) : -1;
 }
-
-// ============================================================================
-// Generators for full scans (lazy, one function at a time)
-// ============================================================================
-
-// --- CtreeGenerator ---
 
 bool CtreeGenerator::load_next_func() {
     if (!hexrays_available()) return false;
@@ -1786,8 +1649,6 @@ bool CtreeGenerator::next() {
 const CtreeItem& CtreeGenerator::current() const { return items_[idx_]; }
 
 int64_t CtreeGenerator::rowid() const { return ctree_rowid(items_[idx_]); }
-
-// --- CallArgsGenerator ---
 
 bool CallArgsGenerator::load_next_func() {
     if (!hexrays_available()) return false;
@@ -1826,10 +1687,6 @@ int64_t CallArgsGenerator::rowid() const {
     return idasql::detail::pack_function_rowid(args_[idx_].func_addr, idx_);
 }
 
-// ============================================================================
-// Comment / Union Helpers
-// ============================================================================
-
 bool set_decompiler_comment(ea_t func_addr, ea_t target_ea, const char* comment, item_preciser_t itp) {
     if (!hexrays_available()) {
         xsql::set_vtab_error("cannot write pseudocode comment: Hex-Rays decompiler is unavailable");
@@ -1849,7 +1706,7 @@ bool set_decompiler_comment(ea_t func_addr, ea_t target_ea, const char* comment,
             describe_comment_target(func_addr, target_ea, itp));
         return false;
     }
-    func_addr = f_start;  // user data is keyed by the entry address
+    func_addr = f_start;
 
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile_for_read(f_start, &hf);
@@ -1864,7 +1721,6 @@ bool set_decompiler_comment(ea_t func_addr, ea_t target_ea, const char* comment,
     loc.ea = target_ea;
     loc.itp = itp;
 
-    // set_user_cmt with empty/nullptr deletes the comment
     cfunc->set_user_cmt(loc, (comment && comment[0]) ? comment : nullptr);
 
     cfunc->save_user_cmts();
@@ -1898,7 +1754,7 @@ bool clear_decompiler_comment_all_placements(ea_t func_addr, ea_t target_ea) {
             format_ea_hex(func_addr) + ", ea=" + format_ea_hex(target_ea));
         return false;
     }
-    func_addr = f_start;  // user data is keyed by the entry address
+    func_addr = f_start;
 
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile_for_read(f_start, &hf);
@@ -1910,8 +1766,6 @@ bool clear_decompiler_comment_all_placements(ea_t func_addr, ea_t target_ea) {
         return false;
     }
 
-    // Clear any existing comment regardless of placement so UPDATE statements
-    // like "SET comment = NULL, comment_placement = 'semi'" are order-independent.
     if (!clear_user_comments_for_target(
             &*cfunc,
             func_addr,
@@ -1933,7 +1787,7 @@ bool delete_orphan_comment(ea_t func_addr, ea_t target_ea, item_preciser_t itp) 
         xsql::set_vtab_error("cannot clear orphan comment: no function contains " + format_ea_hex(func_addr));
         return false;
     }
-    func_addr = f_start;  // user data is keyed by the entry address
+    func_addr = f_start;
     if (target_ea == BADADDR || target_ea == 0) {
         xsql::set_vtab_error(
             "cannot clear orphan comment: invalid comment coordinate (" +
@@ -2001,7 +1855,7 @@ bool get_ctree_item_ea(ea_t func_addr, int item_id, ea_t& out_ea) {
 bool set_union_selection_at_ea(ea_t func_addr, ea_t target_ea, const intvec_t& path) {
     if (!hexrays_available()) return false;
     if (target_ea == BADADDR || target_ea == 0) return false;
-    func_addr = idasql_func_start(func_addr);  // user data is keyed by the entry address
+    func_addr = idasql_func_start(func_addr);
     if (func_addr == BADADDR) return false;
 
     user_unions_t* unions = restore_user_unions(func_addr);
@@ -2041,7 +1895,7 @@ bool get_union_selection_at_ea(ea_t func_addr, ea_t target_ea, intvec_t& out_pat
     out_path.clear();
     if (!hexrays_available()) return false;
     if (target_ea == BADADDR || target_ea == 0) return false;
-    func_addr = idasql_func_start(func_addr);  // user data is keyed by the entry address
+    func_addr = idasql_func_start(func_addr);
     if (func_addr == BADADDR) return false;
 
     user_unions_t* unions = restore_user_unions(func_addr);
@@ -2056,10 +1910,6 @@ bool get_union_selection_at_ea(ea_t func_addr, ea_t target_ea, intvec_t& out_pat
     return found;
 }
 
-// ============================================================================
-// Lvar Helpers
-// ============================================================================
-
 bool get_lvar_snapshot(ea_t func_addr, int lvar_idx, LvarInfo& out) {
     if (!hexrays_available()) return false;
     if (lvar_idx < 0) return false;
@@ -2072,8 +1922,6 @@ bool get_lvar_snapshot(ea_t func_addr, int lvar_idx, LvarInfo& out) {
     return true;
 }
 
-// The index of the lvar at `locator` in a fresh decompilation of f_start, or
-// -1 when no lvar has that location any more.
 static int find_lvar_index(ea_t f_start, const lvar_locator_t& locator) {
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile_for_read(f_start, &hf);
@@ -2107,11 +1955,6 @@ LvarRenameResult rename_lvar_at_ex(ea_t func_addr, int lvar_idx, const char* new
     result.before_name = before.name;
     result.after_idx = lvar_idx;
 
-    // An empty name is "unchanged" for an lvar that has none (the result
-    // variable, typically): a ctree_lvars UPDATE of another column hands every
-    // writable setter the row's values, so it arrives here with the empty name
-    // it read. Decided against the live lvar, not the row, which the UPDATE
-    // rebuilt from its new values. Emptying a real name stays invalid.
     const std::string requested = new_name ? new_name : "";
     if (requested == before.name) {
         result.success = true;
@@ -2132,7 +1975,7 @@ LvarRenameResult rename_lvar_at_ex(ea_t func_addr, int lvar_idx, const char* new
         result.reason = "function_not_found";
         return result;
     }
-    func_addr = f_start;  // user data is keyed by the entry address
+    func_addr = f_start;
 
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile_for_read(f_start, &hf);
@@ -2165,10 +2008,6 @@ LvarRenameResult rename_lvar_at_ex(ea_t func_addr, int lvar_idx, const char* new
 
     invalidate_decompiler_cache(func_addr);
 
-    // Read the result back by the lvar's locator, not its index: Hex-Rays may
-    // re-order lvars after a rename (IDA 9.2 lists two register arguments as
-    // a2, a1 and swaps them once one is renamed), so the old index can name
-    // another variable and a rename that applied looked refused.
     const lvar_locator_t locator = lsi.ll;
     const int after_idx = find_lvar_index(f_start, locator);
     LvarInfo after{};
@@ -2305,7 +2144,7 @@ LabelRenameResult rename_label_ex(ea_t func_addr, int label_num, const char* new
         result.reason = "function_not_found";
         return result;
     }
-    func_addr = f_start;  // user data is keyed by the entry address
+    func_addr = f_start;
 
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile_for_read(f_start, &hf);
@@ -2388,7 +2227,7 @@ bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
         xsql::set_vtab_error("cannot set lvar type: function not found (" + ctx + ")");
         return false;
     }
-    func_addr = f_start;  // user data is keyed by the entry address
+    func_addr = f_start;
 
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile_for_read(f_start, &hf);
@@ -2405,19 +2244,10 @@ bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
 
     lvar_t& lv = (*lvars)[lvar_idx];
 
-    // Idempotent: if the current type display string matches the request,
-    // skip the mutation.  This avoids spurious failures when the vtab
-    // framework replays unchanged column values during a different-column
-    // UPDATE (no_shared_cache tables fire ALL writable setters).
     qstring current_type_str;
     lv.type().print(&current_type_str);
     if (type_str && current_type_str == type_str) return true;
 
-    // Parse the requested type via the shared array-aware declarator parser so
-    // array types (e.g. WCHAR[6], _BYTE[392]) and other declarator-bearing
-    // declarations are accepted -- matching the GUI 'Y' / IDAPython parse_decl
-    // path.  The previous "%s __x;" format produced invalid C for arrays
-    // ("WCHAR[6] __x;") and rejected every array type.
     tinfo_t tif;
     std::string parse_error;
     if (!idasql::types::parse_type_declarator(type_str ? type_str : "", tif, parse_error)) {
@@ -2427,7 +2257,6 @@ bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
         return false;
     }
 
-    // Use modify_user_lvar_info to persist the type change
     const lvar_locator_t locator = lv;
     const bool is_result = lv.is_result_var();
     lvar_uservec_t saved_settings;
@@ -2436,7 +2265,7 @@ bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
     lvar_saved_info_t lsi;
     lsi.ll = locator;
     lsi.type = tif;
-    lsi.flags = 0;  // No special flags needed
+    lsi.flags = 0;
 
     if (!modify_user_lvar_info(func_addr, MLI_TYPE, lsi)) {
         xsql::set_vtab_error("cannot set lvar type: modify_user_lvar_info failed (" + ctx + ")");
@@ -2444,11 +2273,6 @@ bool set_lvar_type_at(ea_t func_addr, int lvar_idx, const char* type_str) {
     }
     invalidate_decompiler_cache(func_addr);
 
-    // Read it back. Hex-Rays can accept a type and keep the old one: measured
-    // on the result variable, whose type usually follows the function's
-    // prototype (a scalar or array type there is dropped; a pointer type may
-    // stick and rewrite the prototype). Report that instead of a change that
-    // did not happen, and put the saved settings back.
     qstring wanted;
     tif.print(&wanted);
     qstring got;
@@ -2489,7 +2313,7 @@ bool set_lvar_comment_at(ea_t func_addr, int lvar_idx, const char* comment) {
         xsql::set_vtab_error("cannot set lvar comment: function not found (" + ctx + ")");
         return false;
     }
-    func_addr = f_start;  // user data is keyed by the entry address
+    func_addr = f_start;
 
     hexrays_failure_t hf;
     cfuncptr_t cfunc = decompile_for_read(f_start, &hf);
@@ -2506,12 +2330,11 @@ bool set_lvar_comment_at(ea_t func_addr, int lvar_idx, const char* comment) {
 
     lvar_t& lv = (*lvars)[lvar_idx];
 
-    // Idempotent: skip if current comment matches the request.
     const std::string requested_cmt = comment ? comment : "";
     if (std::string(lv.cmt.c_str()) == requested_cmt) return true;
 
     lvar_saved_info_t lsi;
-    lsi.ll = lv;  // Copy lvar_locator_t
+    lsi.ll = lv;
     lsi.cmt = requested_cmt.c_str();
     lsi.flags = 0;
 
@@ -2524,22 +2347,15 @@ bool set_lvar_comment_at(ea_t func_addr, int lvar_idx, const char* comment) {
     return ok;
 }
 
-// ============================================================================
-// Table Definitions
-// ============================================================================
-
 CachedTableDef<PseudocodeLine> define_pseudocode() {
     return cached_table<PseudocodeLine>("pseudocode")
         .no_shared_cache()
-        // .rowid() only (no row_lookup): UPDATE keeps rebuilding the row from
-        // its column values, and every path now agrees on the rowid.
         .rowid([](const PseudocodeLine& r) -> int64_t { return pseudocode_rowid(r); })
         .estimate_rows([]() -> size_t { return get_func_qty() * 20; })
         .cache_builder([](std::vector<PseudocodeLine>& cache) {
             collect_all_pseudocode(cache);
         })
         .row_populator([](PseudocodeLine& row, int argc, xsql::FunctionArg* argv) {
-            // argv[2]=func_addr, argv[3]=line_num, argv[4]=line, argv[5]=ea, argv[6]=comment, argv[7]=comment_placement
             if (argc > 2) row.func_addr = static_cast<ea_t>(argv[2].as_int64());
             if (argc > 3) row.line_num = argv[3].as_int();
             if (argc > 5) row.ea = argv[5].is_null() ? BADADDR : static_cast<ea_t>(argv[5].as_int64());
@@ -2551,15 +2367,10 @@ CachedTableDef<PseudocodeLine> define_pseudocode() {
         .column_int64("func_addr", [](const PseudocodeLine& r) -> int64_t { return r.func_addr; })
         .column_int("line_num", [](const PseudocodeLine& r) -> int { return r.line_num; })
         .column_text("line", [](const PseudocodeLine& r) -> std::string { return r.text; })
-        // NULL for a line with no address (signature, blank, comment-only): 0
-        // was a key the addr pushdown could not find.
         .column("addr", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const PseudocodeLine& r) {
             if (r.ea != BADADDR) ctx.result_int64(static_cast<int64_t>(r.ea));
             else ctx.result_null();
         })
-        // comment reads back NULL when empty, matching the pseudocode iterators
-        // (PseudocodeInFuncIterator/AtEa/LineNum col 4 emit NULL for an empty
-        // comment). Nullable RW keeps the existing write path.
         .column_text_nullable_rw("comment",
             [](const PseudocodeLine& r) -> std::optional<std::string> {
                 if (r.comment.empty()) return std::nullopt;
@@ -2572,9 +2383,6 @@ CachedTableDef<PseudocodeLine> define_pseudocode() {
                 }
                 const bool is_clear = (text == nullptr || text[0] == '\0');
                 if (row.ea == BADADDR || row.ea == 0) {
-                    // Non-addressable lines (signature/blank/comment-only) cannot hold
-                    // user comments in Hex-Rays. Allow clear/no-op updates so bulk
-                    // cleanup queries do not fail the full statement.
                     if (is_clear) {
                         row.comment.clear();
                         return true;
@@ -2626,7 +2434,7 @@ CachedTableDef<PseudocodeLine> define_pseudocode() {
                 if (val.is_null()) return false;
                 const char* name = val.as_c_str();
                 row.comment_placement = name_to_itp(name);
-                return true;  // just sets the field, actual comment write happens in comment setter
+                return true;
             })
         .filter_eq("func_addr", [](int64_t func_addr) -> std::unique_ptr<xsql::RowIterator> {
             return std::make_unique<PseudocodeInFuncIterator>(static_cast<ea_t>(func_addr));
@@ -2664,9 +2472,6 @@ CachedTableDef<OrphanCommentInfo> define_pseudocode_orphan_comments() {
             }
         })
         .column_int64("func_addr", [](const OrphanCommentInfo& row) -> int64_t { return row.func_addr; })
-        // func_name/addr read back NULL under the SAME conditions the orphan
-        // iterators use (empty name / ea == BADADDR), so full-scan and
-        // func_addr/addr pushdown agree.
         .column_text_nullable("func_name", [](const OrphanCommentInfo& row) -> std::optional<std::string> {
             if (row.func_name.empty()) return std::nullopt;
             return row.func_name;
@@ -2744,7 +2549,6 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
             collect_all_lvars(rows);
         })
         .row_populator([](LvarInfo& row, int argc, xsql::FunctionArg* argv) {
-            // argv[2]=func_addr, argv[3]=idx, argv[4]=name, argv[5]=type, argv[6]=comment, ...
             if (argc > 2) row.func_addr = static_cast<ea_t>(argv[2].as_int64());
             if (argc > 3) row.idx = argv[3].as_int();
             if (argc > 4 && !argv[4].is_null()) {
@@ -2767,12 +2571,9 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
                 return row.name;
             },
             [](LvarInfo& row, const char* new_name) -> bool {
-                // rename_lvar_at_ex handles unchanged names internally
                 auto r = rename_lvar_at_ex(row.func_addr, row.idx, new_name);
                 if (r.success && (r.applied || r.reason == "unchanged")) {
                     row.name = new_name ? new_name : "";
-                    // The type and comment setters that follow in this UPDATE
-                    // must address the same variable after a re-order.
                     if (r.after_idx >= 0) row.idx = r.after_idx;
                     return true;
                 }
@@ -2787,7 +2588,6 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
                 return row.type;
             },
             [](LvarInfo& row, const char* new_type) -> bool {
-                // set_lvar_type_at handles unchanged types internally
                 bool ok = set_lvar_type_at(row.func_addr, row.idx, new_type);
                 if (ok) row.type = new_type ? new_type : "";
                 return ok;
@@ -2797,7 +2597,6 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
                 return row.comment;
             },
             [](LvarInfo& row, const char* new_comment) -> bool {
-                // set_lvar_comment_at handles unchanged comments internally
                 bool ok = set_lvar_comment_at(row.func_addr, row.idx, new_comment);
                 if (ok) row.comment = new_comment ? new_comment : "";
                 return ok;
@@ -2807,10 +2606,6 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
         .column_int("is_result", [](const LvarInfo& row) -> int { return row.is_result ? 1 : 0; })
         .column_int("is_stk_var", [](const LvarInfo& row) -> int { return row.is_stk_var ? 1 : 0; })
         .column_int("is_reg_var", [](const LvarInfo& row) -> int { return row.is_reg_var ? 1 : 0; })
-        // stkoff/mreg emit NULL under the SAME condition LvarsInFuncIterator uses
-        // (!is_stk_var / !is_reg_var), so full-scan and func_addr-pushdown agree.
-        // stkoff is 64-bit (sval_t) so it uses the generic column() form (there is
-        // no column_int64_nullable); mreg is 32-bit and uses column_int_nullable.
         .column("stkoff", xsql::ColumnType::Integer,
             [](xsql::FunctionContext& ctx, const LvarInfo& row) {
                 row.is_stk_var ? ctx.result_int64(row.stkoff) : ctx.result_null();
@@ -2828,12 +2623,6 @@ CachedTableDef<LvarInfo> define_ctree_lvars() {
 CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
     return cached_table<CtreeLabelInfo>("ctree_labels")
         .no_shared_cache()
-        // Globally-stable rowid = pack_ctree_label_rowid(func_addr, label_num).
-        // The full-scan cursor, the func_addr pushdown iterator, and row_lookup
-        // all compute the same value from (function index, label number), so a
-        // rowid-addressed UPDATE/DELETE resolves the correct label -- no
-        // update_from_column_values() workaround needed. row_lookup decompiles
-        // only the one target function (cheap), preserving the pushdown.
         .rowid([](const CtreeLabelInfo& row) -> int64_t {
             return pack_ctree_label_rowid(row.func_addr, row.label_num);
         })
@@ -2843,10 +2632,6 @@ CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
         })
         .row_lookup([](CtreeLabelInfo& row, int64_t rowid) -> bool {
             if (rowid < 0) return false;
-            // The high component is the function index, narrowed to int. Reject a
-            // rowid whose high part exceeds INT_MAX BEFORE casting, so an
-            // out-of-range/crafted rowid (e.g. real_rowid + (1<<56)) cannot wrap
-            // onto a real function index and alias a real label.
             const int64_t hi = rowid >> kCtreeLabelBits;
             if (hi > static_cast<int64_t>(INT_MAX)) return false;
             const int fnum = static_cast<int>(hi);
@@ -2864,8 +2649,6 @@ CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
             return false;
         })
         .row_populator([](CtreeLabelInfo& row, int argc, xsql::FunctionArg* argv) {
-            // argv[2]=func_addr, argv[3]=label_num, argv[4]=name, argv[5]=item_id,
-            // argv[6]=item_ea, argv[7]=is_user_defined
             if (argc > 2) row.func_addr = static_cast<ea_t>(argv[2].as_int64());
             if (argc > 3) row.label_num = argv[3].as_int();
             if (argc > 4 && !argv[4].is_null()) {
@@ -2915,25 +2698,14 @@ CachedTableDef<CtreeLabelInfo> define_ctree_labels() {
         .build();
 }
 
-// ---- ctree -----------------------------------------------------------------
-// Native Hex-Rays ctree AST surface. Full scans decompile one function at a
-// time; func_addr equality uses the per-function iterator.
 GeneratorTableDef<CtreeItem> define_ctree() {
     return generator_table<CtreeItem>("ctree")
-        // Cheap estimate for query planning (doesn't decompile)
         .estimate_rows([]() -> size_t {
-            // Heuristic: ~50 AST items per function
             return get_func_qty() * 50;
         })
-        // Full scan generator (decompiles one function at a time)
         .generator([]() -> std::unique_ptr<xsql::Generator<CtreeItem>> {
             return std::make_unique<CtreeGenerator>();
         })
-        // Nullable columns below emit NULL under the EXACT condition
-        // CtreeInFuncIterator::column() uses, so a full scan and a
-        // WHERE func_addr=... pushdown return identical values (both NULL or
-        // both the same value). The generator builder has no nullable helpers,
-        // so these use the generic column(name, type, getter) form.
         .column_int64("func_addr", [](const CtreeItem& r) -> int64_t { return r.func_addr; })
         .column_int("item_id", [](const CtreeItem& r) -> int { return r.item_id; })
         .column_int("is_expr", [](const CtreeItem& r) -> int { return r.is_expr ? 1 : 0; })
@@ -2989,7 +2761,7 @@ GeneratorTableDef<CtreeItem> define_ctree() {
             !r.helper_name.empty() ? ctx.result_text(r.helper_name.c_str()) : ctx.result_null();
         })
         .column("member_offset", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
-            (r.op == cot_memref || r.op == cot_memptr) ? ctx.result_int(r.member_offset) : ctx.result_null();
+            (r.op == cot_memref || r.op == cot_memptr) ? ctx.result_int64(static_cast<int64_t>(r.member_offset)) : ctx.result_null();
         })
         .column("var_name", xsql::ColumnType::Text, [](xsql::FunctionContext& ctx, const CtreeItem& r) {
             !r.var_name.empty() ? ctx.result_text(r.var_name.c_str()) : ctx.result_null();
@@ -3020,20 +2792,12 @@ GeneratorTableDef<CtreeItem> define_ctree() {
 
 GeneratorTableDef<CallArgInfo> define_ctree_call_args() {
     return generator_table<CallArgInfo>("ctree_call_args")
-        // Cheap estimate for query planning
         .estimate_rows([]() -> size_t {
-            // Heuristic: ~20 call args per function
             return get_func_qty() * 20;
         })
-        // Full scan generator (decompiles one function at a time)
         .generator([]() -> std::unique_ptr<xsql::Generator<CallArgInfo>> {
             return std::make_unique<CallArgsGenerator>();
         })
-        // Nullable columns below emit NULL under the EXACT condition
-        // CallArgsInFuncIterator::column() uses, so a full scan and a
-        // WHERE func_addr=... pushdown return identical values. The generator
-        // builder has no nullable helpers, so these use the generic
-        // column(name, type, getter) form.
         .column_int64("func_addr", [](const CallArgInfo& r) -> int64_t { return r.func_addr; })
         .column_int("call_item_id", [](const CallArgInfo& r) -> int { return r.call_item_id; })
         .column("call_addr", xsql::ColumnType::Integer, [](xsql::FunctionContext& ctx, const CallArgInfo& r) {
@@ -3079,10 +2843,6 @@ GeneratorTableDef<CallArgInfo> define_ctree_call_args() {
         }, 100.0, 100.0)
         .build();
 }
-
-// ============================================================================
-// Views Registration
-// ============================================================================
 
 bool register_ctree_views(xsql::Database& db) {
 
@@ -3277,7 +3037,6 @@ bool register_ctree_views(xsql::Database& db) {
     )";
     db.exec(v_call_chains);
 
-    // Return statements with return value details
     const char* v_returns = R"(
         CREATE VIEW IF NOT EXISTS ctree_v_returns AS
         SELECT
@@ -3306,13 +3065,8 @@ bool register_ctree_views(xsql::Database& db) {
     )";
     db.exec(v_returns);
 
-
     return true;
 }
-
-// ============================================================================
-// Registry
-// ============================================================================
 
 DecompilerRegistry::DecompilerRegistry()
     : pseudocode(define_pseudocode())
@@ -3328,14 +3082,10 @@ DecompilerRegistry::DecompilerRegistry()
 {}
 
 void DecompilerRegistry::register_all(xsql::Database& db) {
-    // Initialize Hex-Rays decompiler ONCE at startup
-    // If unavailable, skip registering decompiler tables entirely
     if (!init_hexrays()) {
-        // Hex-Rays not available - don't register decompiler tables
         return;
     }
 
-    // Cached table (query-scoped cache, freed when no cursors reference it)
     db.register_cached_table("pseudocode", &pseudocode);
     db.create_table("pseudocode", "pseudocode");
 
@@ -3354,7 +3104,6 @@ void DecompilerRegistry::register_all(xsql::Database& db) {
     db.register_cached_table("decompiler_splits", &decompiler_splits);
     db.create_table("decompiler_splits", "decompiler_splits");
 
-    // Generator tables (lazy full scans, stop work early with LIMIT)
     db.register_generator_table("ctree", &ctree);
     db.create_table("ctree", "ctree");
 
@@ -3367,9 +3116,9 @@ void DecompilerRegistry::register_all(xsql::Database& db) {
     db.register_generator_table("microcode_operands", &microcode_operands);
     db.create_table("microcode_operands", "microcode_operands");
 
-    register_ctree_views(db);       // ctree/pseudocode views (this TU)
-    register_microcode_views(db);   // ir_ops family over microcode (decompiler_mc.cpp)
+    register_ctree_views(db);
+    register_microcode_views(db);
 }
 
-} // namespace decompiler
-} // namespace idasql
+}
+}
